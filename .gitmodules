@@ -1,0 +1,6 @@
+[submodule "submodules/ssdeep"]
+	path = submodules/ssdeep
+	url = https://github.com/ssdeep-project/ssdeep
+[submodule "submodules/tlsh"]
+	path = submodules/tlsh
+	url = https://github.com/trendmicro/tlsh

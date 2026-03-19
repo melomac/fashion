@@ -1,0 +1,29 @@
+// Architectures
+ONLY_ACTIVE_ARCH = NO
+
+// Build Options
+ENABLE_CODE_COVERAGE[config=Debug] = YES
+ENABLE_CODE_COVERAGE[config=Release] = NO
+
+// Deployment
+DEPLOYMENT_LOCATION = YES
+DEPLOYMENT_POSTPROCESSING[config=Debug] = NO
+DEPLOYMENT_POSTPROCESSING[config=Release] = YES
+DSTROOT = /tmp/$(PROJECT_NAME).dst
+MACOSX_DEPLOYMENT_TARGET = 14.0
+
+// Linking - General
+DEAD_CODE_STRIPPING[config=Debug] = NO
+DEAD_CODE_STRIPPING[config=Release] = YES
+
+// Signing
+CODE_SIGN_ENTITLEMENTS =
+CODE_SIGN_IDENTITY =
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS[config=Debug] = YES
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS[config=Release] = NO
+ENABLE_HARDENED_RUNTIME[config=Debug] = NO
+ENABLE_HARDENED_RUNTIME[config=Release] = YES
+OTHER_CODE_SIGN_FLAGS = $(inherited) --identifier $(PRODUCT_NAME) --options runtime --timestamp
+
+// SDKSettings.plist
+ENTITLEMENTS_REQUIRED = NO

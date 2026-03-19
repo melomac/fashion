@@ -1,0 +1,7 @@
+--indent 4
+--ifdef outdent
+--hexliteralcase lowercase
+--redundanttype explicit
+--self insert
+--disable docComments
+--disable opaqueGenericParameters
