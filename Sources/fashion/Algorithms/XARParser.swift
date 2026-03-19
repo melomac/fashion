@@ -104,6 +104,8 @@ enum XARParser {
             return SSDeepBridge.hash(data: tocData)
         case .tlsh:
             return TLSHBridge.hash(data: tocData)
+        case .cdhash:
+            return nil
         }
     }
 

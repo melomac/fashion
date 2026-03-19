@@ -13,6 +13,8 @@ enum Matching {
             self.checkSSDeep(digest: digest, targets: targets, threshold: threshold)
         case .tlsh:
             self.checkTLSH(digest: digest, targets: targets, threshold: threshold)
+        case .cdhash:
+            self.checkPrefix(digest: digest, targets: targets)
         default:
             self.checkExact(digest: digest, targets: targets)
         }
@@ -25,6 +27,19 @@ enum Matching {
 
         for target in targets {
             if lower == target.lowercased() {
+                return MatchResult(matched: true, score: nil)
+            }
+        }
+
+        return nil
+    }
+
+    private static func checkPrefix(digest: String, targets: [String]) -> MatchResult? {
+        let lower = digest.lowercased()
+
+        for target in targets {
+            let t = target.lowercased()
+            if lower == t || lower.hasPrefix(t) || t.hasPrefix(lower) {
                 return MatchResult(matched: true, score: nil)
             }
         }

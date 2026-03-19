@@ -10,6 +10,7 @@ enum Algorithm: String, CaseIterable {
     case git256
     case ssdeep
     case tlsh
+    case cdhash
 
     var isFuzzy: Bool {
         [.ssdeep, .tlsh].contains(self)

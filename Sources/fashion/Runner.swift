@@ -170,6 +170,8 @@ struct Runner {
             self.processSymhash(item)
         } else if self.xarToc {
             self.processXarToc(item)
+        } else if self.algorithm == .cdhash {
+            self.processCDHash(item)
         } else if self.slices {
             self.processSlices(item)
         } else {
@@ -192,6 +194,8 @@ struct Runner {
                 SSDeepBridge.hash(path: item.path)
             case .tlsh:
                 try TLSHBridge.hash(path: item.path)
+            case .cdhash:
+                CDHash.hash(path: item.path).first?.hash
             }
 
             guard let d = digest else {
@@ -201,6 +205,26 @@ struct Runner {
         } catch {
             self.logger.info("Error processing \(item.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return []
+        }
+    }
+
+    private func processCDHash(_ item: WorkItem) -> [DigestResult] {
+        let sliceResults = CDHash.hash(path: item.path)
+        guard !sliceResults.isEmpty else { return [] }
+
+        // Quiet match mode: return first matching slice and move on
+        if self.quiet, !self.matchDigests.isEmpty {
+            for sr in sliceResults {
+                if Matching.check(digest: sr.hash, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
+                    return [DigestResult(digest: sr.hash, path: item.path, filePath: item.path)]
+                }
+            }
+            return []
+        }
+
+        return sliceResults.map { sr in
+            let displayPath = sr.arch != nil ? "\(item.path) (\(sr.arch!))" : item.path
+            return DigestResult(digest: sr.hash, path: displayPath, filePath: item.path)
         }
     }
 
@@ -231,6 +255,8 @@ struct Runner {
                         SSDeepBridge.hash(data: sliceData)
                     case .tlsh:
                         TLSHBridge.hash(data: sliceData)
+                    case .cdhash:
+                        CDHash.hash(data: sliceData)
                     }
 
                     if let d = digest {

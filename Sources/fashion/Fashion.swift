@@ -1,6 +1,8 @@
 import ArgumentParser
 import Foundation
 
+let algos = Algorithm.allCases.map(\.rawValue)
+
 @main
 struct Fashion: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -14,7 +16,7 @@ struct Fashion: AsyncParsableCommand {
 
     // MARK: - Options
 
-    @Option(name: .shortAndLong, help: "Hash algorithm: \(Algorithm.allCases.map(\.rawValue).joined(separator:", ")).", completion: .list(Algorithm.allCases.map(\.rawValue)))
+    @Option(name: .shortAndLong, help: "Hash algorithm: \(algos.joined(separator: ", ")).", completion: .list(algos))
     var algo: String?
 
     @Option(name: .shortAndLong, help: "Number of concurrent workers (0 = all CPUs).")

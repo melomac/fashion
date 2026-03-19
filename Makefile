@@ -33,8 +33,8 @@ install: release
 # Xcode
 # ----------------------------------------------------------------------------
 
-CONFIG_NAME ?= $(PRODUCT_NAME).xcconfig
-XCODE_FLAGS = -scheme $(PRODUCT_NAME) -xcconfig $(CONFIG_NAME)
+CONFIG_PATH ?= $(PRODUCT_NAME).xcconfig
+XCODE_FLAGS = -scheme $(PRODUCT_NAME) -xcconfig $(CONFIG_PATH)
 BUILD_FLAGS = -target $(PRODUCT_NAME) -destination generic/platform=macOS
 TEST_FLAGS = -target $(PRODUCT_NAME)Tests -destination platform=macOS
 
