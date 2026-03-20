@@ -5,7 +5,6 @@ final class AlgorithmTests: XCTestCase {
     func testParseStandardAlgorithms() {
         XCTAssertEqual(Algorithm.parse("md5"), .md5)
         XCTAssertEqual(Algorithm.parse("sha1"), .sha1)
-        XCTAssertEqual(Algorithm.parse("sha224"), .sha224)
         XCTAssertEqual(Algorithm.parse("sha256"), .sha256)
         XCTAssertEqual(Algorithm.parse("sha384"), .sha384)
         XCTAssertEqual(Algorithm.parse("sha512"), .sha512)

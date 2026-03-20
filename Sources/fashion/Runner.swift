@@ -184,7 +184,7 @@ struct Runner {
     private func processRegular(_ item: WorkItem) -> [DigestResult] {
         do {
             let digest: String? = switch self.algorithm {
-            case .md5, .sha1, .sha224, .sha256, .sha384, .sha512:
+            case .md5, .sha1, .sha256, .sha384, .sha512:
                 try CryptoDigest.hash(path: item.path, algorithm: self.algorithm)
             case .git:
                 try GitBlobDigest.hash(path: item.path, useSHA256: false)
@@ -245,7 +245,7 @@ struct Runner {
                     let displayPath = "\(item.path) (\(archName))"
 
                     let digest: String? = switch self.algorithm {
-                    case .md5, .sha1, .sha224, .sha256, .sha384, .sha512:
+                    case .md5, .sha1, .sha256, .sha384, .sha512:
                         try CryptoDigest.hash(data: sliceData, algorithm: self.algorithm)
                     case .git:
                         try GitBlobDigest.hashData(sliceData, useSHA256: false)

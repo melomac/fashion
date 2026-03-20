@@ -32,7 +32,7 @@ final class MatchingTests: XCTestCase {
     }
 
     func testExactMatchAllAlgorithmsExceptFuzzy() {
-        for algo: Algorithm in [.md5, .sha1, .sha224, .sha256, .sha384, .sha512] {
+        for algo: Algorithm in [.md5, .sha1, .sha256, .sha384, .sha512] {
             let result = Matching.check(digest: "abc", against: ["abc"], algorithm: algo, threshold: 0)
             XCTAssertNotNil(result, "Expected match for \(algo)")
         }

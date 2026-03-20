@@ -116,17 +116,11 @@ let package = Package(
                 .define("CHECKSUM_1B"),
             ],
         ),
-        .target(
-            name: "CMD5Wrapper",
-            path: "Sources/CMD5Wrapper",
-            publicHeadersPath: "include",
-        ),
         .executableTarget(
             name: "fashion",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 "CSSDeep",
-                "CMD5Wrapper",
                 "CTLSHWrapper",
             ],
             path: "Sources/fashion",

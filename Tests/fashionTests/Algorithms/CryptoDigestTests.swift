@@ -50,18 +50,6 @@ final class CryptoDigestTests: XCTestCase {
         XCTAssertEqual(result, "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e")
     }
 
-    func testSHA224Empty() throws {
-        let data = Data()
-        let result = try CryptoDigest.hash(data: data, algorithm: .sha224)
-        XCTAssertEqual(result, "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f")
-    }
-
-    func testSHA224Hello() throws {
-        let data = Data("hello".utf8)
-        let result = try CryptoDigest.hash(data: data, algorithm: .sha224)
-        XCTAssertEqual(result, "ea09ae9cc6768c50fcee903ed054556e5bfc8347907f12598aa24193")
-    }
-
     // MARK: - Streaming (file path)
 
     private func tmpFile(_ content: Data) throws -> URL {
@@ -84,14 +72,6 @@ final class CryptoDigestTests: XCTestCase {
 
         let result = try CryptoDigest.hash(path: url.path(), algorithm: .sha1)
         XCTAssertEqual(result, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d")
-    }
-
-    func testFileHashSHA224() throws {
-        let url = try tmpFile(Data("hello".utf8))
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let result = try CryptoDigest.hash(path: url.path(), algorithm: .sha224)
-        XCTAssertEqual(result, "ea09ae9cc6768c50fcee903ed054556e5bfc8347907f12598aa24193")
     }
 
     func testFileHashSHA256() throws {
@@ -172,7 +152,7 @@ final class CryptoDigestTests: XCTestCase {
         let url = try tmpFile(data)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        for algo: Algorithm in [.md5, .sha1, .sha224, .sha256, .sha384, .sha512] {
+        for algo: Algorithm in [.md5, .sha1, .sha256, .sha384, .sha512] {
             let streaming = try CryptoDigest.hash(path: url.path(), algorithm: algo)
             let oneshot = try CryptoDigest.hash(data: data, algorithm: algo)
             XCTAssertEqual(streaming, oneshot, "Mismatch for \(algo)")

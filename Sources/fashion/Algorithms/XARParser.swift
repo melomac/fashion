@@ -94,7 +94,7 @@ enum XARParser {
 
         // Hash the TOC data
         switch algorithm {
-        case .md5, .sha1, .sha224, .sha256, .sha384, .sha512:
+        case .md5, .sha1, .sha256, .sha384, .sha512:
             return try CryptoDigest.hash(data: tocData, algorithm: algorithm)
         case .git:
             return try GitBlobDigest.hashData(tocData, useSHA256: false)

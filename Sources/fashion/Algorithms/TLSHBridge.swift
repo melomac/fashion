@@ -1,5 +1,6 @@
 import CTLSHWrapper
 import Foundation
+import System
 
 /**
  Bridge to libtlsh for fuzzy hashing (Trend Micro Locality Sensitive Hash).
@@ -60,38 +61,48 @@ enum TLSHBridge {
      Returns nil if file is too small or hashing fails.
      */
     static func hash(path: String) throws -> String? {
-        let fh = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
-        defer { try? fh.close() }
+        let fd = try FileDescriptor.open(path, .readOnly)
+        defer {
+            try? fd.close()
+        }
+
+        _ = fcntl(fd.rawValue, F_NOCACHE, 1)
 
         let t = tlsh_new()
-        defer { tlsh_free(t) }
+        defer {
+            tlsh_free(t)
+        }
 
-        let chunkSize = 1024 * 1024 // 1 MiB
+        let chunkSize = 1 << 20 // 1 MiB
+        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: chunkSize, alignment: 1)
+        defer {
+            buffer.deallocate()
+        }
+
         var totalSize: UInt64 = 0
 
         while true {
             if self.isT1Build, totalSize >= self.maximumDataSize {
                 break
             }
-            let done = try autoreleasepool {
-                guard let chunk = try fh.read(upToCount: chunkSize), !chunk.isEmpty else {
-                    return true
-                }
-                var usable: Int = chunk.count
-                if self.isT1Build {
-                    let remaining: UInt64 = self.maximumDataSize - totalSize
-                    usable = min(usable, Int(clamping: remaining))
-                }
-                chunk.withUnsafeBytes { ptr in
-                    guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                        return
-                    }
-                    tlsh_update(t, base, UInt32(usable))
-                }
-                totalSize += UInt64(usable)
-                return usable < chunk.count
+
+            let n = try fd.read(into: buffer)
+            if n == 0 {
+                break
             }
-            if done { break }
+
+            var usable = n
+            if self.isT1Build {
+                let remaining = self.maximumDataSize - totalSize
+                usable = min(usable, Int(clamping: remaining))
+            }
+
+            tlsh_update(t, buffer.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt32(usable))
+            totalSize += UInt64(usable)
+
+            if usable < n {
+                break
+            }
         }
 
         guard totalSize >= self.minimumDataSize else {
@@ -137,7 +148,7 @@ enum TLSHBridge {
             guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return
             }
-            let chunkSize = 1024 * 1024
+            let chunkSize = 1 << 20 // 1MB
             var offset = 0
             while offset < usableCount {
                 let len = min(chunkSize, usableCount - offset)
