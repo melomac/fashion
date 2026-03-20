@@ -15,6 +15,7 @@ const char* tlsh_get_hash(tlsh_t t, int showvers);
 int tlsh_total_diff(tlsh_t t1, tlsh_t t2, int len_diff);
 int tlsh_from_str(tlsh_t t, const char* str);
 void tlsh_reset(tlsh_t t);
+const char* tlsh_version(void);
 
 #ifdef __cplusplus
 }

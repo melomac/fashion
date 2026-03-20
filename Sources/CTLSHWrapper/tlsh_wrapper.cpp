@@ -35,4 +35,8 @@ void tlsh_reset(tlsh_t t) {
     static_cast<Tlsh*>(t)->reset();
 }
 
+const char* tlsh_version(void) {
+    return Tlsh::version();
+}
+
 }
