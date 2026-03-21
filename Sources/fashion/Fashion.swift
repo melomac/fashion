@@ -123,7 +123,7 @@ struct SymbolOptions: ParsableArguments {
 }
 
 struct XAROptions: ParsableArguments {
-    @Flag(name: .customLong("xar-toc"), help: "Hash XAR table of contents.")
+    @Flag(help: "Hash XAR table of contents.")
     var xarToc = false
 
     @Flag(help: "Decompress XAR TOC before hashing.")

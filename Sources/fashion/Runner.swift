@@ -167,7 +167,7 @@ struct Runner {
 
     private func processItem(_ item: WorkItem) throws -> Batch {
         let results: [DigestResult] = if self.symhash {
-            self.processSymhash(item)
+            self.processSymHash(item)
         } else if self.xarToc {
             self.processXarToc(item)
         } else if self.algorithm == .cdhash {
@@ -271,7 +271,7 @@ struct Runner {
         return results
     }
 
-    private func processSymhash(_ item: WorkItem) -> [DigestResult] {
+    private func processSymHash(_ item: WorkItem) -> [DigestResult] {
         do {
             let results = try SymHash.compute(path: item.path, algorithm: self.algorithm, separator: self.separator, sortSymbols: self.sortSymbols)
 
