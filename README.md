@@ -2,12 +2,13 @@
 
 Swift command-line interface to traverse a file hierarchy and compute or match popular hash digests. The project natively supports:
 
-* [CryptoKit](https://developer.apple.com/documentation/cryptokit/) hash functions: [SHA-2][] (SHA256 by default), insecure [SHA-1][] and [MD5][]
+* [CryptoKit](https://developer.apple.com/documentation/cryptokit/ "Perform cryptographic operations securely and efficiently.") hash functions: [SHA-2][] (SHA256 by default), insecure [SHA-1][] and [MD5][]
 * fuzzy hash functions: [SSDeep][] and [TLSH][] as submodules with Swift C bridging
 * searching for multiple digests with any algo and a similarity / distance score for fuzzy hash
-* [git-hash][]-object
+* [git-hash-object][]
 * [symhash][] with any algo, separator and optional sort (Mach-O binaries)
-* eXtensible ARchiver ([XAR][] archives e.g. installation packages on macOS) table of contents checksum with any algo and optional decompress (zlib)
+* [XAR][] archives (macOS packages) table of contents checksum with any algo and optional decompress (zlib)
+* [CDHash][] (signed Mach-O binaries)
 * multithreading
 
 With optimizations, `fashion` is very fast yet has a minimal real memory footprint < 150MB:
@@ -26,11 +27,11 @@ Project algorithm choices are driven by interoperability with existing tools and
 [SHA-2]: https://en.wikipedia.org/wiki/SHA-2 "Wikipedia: SHA-2"
 [SHA-1]: https://en.wikipedia.org/wiki/SHA-1 "Wikipedia: SHA-1"
 [MD5]: https://en.wikipedia.org/wiki/MD5 "Wikipedia: MD5"
-[SSDeep]: https://github.com/ssdeep-project/ssdeep "Github: ssdeep"
-[TLSH]: https://github.com/trendmicro/tlsh "Github: tlsh"
-[Git-Hash]: https://git-scm.com/docs/git-hash-object "Git: hash-object"
+[SSDeep]: https://github.com/ssdeep-project/ssdeep "GitHub: ssdeep-project/ssdeep"
+[TLSH]: https://github.com/trendmicro/tlsh "GitHub: trendmicro/tlsh"
+[Git-Hash-object]: https://git-scm.com/docs/git-hash-object "Git: hash-object"
 [SymHash]: https://www.anomali.com/blog/symhash "SymHash: An ImpHash for Mach-O"
-[XAR]: https://github.com/apple-oss-distributions/xar/ "Github: xar-501"
+[XAR]: https://github.com/apple-oss-distributions/xar/ "GitHub: apple-oss-distributions/xar"
 [CDHash]: https://developer.apple.com/documentation/technotes/tn3126-inside-code-signing-hashes "TN3126: Inside Code Signing: Hashes"
 
 #### Insecure MD5 and SHA1
@@ -45,16 +46,18 @@ Trend Micro library counts the total data length using an `unsigned int data_len
 
 #### Git hash
 
-The `git` and `git256` algo compute the hash of a [Git](https://git-scm.com/) blob object. With the hash, you can look up the object across all branches and commits of a repository.
+The `git` and `git256` algo compute the hash of a [Git](https://git-scm.com/) blob object. With the hash, you can look for the object across all branches and commits of a repository.
 
 ```console
-$ git log --raw --all --format='' --find-object=$(fashion --algo git --quiet .swiftformat)
+$ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quiet .swiftformat)
+7f1a770 initial public release
+
 :000000 100644 0000000 842281a A        .swiftformat
 ```
 
 #### CDHash
 
-Compute the Code Directory hash of signed Mach-O binaries, according to the strongest supported hash. While we print the full hash, we can match both CDFullHash and truncated CDHash.
+Compute the Code Directory hash of signed Mach-O binaries, according to the strongest supported hash (usually SHA256). While we print the full hash, we can match both CDHashFull and truncated CDHash.
 
 ### Quiet flag
 
