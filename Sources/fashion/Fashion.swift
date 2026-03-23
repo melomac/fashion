@@ -1,7 +1,24 @@
 import ArgumentParser
 import Foundation
 
-let algos = Algorithm.allCases.map(\.rawValue)
+extension Algorithm: ExpressibleByArgument {
+    var defaultValueDescription: String {
+        switch self {
+        case .md5: return "MD5"
+        case .sha1: return "SHA1"
+        case .sha256: return "SHA256"
+        case .sha384: return "SHA384"
+        case .sha512: return "SHA512"
+        case .git: return "Git blob using SHA1"
+        case .git256: return "Git blob using SHA256"
+        case .ssdeep: return "SSDeep"
+        case .tlsh: return "TLSH"
+        case .cdhash: return "CDHash"
+        }
+    }
+}
+
+// MARK: -
 
 @main
 struct Fashion: AsyncParsableCommand {
@@ -16,8 +33,8 @@ struct Fashion: AsyncParsableCommand {
 
     // MARK: - Options
 
-    @Option(name: .shortAndLong, help: "Hash algorithm: \(algos.joined(separator: ", ")).", completion: .list(algos))
-    var algo: String?
+    @Option(name: .shortAndLong, help: "Hash algorithm")
+    var algo: Algorithm?
 
     @Option(name: .shortAndLong, help: "Number of concurrent workers (0 = all CPUs).")
     var jobs: Int = 1
@@ -48,8 +65,8 @@ struct Fashion: AsyncParsableCommand {
     // MARK: - Resolved Properties
 
     var resolvedAlgorithm: Algorithm {
-        if let explicit = algo {
-            Algorithm.parse(explicit) ?? .sha256
+        if let algo {
+           algo
         } else if self.symbolOptions.symhash {
             .md5
         } else if self.xarOptions.xarToc {
