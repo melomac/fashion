@@ -3,7 +3,7 @@
 Swift command-line interface to traverse a file hierarchy and compute or match popular hash digests. The project natively supports:
 
 * [CryptoKit](https://developer.apple.com/documentation/cryptokit/ "Perform cryptographic operations securely and efficiently.") hash functions: [SHA-2][] (SHA256 by default), insecure [SHA-1][] and [MD5][]
-* fuzzy hash functions: [SSDeep][] and [TLSH][] as submodules with Swift C bridging
+* fuzzy hash functions: [ssdeep][] and [TLSH][] as submodules with Swift C bridging
 * searching for multiple digests with any algo and a similarity / distance score for fuzzy hash
 * [git-hash-object][]
 * [symhash][] with any algo, separator and optional sort (Mach-O binaries)
@@ -27,7 +27,7 @@ Project algorithm choices are driven by interoperability with existing tools and
 [SHA-2]: https://en.wikipedia.org/wiki/SHA-2 "Wikipedia: SHA-2"
 [SHA-1]: https://en.wikipedia.org/wiki/SHA-1 "Wikipedia: SHA-1"
 [MD5]: https://en.wikipedia.org/wiki/MD5 "Wikipedia: MD5"
-[SSDeep]: https://github.com/ssdeep-project/ssdeep "GitHub: ssdeep-project/ssdeep"
+[ssdeep]: https://github.com/ssdeep-project/ssdeep "GitHub: ssdeep-project/ssdeep"
 [TLSH]: https://github.com/trendmicro/tlsh "GitHub: trendmicro/tlsh"
 [Git-Hash-object]: https://git-scm.com/docs/git-hash-object "Git: hash-object"
 [SymHash]: https://www.anomali.com/blog/symhash "SymHash: An ImpHash for Mach-O"

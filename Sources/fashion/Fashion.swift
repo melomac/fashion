@@ -4,16 +4,16 @@ import Foundation
 extension Algorithm: ExpressibleByArgument {
     var defaultValueDescription: String {
         switch self {
-        case .md5: return "MD5"
-        case .sha1: return "SHA1"
-        case .sha256: return "SHA256"
-        case .sha384: return "SHA384"
-        case .sha512: return "SHA512"
-        case .git: return "Git blob using SHA1"
-        case .git256: return "Git blob using SHA256"
-        case .ssdeep: return "SSDeep"
-        case .tlsh: return "TLSH"
-        case .cdhash: return "CDHash"
+        case .md5: "MD5"
+        case .sha1: "SHA1"
+        case .sha256: "SHA256"
+        case .sha384: "SHA384"
+        case .sha512: "SHA512"
+        case .git: "Git blob using SHA1"
+        case .git256: "Git blob using SHA256"
+        case .ssdeep: "ssdeep"
+        case .tlsh: "TLSH"
+        case .cdhash: "CDHash"
         }
     }
 }
@@ -45,7 +45,7 @@ struct Fashion: AsyncParsableCommand {
     @Flag(name: .shortAndLong, help: "Quiet output.")
     var quiet = false
 
-    @Flag(help: "Hash individual Mach-O architecture slices.")
+    @Flag(help: "Hash individual Mach-O architectures.")
     var slices = false
 
     @Flag(inversion: .prefixedNo, help: "Sort file paths before processing.")
@@ -65,8 +65,8 @@ struct Fashion: AsyncParsableCommand {
     // MARK: - Resolved Properties
 
     var resolvedAlgorithm: Algorithm {
-        if let algo {
-           algo
+        if let algo = self.algo {
+            algo
         } else if self.symbolOptions.symhash {
             .md5
         } else if self.xarOptions.xarToc {
@@ -77,7 +77,10 @@ struct Fashion: AsyncParsableCommand {
     }
 
     var resolvedJobs: Int {
-        self.jobs == 0 ? ProcessInfo.processInfo.activeProcessorCount : max(1, self.jobs)
+        if self.jobs == 0 || self.jobs > ProcessInfo.processInfo.activeProcessorCount {
+            return ProcessInfo.processInfo.activeProcessorCount
+        }
+        return max(1, self.jobs)
     }
 
     var resolvedSeparator: String {
@@ -89,24 +92,21 @@ struct Fashion: AsyncParsableCommand {
     }
 
     var resolvedScore: Int {
-        if !self.matchOptions.match.isEmpty, self.matchOptions.score == 0, self.resolvedAlgorithm.isFuzzy {
-            return 40
-        }
-        return self.matchOptions.score
+        max(0, self.matchOptions.score)
     }
 
     // MARK: - Run
 
     mutating func run() async throws {
         let runner = Runner(
-            paths: paths,
-            algorithm: resolvedAlgorithm,
-            quiet: quiet,
-            slices: slices,
-            sortFiles: sort,
-            jobs: resolvedJobs,
-            follow: follow,
-            matchDigests: matchOptions.match,
+            paths: self.paths,
+            algorithm: self.resolvedAlgorithm,
+            quiet: self.quiet,
+            slices: self.slices,
+            sortFiles: self.sort,
+            jobs: self.resolvedJobs,
+            follow: self.follow,
+            matchDigests: self.matchOptions.match,
             score: self.resolvedScore,
             symhash: self.symbolOptions.symhash,
             separator: self.resolvedSeparator,
@@ -129,10 +129,10 @@ struct MatchOptions: ParsableArguments {
 }
 
 struct SymbolOptions: ParsableArguments {
-    @Flag(help: "Compute symhash (external symbol hash) for Mach-O files.")
+    @Flag(help: "Compute SymHash (external symbol hash) for Mach-O files.")
     var symhash = false
 
-    @Option(help: ArgumentHelp("Symbol separator for symhash.", valueName: "char"))
+    @Option(help: ArgumentHelp("Symbol separator.", valueName: "char"))
     var separator: String = ","
 
     @Flag(inversion: .prefixedNo, help: "Sort symbols before hashing.")
@@ -143,6 +143,6 @@ struct XAROptions: ParsableArguments {
     @Flag(help: "Hash XAR table of contents.")
     var xarToc = false
 
-    @Flag(help: "Decompress XAR TOC before hashing.")
+    @Flag(help: "Decompress table of contents before hashing.")
     var decompress = false
 }
