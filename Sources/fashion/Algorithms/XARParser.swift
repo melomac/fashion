@@ -1,6 +1,6 @@
-import Compression
 import Foundation
 import os
+import zlib
 
 /**
  Naive XAR archive parser for TOC extraction and hashing.
@@ -70,17 +70,19 @@ enum XARParser {
             return nil
         }
 
+        var tocSize = Int(header.compressedTocLength)
         let tocStart = Int(header.headerSize)
-        let tocEnd = tocStart + Int(header.compressedTocLength)
+        let tocEnd = tocStart + tocSize
         guard tocEnd <= data.count else {
             return nil
         }
 
-        let compressedToc = data[tocStart ..< tocEnd]
+        let compressed = data[tocStart ..< tocEnd]
 
         let tocData: Data
         if decompress {
-            guard let decompressed = decompressZlib(compressedToc, uncompressedSize: Int(header.uncompressedTocLength)) else {
+            tocSize = Int(header.uncompressedTocLength)
+            guard let decompressed = decompressZlib(compressed, size: tocSize) else {
                 return nil
             }
             tocData = decompressed
@@ -89,7 +91,11 @@ enum XARParser {
                 self.logger.debug("XAR TOC:\n\(xml, privacy: .public)")
             }
         } else {
-            tocData = Data(compressedToc)
+            tocData = Data(compressed)
+        }
+
+        guard tocData.count == tocSize else {
+            return nil
         }
 
         // Hash the TOC data
@@ -111,37 +117,26 @@ enum XARParser {
 
     // MARK: - Zlib Decompression
 
-    /**
-     Apple's `COMPRESSION_ZLIB` is raw deflate (RFC 1951).
-     XAR TOCs use zlib-wrapped deflate (RFC 1950): 2-byte header + deflate + 4-byte Adler-32.
-     Strip the wrapper before decompressing.
-     */
-    private static func decompressZlib(_ data: Data, uncompressedSize: Int) -> Data? {
-        guard data.count > 6 else {
-            return nil
-        }
-        let deflateData = data.dropFirst(2).dropLast(4)
+    private static func decompressZlib(_ data: Data, size: Int) -> Data? {
+        var destLen = uLong(size)
+        var dest = Data(count: size)
 
-        let sourceSize = deflateData.count
-        var dest = Data(count: uncompressedSize)
-
-        let result = deflateData.withUnsafeBytes { srcPtr -> Int in
-            dest.withUnsafeMutableBytes { destPtr -> Int in
+        let result = data.withUnsafeBytes { src in
+            dest.withUnsafeMutableBytes { dst in
                 guard
-                    let srcBase = srcPtr.baseAddress,
-                    let destBase = destPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                    let srcBase = src.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    let dstBase = dst.baseAddress?.assumingMemoryBound(to: UInt8.self)
                 else {
-                    return -1
+                    return Z_BUF_ERROR
                 }
-
-                return compression_decode_buffer(destBase, uncompressedSize, srcBase.assumingMemoryBound(to: UInt8.self), sourceSize, nil, COMPRESSION_ZLIB)
+                return uncompress(dstBase, &destLen, srcBase, uLong(data.count))
             }
         }
 
-        guard result > 0 else {
+        guard result == Z_OK else {
             return nil
         }
 
-        return dest.prefix(result)
+        return dest.prefix(Int(destLen))
     }
 }
