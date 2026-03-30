@@ -1,4 +1,4 @@
-import CommonCrypto
+import CryptoKit
 import Foundation
 import MachO
 
@@ -190,25 +190,13 @@ enum CDHash {
     private static func digestCodeDirectory(blob: Data, hashType: UInt8) -> String? {
         switch hashType {
         case self.csHashTypeSHA1:
-            var digest = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
-            blob.withUnsafeBytes { ptr in
-                _ = CC_SHA1(ptr.baseAddress, CC_LONG(ptr.count), &digest)
-            }
-            return digest.hexString
+            Insecure.SHA1.hash(data: blob).hexString
         case self.csHashTypeSHA256:
-            var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-            blob.withUnsafeBytes { ptr in
-                _ = CC_SHA256(ptr.baseAddress, CC_LONG(ptr.count), &digest)
-            }
-            return digest.hexString
+            SHA256.hash(data: blob).hexString
         case self.csHashTypeSHA384:
-            var digest = [UInt8](repeating: 0, count: Int(CC_SHA384_DIGEST_LENGTH))
-            blob.withUnsafeBytes { ptr in
-                _ = CC_SHA384(ptr.baseAddress, CC_LONG(ptr.count), &digest)
-            }
-            return digest.hexString
+            SHA384.hash(data: blob).hexString
         default:
-            return nil
+            nil
         }
     }
 }
