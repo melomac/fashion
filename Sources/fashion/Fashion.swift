@@ -25,7 +25,7 @@ struct Fashion: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fashion",
         abstract: "Compute and match file digests for threat hunting and binary analysis.",
-        version: "1.0.0",
+        version: "1.0.1",
     )
 
     @Argument(help: "Paths to scan (default: current directory).", completion: .file())
