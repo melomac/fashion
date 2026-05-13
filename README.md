@@ -18,6 +18,15 @@ With optimizations, `fashion` is very fast yet has a minimal real memory footpri
 | Mac Studio M2 Ultra | 292 apps  | 910,000 files |  1 minute   |    2 minutes     |
 | MacBook Air M4      | 231 apps  | 720,000 files | 42 seconds  | 1 minute 30 secs |
 
+## Install
+
+A signed and notarized binary is available via Homebrew 🍻
+
+```bash
+brew tap melomac/tap https://codeberg.org/melomac/homebrew-tap
+brew install fashion
+```
+
 ## Features
 
 ### Supported algorithm
