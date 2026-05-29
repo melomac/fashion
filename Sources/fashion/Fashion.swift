@@ -5,15 +5,15 @@ extension Algorithm: ExpressibleByArgument {
     var defaultValueDescription: String {
         switch self {
         case .md5: "MD5"
-        case .sha1: "SHA1"
-        case .sha256: "SHA256"
-        case .sha384: "SHA384"
-        case .sha512: "SHA512"
-        case .git: "Git blob using SHA1"
-        case .git256: "Git blob using SHA256"
-        case .ssdeep: "ssdeep"
-        case .tlsh: "TLSH"
-        case .cdhash: "CDHash"
+        case .sha1: "SHA-1"
+        case .sha256: "SHA-256"
+        case .sha384: "SHA-384"
+        case .sha512: "SHA-512"
+        case .git: "Git blob (SHA-1)"
+        case .git256: "Git blob (SHA-256)"
+        case .ssdeep: "ssdeep fuzzy hash"
+        case .tlsh: "Trend Micro Locality Sensitive Hash"
+        case .cdhash: "CodeDirectory hash"
         }
     }
 }
