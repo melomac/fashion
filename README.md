@@ -24,6 +24,7 @@ A signed and notarized binary is available via Homebrew 🍻
 
 ```bash
 brew tap melomac/tap https://codeberg.org/melomac/homebrew-tap
+brew trust melomac/tap
 brew install fashion
 ```
 
