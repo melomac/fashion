@@ -7,6 +7,7 @@ enum CDHash {
     struct SliceResult {
         let hash: String
         let arch: String?
+        let type: String?
     }
 
     /**
@@ -24,17 +25,12 @@ enum CDHash {
             var results: [SliceResult] = []
             for arch in archs {
                 let slice = MachOParser.sliceData(fileData: data, arch: arch)
-                if let h = self.computeCDHash(machOData: slice) {
-                    let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
-                    results.append(SliceResult(hash: h, arch: name))
-                }
+                let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
+                results.append(contentsOf: self.sliceResults(machOData: slice, arch: name))
             }
             return results
         case .thin:
-            if let h = self.computeCDHash(machOData: data) {
-                return [SliceResult(hash: h, arch: nil)]
-            }
-            return []
+            return self.sliceResults(machOData: data, arch: nil)
         case .notMachO:
             return []
         }
@@ -64,25 +60,66 @@ enum CDHash {
     private static let csHashTypeSHA256Truncated: UInt8 = 3
     private static let csHashTypeSHA384: UInt8 = 4
 
+    // Selection order among code directories, mirroring xnu (bsd/kern/ubc_subr.c).
+    // Index is the rank — higher is better, 0 => don't use at all.
+    private static let hashPriorities: [UInt8] = [
+        csHashTypeSHA1,
+        csHashTypeSHA256Truncated,
+        csHashTypeSHA256,
+        csHashTypeSHA384,
+    ]
+
+    private static func hashRank(_ hashType: UInt8) -> Int {
+        self.hashPriorities.firstIndex(of: hashType).map { $0 + 1 } ?? 0
+    }
+
     private struct CodeDirectoryInfo {
         let data: Data
         let hashType: UInt8
     }
 
+    /**
+     One SliceResult per code directory. The hash type is only set when a slice carries several directories.
+     */
+    private static func sliceResults(machOData: Data, arch: String?) -> [SliceResult] {
+        let candidates = self.computeCDHashes(machOData: machOData)
+        let ambiguous = candidates.count > 1
+        return candidates.map {
+            SliceResult(hash: $0.hash, arch: arch, type: ambiguous ? $0.type : nil)
+        }
+    }
+
     private static func computeCDHash(machOData: Data) -> String? {
+        self.computeCDHashes(machOData: machOData).first?.hash
+    }
+
+    /**
+     Digest every code directory of a slice, strongest first per hashPriorities — the head is the kernel-enforced cdhash.
+     */
+    private static func computeCDHashes(machOData: Data) -> [(hash: String, type: String)] {
         guard let sigRange = self.findCodeSignature(machOData: machOData) else {
-            return nil
+            return []
         }
 
         let sigData = Data(machOData[sigRange])
-        let directories = self.findCodeDirectories(signatureData: sigData)
+        return self.findCodeDirectories(signatureData: sigData)
+            .sorted { self.hashRank($0.hashType) > self.hashRank($1.hashType) }
+            .compactMap { cd -> (hash: String, type: String)? in
+                guard let digest = self.digestCodeDirectory(blob: cd.data, hashType: cd.hashType) else {
+                    return nil
+                }
+                return (digest, self.typeName(cd.hashType))
+            }
+    }
 
-        // Prefer strongest hash: SHA-384 > SHA-256 > SHA-1
-        guard let best = directories.max(by: { $0.hashType < $1.hashType }) else {
-            return nil
+    private static func typeName(_ hashType: UInt8) -> String {
+        switch hashType {
+        case self.csHashTypeSHA1: "sha1"
+        case self.csHashTypeSHA256: "sha256"
+        case self.csHashTypeSHA256Truncated: "sha256t"
+        case self.csHashTypeSHA384: "sha384"
+        default: "unknown"
         }
-
-        return self.digestCodeDirectory(blob: best.data, hashType: best.hashType)
     }
 
     private static func findCodeSignature(machOData: Data) -> Range<Int>? {
@@ -191,11 +228,13 @@ enum CDHash {
         switch hashType {
         case self.csHashTypeSHA1:
             Insecure.SHA1.hash(data: blob).hexString
-        case self.csHashTypeSHA256:
+        case self.csHashTypeSHA256, self.csHashTypeSHA256Truncated:
+            // Truncation applies to the hash slots inside the CD; the CD digest itself is plain SHA-256
             SHA256.hash(data: blob).hexString
         case self.csHashTypeSHA384:
             SHA384.hash(data: blob).hexString
         default:
+            // Unknown hash types rank 0 and are filtered before selection
             nil
         }
     }

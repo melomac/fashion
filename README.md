@@ -43,6 +43,7 @@ Project algorithm choices are driven by interoperability with existing tools and
 [SymHash]: https://www.anomali.com/blog/symhash "SymHash: An ImpHash for Mach-O"
 [XAR]: https://github.com/apple-oss-distributions/xar/ "GitHub: apple-oss-distributions/xar"
 [CDHash]: https://developer.apple.com/documentation/technotes/tn3126-inside-code-signing-hashes "TN3126: Inside Code Signing: Hashes"
+[XNU]: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/ubc_subr.c "XNU: hashPriorities in ubc_subr.c"
 
 #### Insecure MD5 and SHA1
 
@@ -67,7 +68,7 @@ $ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quie
 
 #### CDHash
 
-Compute the Code Directory hash of signed Mach-O binaries, according to the strongest supported hash (usually SHA256). While we print the full hash, we can match both CDHashFull and truncated CDHash.
+Compute the Code Directory hash of signed Mach-O binaries, one digest per code directory, strongest first as ranked by [XNU][]. Dual-signed binaries emit one line per candidate, labeled with the hash type (`sha1`, `sha256`, `sha256t`, `sha384`). While we print the full hash, we can match any CDHashFull or truncated CDHash.
 
 ### Quiet flag
 

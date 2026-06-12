@@ -22,6 +22,25 @@ final class FormatterTests: XCTestCase {
         XCTAssertEqual(quiet, digest)
     }
 
+    func testFormatLineCDHashPadding() {
+        let digest = String(repeating: "a", count: 40) // SHA-1 candidate
+        let path = "/tmp/file.txt"
+        let line = OutputFormatter.formatLine(digest: digest, path: path, algorithm: .cdhash)
+
+        // formatLine pads cdhash digests to SHA-256 length, then "  <path>"
+        let expectedLength = OutputFormatter.cdhashPadWidth + 2 + path.count
+        XCTAssertEqual(line.count, expectedLength)
+        XCTAssertTrue(line.hasSuffix("  \(path)"))
+
+        // Full SHA-256 digests are left untouched
+        let full = String(repeating: "b", count: 64)
+        XCTAssertEqual(OutputFormatter.formatLine(digest: full, path: path, algorithm: .cdhash), "\(full)  \(path)")
+
+        // formatQuiet returns the raw digest without padding (machine-consumable)
+        let quiet = OutputFormatter.formatQuiet(digest: digest, algorithm: .cdhash)
+        XCTAssertEqual(quiet, digest)
+    }
+
     func testFormatMatchLineSSDeep() {
         let line = OutputFormatter.formatMatchLine(digest: "3:abc", score: 95, path: "/tmp/file.txt", algorithm: .ssdeep)
         XCTAssertTrue(line.contains(" 95  "))

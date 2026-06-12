@@ -5,6 +5,7 @@ import Foundation
  */
 enum OutputFormatter {
     static let ssdeepPadWidth = 107
+    static let cdhashPadWidth = 64 // SHA-256 hex length, the common case
     static let ssdeepScoreWidth = 3
     static let tlshScoreWidth = 4
 
@@ -48,10 +49,12 @@ enum OutputFormatter {
     // MARK: - Private
 
     private static func padDigest(_ digest: String, algorithm: Algorithm) -> String {
-        if algorithm == .ssdeep {
-            let padding = max(0, ssdeepPadWidth - digest.count)
-            return digest + String(repeating: " ", count: padding)
+        let width = switch algorithm {
+        case .ssdeep: self.ssdeepPadWidth
+        case .cdhash: self.cdhashPadWidth
+        default: digest.count
         }
-        return digest
+        let padding = max(0, width - digest.count)
+        return digest + String(repeating: " ", count: padding)
     }
 }

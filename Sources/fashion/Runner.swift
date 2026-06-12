@@ -214,17 +214,18 @@ struct Runner {
 
         // Quiet match mode: return first matching slice and move on
         if self.quiet, !self.matchDigests.isEmpty {
-            for sr in sliceResults {
-                if Matching.check(digest: sr.hash, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
-                    return [DigestResult(digest: sr.hash, path: item.path, filePath: item.path)]
+            for result in sliceResults {
+                if Matching.check(digest: result.hash, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
+                    return [DigestResult(digest: result.hash, path: item.path, filePath: item.path)]
                 }
             }
             return []
         }
 
-        return sliceResults.map { sr in
-            let displayPath = sr.arch != nil ? "\(item.path) (\(sr.arch!))" : item.path
-            return DigestResult(digest: sr.hash, path: displayPath, filePath: item.path)
+        return sliceResults.map { result in
+            let suffix = [result.arch, result.type].compactMap(\.self).joined(separator: ", ")
+            let displayPath = suffix.isEmpty ? item.path : "\(item.path) (\(suffix))"
+            return DigestResult(digest: result.hash, path: displayPath, filePath: item.path)
         }
     }
 
