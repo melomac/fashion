@@ -31,8 +31,8 @@ extension Algorithm: ExpressibleByArgument {
 struct Fashion: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fashion",
-        abstract: "Compute and match file digests for threat hunting and binary analysis.",
-        version: "1.0.1",
+        abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
+        version: "1.0.2",
     )
 
     @Argument(help: "Paths to scan (default: current directory).", completion: .file())
