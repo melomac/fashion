@@ -2,6 +2,13 @@ import ArgumentParser
 import Foundation
 
 extension Algorithm: ExpressibleByArgument {
+    init?(argument: String) {
+        guard let algorithm = Algorithm.parse(argument) else {
+            return nil
+        }
+        self = algorithm
+    }
+
     var defaultValueDescription: String {
         switch self {
         case .md5: "MD5"
