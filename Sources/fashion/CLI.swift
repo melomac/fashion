@@ -55,6 +55,9 @@ struct Fashion: AsyncParsableCommand {
     @Flag(help: "Hash individual Mach-O architectures.")
     var slices = false
 
+    @Flag(help: "Hash the exact Mach-O image, ignoring appended bytes.")
+    var exact = false
+
     @Flag(inversion: .prefixedNo, help: "Sort file paths before processing.")
     var sort = false
 
@@ -110,6 +113,7 @@ struct Fashion: AsyncParsableCommand {
             algorithm: self.resolvedAlgorithm,
             quiet: self.quiet,
             slices: self.slices,
+            exact: self.exact,
             sortFiles: self.sort,
             jobs: self.resolvedJobs,
             follow: self.follow,

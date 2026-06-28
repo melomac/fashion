@@ -219,6 +219,59 @@ final class MachOParserTests: XCTestCase {
         }
     }
 
+    // MARK: - isMachO (cheap magic peek)
+
+    func testIsMachOTrueForThinBinary() throws {
+        let url = FileManager.default.temporaryDirectory / "fashion-ismacho-\(UUID())"
+        try self.makeThin64().write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertTrue(try MachOParser.isMachO(path: url.path()))
+    }
+
+    func testIsMachOFalseForNonMachO() throws {
+        let url = FileManager.default.temporaryDirectory / "fashion-ismacho-\(UUID()).txt"
+        try Data("not a mach-o, just text".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertFalse(try MachOParser.isMachO(path: url.path()))
+    }
+
+    func testIsMachOThrowsForMissingFile() {
+        XCTAssertThrowsError(try MachOParser.isMachO(path: "/tmp/fashion-nonexistent-\(UUID())"))
+    }
+
+    func testIsMachOTrueForFatBinary() throws {
+        let url = FileManager.default.temporaryDirectory / "fashion-fat-\(UUID())"
+        try self.makeFat().write(to: url) // 1 architecture
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertTrue(try MachOParser.isMachO(path: url.path()))
+    }
+
+    func testIsMachOFalseForJavaClass() throws {
+        // 0xCAFEBABE shared magic, but the big-endian u32 at offset 4 is a Java major version (52), not an arch count.
+        var data = Data([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])
+        data.append(Data(repeating: 0, count: 64))
+        let url = FileManager.default.temporaryDirectory / "fashion-class-\(UUID()).class"
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertFalse(try MachOParser.isMachO(path: url.path()))
+    }
+
+    func testIsMachOFalseForBogusFatArchCount() throws {
+        var data = Data()
+        data.appendUInt32BE(FAT_MAGIC)
+        data.appendUInt32BE(9999) // absurd architecture count — not a universal binary
+        data.append(Data(repeating: 0, count: 64))
+        let url = FileManager.default.temporaryDirectory / "fashion-bogusfat-\(UUID())"
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertFalse(try MachOParser.isMachO(path: url.path()))
+    }
+
     // MARK: - Load commands
 
     func testLoadCommandsThin64() {
@@ -328,9 +381,7 @@ final class MachOParserTests: XCTestCase {
             let slice = MachOParser.sliceData(fileData: fat, arch: archs[0])
             XCTAssertFalse(slice.isEmpty)
 
-            let magic = slice.withUnsafeBytes {
-                $0.loadUnaligned(as: UInt32.self)
-            }
+            let magic = slice.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
             XCTAssertEqual(magic, MH_MAGIC_64)
         } else {
             XCTFail("Expected fat")
@@ -342,6 +393,256 @@ final class MachOParserTests: XCTestCase {
         let data = Data(count: 10)
 
         XCTAssertTrue(MachOParser.sliceData(fileData: data, arch: arch).isEmpty)
+    }
+
+    // MARK: - machOEnd (logical extent / exact-image trimming)
+
+    func testMachOEndNoTrailingSlack() {
+        let data = self.makeThin64()
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+    }
+
+    func testMachOEndStripsAppendedGarbage() {
+        var data = self.makeThin64()
+        let original = data.count
+        data.append(Data(repeating: 0x41, count: 100))
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), original)
+    }
+
+    func testMachOEndSwappedStripsAppendedGarbage() {
+        var data = self.makeThin64Swapped()
+        let original = data.count
+        data.append(Data(repeating: 0xff, count: 64))
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), original)
+    }
+
+    func testMachOEndNonMachOReturnsFullLength() {
+        let data = Data("not a mach-o, just some text".utf8)
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+    }
+
+    func testMachOEndTruncatedReturnsFullLength() {
+        let data = Data([0xcf, 0xfa, 0xed]) // truncated MH_MAGIC_64
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+    }
+
+    func testMachOEndRealBinaryWithinBounds() throws {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: "/bin/ls")) else {
+            throw XCTSkip("/bin/ls not readable")
+        }
+
+        let slice: Data = switch MachOParser.open(data: data) {
+        case let .fat(archs): MachOParser.sliceData(fileData: data, arch: archs[0])
+        case .thin: data
+        case .notMachO: Data()
+        }
+        let end = MachOParser.machOEnd(data: slice)
+
+        XCTAssertGreaterThan(end, 0)
+        XCTAssertLessThanOrEqual(end, slice.count)
+    }
+
+    func testExactHashIgnoresAppendedGarbage() throws {
+        var macho = self.makeThin64()
+        let cleanEnd = MachOParser.machOEnd(data: macho)
+        let cleanHash = try CryptoDigest.hash(data: Data(macho.prefix(cleanEnd)), algorithm: .sha256)
+
+        macho.append(Data(repeating: 0x41, count: 4096))
+        let dirtyEnd = MachOParser.machOEnd(data: macho)
+        let dirtyTrimmed = try CryptoDigest.hash(data: Data(macho.prefix(dirtyEnd)), algorithm: .sha256)
+        let dirtyWhole = try CryptoDigest.hash(data: macho, algorithm: .sha256)
+
+        XCTAssertEqual(cleanHash, dirtyTrimmed, "exact (trimmed) hash must be stable across appended garbage")
+        XCTAssertNotEqual(cleanHash, dirtyWhole, "whole-file hash must change when garbage is appended")
+    }
+
+    func testMachOEndSegment64Trim() {
+        var data = Data()
+        data.appendUInt32(MH_MAGIC_64)
+        data.appendInt32(CPU_TYPE_ARM64)
+        data.appendInt32(0)
+        data.appendUInt32(2) // filetype MH_EXECUTE
+        data.appendUInt32(1) // ncmds
+        data.appendUInt32(72) // sizeofcmds (segment_command_64 = 72)
+        data.appendUInt32(0)
+        data.appendUInt32(0)
+        data.appendUInt32(UInt32(LC_SEGMENT_64))
+        data.appendUInt32(72) // cmdsize
+        data.append(Data("__TEXT".utf8)); data.append(Data(repeating: 0, count: 10)) // segname[16]
+        data.appendUInt64(0) // vmaddr
+        data.appendUInt64(256) // vmsize
+        data.appendUInt64(0) // fileoff
+        data.appendUInt64(256) // filesize -> logical end 256
+        data.appendUInt32(7) // maxprot
+        data.appendUInt32(5) // initprot
+        data.appendUInt32(0) // nsects
+        data.appendUInt32(0) // flags
+        data.append(Data(repeating: 0xab, count: 256 - data.count)) // segment content
+        let logicalEnd = data.count
+        data.append(Data(repeating: 0x41, count: 100)) // appended garbage
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
+    }
+
+    func testMachOEndSegment32Trim() {
+        var data = Data()
+        data.appendUInt32(MH_MAGIC)
+        data.appendInt32(CPU_TYPE_ARM)
+        data.appendInt32(0)
+        data.appendUInt32(2) // filetype
+        data.appendUInt32(1) // ncmds
+        data.appendUInt32(56) // sizeofcmds (segment_command = 56)
+        data.appendUInt32(0)
+        data.appendUInt32(UInt32(LC_SEGMENT))
+        data.appendUInt32(56) // cmdsize
+        data.append(Data("__TEXT".utf8)); data.append(Data(repeating: 0, count: 10))
+        data.appendUInt32(0) // vmaddr
+        data.appendUInt32(200) // vmsize
+        data.appendUInt32(0) // fileoff
+        data.appendUInt32(200) // filesize -> logical end 200
+        data.appendUInt32(7) // maxprot
+        data.appendUInt32(5) // initprot
+        data.appendUInt32(0) // nsects
+        data.appendUInt32(0) // flags
+        data.append(Data(repeating: 0xab, count: 200 - data.count))
+        let logicalEnd = data.count
+        data.append(Data(repeating: 0x41, count: 80))
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
+    }
+
+    func testMachOEndDysymtabTrim() {
+        var data = Data()
+        data.appendUInt32(MH_MAGIC_64)
+        data.appendInt32(CPU_TYPE_ARM64)
+        data.appendInt32(0)
+        data.appendUInt32(2)
+        data.appendUInt32(1) // ncmds
+        data.appendUInt32(80) // sizeofcmds (dysymtab_command = 80)
+        data.appendUInt32(0)
+        data.appendUInt32(0)
+        data.appendUInt32(UInt32(LC_DYSYMTAB))
+        data.appendUInt32(80)
+        for _ in 0 ..< 6 {
+            data.appendUInt32(0)
+        } // ilocalsym..nundefsym
+        data.appendUInt32(0); data.appendUInt32(0) // tocoff, ntoc
+        data.appendUInt32(0); data.appendUInt32(0) // modtaboff, nmodtab
+        data.appendUInt32(0); data.appendUInt32(0) // extrefsymoff, nextrefsyms
+        data.appendUInt32(112); data.appendUInt32(4) // indirectsymoff=112, nindirectsyms=4 -> 128
+        data.appendUInt32(0); data.appendUInt32(0) // extreloff, nextrel
+        data.appendUInt32(0); data.appendUInt32(0) // locreloff, nlocrel
+        data.append(Data(repeating: 0xab, count: 128 - data.count))
+        let logicalEnd = data.count
+        data.append(Data(repeating: 0x41, count: 50))
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
+    }
+
+    func testMachOEndIgnoresOversizedSizeofcmds() {
+        var data = Data()
+        data.appendUInt32(MH_MAGIC_64)
+        data.appendInt32(CPU_TYPE_ARM64)
+        data.appendInt32(0)
+        data.appendUInt32(2)
+        data.appendUInt32(0) // ncmds = 0
+        data.appendUInt32(0xffff_ffff) // hostile sizeofcmds
+        data.appendUInt32(0)
+        data.appendUInt32(0)
+        data.append(Data(repeating: 0x41, count: 200)) // appended garbage
+
+        // Must fall back to the header end, not retain the appended bytes.
+        XCTAssertEqual(MachOParser.machOEnd(data: data), 32)
+    }
+
+    func testMachOEndFatSliceStripsGarbage() {
+        let cleanSlice = self.makeThin64()
+        let cleanEnd = cleanSlice.count
+        var slice = cleanSlice
+        slice.append(Data(repeating: 0x41, count: 64)) // garbage inside the slice region
+
+        var fat = Data()
+        fat.appendUInt32BE(FAT_MAGIC)
+        fat.appendUInt32BE(1)
+        fat.appendInt32BE(CPU_TYPE_ARM64)
+        fat.appendInt32BE(0)
+        fat.appendUInt32BE(4096) // offset
+        fat.appendUInt32BE(UInt32(slice.count)) // size (includes garbage)
+        fat.appendUInt32BE(12)
+        fat.append(Data(repeating: 0, count: 4096 - fat.count))
+        fat.append(slice)
+
+        guard case let .fat(archs) = MachOParser.open(data: fat) else {
+            XCTFail("Expected fat"); return
+        }
+        let extracted = MachOParser.sliceData(fileData: fat, arch: archs[0])
+        XCTAssertEqual(MachOParser.machOEnd(data: extracted), cleanEnd, "per-arch slice trim must strip in-slice garbage")
+    }
+
+    func testMachOEndUnknownCommandDisablesTrim() {
+        var data = Data()
+        data.appendUInt32(MH_MAGIC_64)
+        data.appendInt32(CPU_TYPE_ARM64)
+        data.appendInt32(0)
+        data.appendUInt32(2)
+        data.appendUInt32(1) // ncmds
+        data.appendUInt32(16) // sizeofcmds
+        data.appendUInt32(0)
+        data.appendUInt32(0)
+        data.appendUInt32(0x0000_00ab) // unknown command id (not handled, not benign)
+        data.appendUInt32(16)
+        data.append(Data(repeating: 0, count: 8))
+        data.append(Data(repeating: 0x41, count: 100)) // trailing bytes that must NOT be trimmed
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count, "an unrecognized command must disable trimming")
+    }
+
+    func testMachOEndBenignCommandStillTrims() {
+        var data = Data()
+        data.appendUInt32(MH_MAGIC_64)
+        data.appendInt32(CPU_TYPE_ARM64)
+        data.appendInt32(0)
+        data.appendUInt32(2)
+        data.appendUInt32(2) // ncmds
+        data.appendUInt32(48) // sizeofcmds = LC_UUID(24) + LC_SYMTAB(24)
+        data.appendUInt32(0)
+        data.appendUInt32(0)
+        data.appendUInt32(UInt32(bitPattern: LC_UUID)) // benign command
+        data.appendUInt32(24)
+        data.append(Data(repeating: 0xaa, count: 16))
+        data.appendUInt32(UInt32(LC_SYMTAB)) // handled command
+        data.appendUInt32(24)
+        data.appendUInt32(80); data.appendUInt32(0); data.appendUInt32(80); data.appendUInt32(0)
+        let logicalEnd = data.count // 80
+        data.append(Data(repeating: 0x41, count: 50))
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd, "a benign command must be ignored, not block trimming")
+    }
+
+    // MARK: - fileEnd (whole-file logical end)
+
+    func testFileEndThinTrims() {
+        var thin = self.makeThin64()
+        let clean = thin.count
+        thin.append(Data(repeating: 0x41, count: 100))
+        XCTAssertEqual(MachOParser.fileEnd(data: thin), clean)
+    }
+
+    func testFileEndFatStripsTrailingGarbage() {
+        var fat = self.makeFat()
+        let clean = fat.count
+        fat.append(Data(repeating: 0x41, count: 200))
+        XCTAssertEqual(MachOParser.fileEnd(data: fat), clean)
+    }
+
+    func testFileEndNonMachOReturnsFullLength() {
+        let data = Data("plain text, not mach-o".utf8)
+        XCTAssertEqual(MachOParser.fileEnd(data: data), data.count)
     }
 }
 
@@ -366,5 +667,10 @@ private extension Data {
     mutating func appendInt32BE(_ value: Int32) {
         var v = value.bigEndian
         append(Data(bytes: &v, count: 4))
+    }
+
+    mutating func appendUInt64(_ value: UInt64) {
+        var v = value
+        append(Data(bytes: &v, count: 8))
     }
 }

@@ -22,13 +22,13 @@ enum CryptoDigest {
     /**
      Compute the hex digest of a file at the given path using the specified algorithm.
      */
-    static func hash(path: String, algorithm: Algorithm) throws -> String {
+    static func hash(path: String, algorithm: Algorithm, limit: Int? = nil) throws -> String {
         switch algorithm {
-        case .md5: try self.hashFile(path: path, using: Insecure.MD5.self)
-        case .sha1: try self.hashFile(path: path, using: Insecure.SHA1.self)
-        case .sha256: try self.hashFile(path: path, using: SHA256.self)
-        case .sha384: try self.hashFile(path: path, using: SHA384.self)
-        case .sha512: try self.hashFile(path: path, using: SHA512.self)
+        case .md5: try self.hashFile(path: path, using: Insecure.MD5.self, limit: limit)
+        case .sha1: try self.hashFile(path: path, using: Insecure.SHA1.self, limit: limit)
+        case .sha256: try self.hashFile(path: path, using: SHA256.self, limit: limit)
+        case .sha384: try self.hashFile(path: path, using: SHA384.self, limit: limit)
+        case .sha512: try self.hashFile(path: path, using: SHA512.self, limit: limit)
         default: throw AlgorithmError.unsupported(algorithm)
         }
     }
@@ -49,7 +49,13 @@ enum CryptoDigest {
 
     // MARK: - Private
 
-    private static func hashFile<H: HashFunction>(path: String, using _: H.Type) throws -> String {
+    /**
+     Stream the file through the hasher in chunks.
+
+     When `limit` is set, only the first `limit` bytes are hashed.
+     Used by --exact to digest a Mach-O's trimmed extent without mapping the whole file.
+     */
+    private static func hashFile<H: HashFunction>(path: String, using _: H.Type, limit: Int?) throws -> String {
         let fd = try FileDescriptor.open(path, .readOnly)
         defer {
             try? fd.close()
@@ -63,12 +69,15 @@ enum CryptoDigest {
         }
 
         var hasher = H()
-        while true {
-            let n = try fd.read(into: buffer)
+        var remaining = limit ?? Int.max
+        while remaining > 0 {
+            let want = Swift.min(self.chunkSize, remaining)
+            let n = try fd.read(into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<want]))
             if n == 0 {
                 break
             }
             hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: buffer[..<n]))
+            remaining -= n
         }
 
         return hasher.finalize().hexString

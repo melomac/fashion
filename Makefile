@@ -52,8 +52,7 @@ xcode-test: xcode
 
 .PHONY: xcode-clean
 xcode-clean: xcode
-	xcodebuild clean $(XCODE_FLAGS) $(BUILD_FLAGS)
-	xcodebuild clean $(XCODE_FLAGS) $(TEST_FLAGS)
+	xcodebuild clean -scheme $(PRODUCT_NAME) -destination platform=macOS -alltargets
 
 
 # ----------------------------------------------------------------------------
