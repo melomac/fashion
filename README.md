@@ -79,24 +79,6 @@ While we print the full hash, we can match any CDHashFull or truncated CDHash.
 
 With the `-q` / `--quiet` flag, we only print file digests.
 
-### Exact flag
-
-Some malware families append garbage data after the Mach-O structure to evade hash based detection.
-With the `--exact` flag, we hash only the bytes the Mach-O actually references — its logical end computed from the load commands — so the same payload padded with different trailing junk collapses to one digest:
-
-```console
-$ fashion prostorify.com/*/bin/Pods
-73438af4c465a58aa019bce5c165bfb16be51549bcfb468ab1643bf205ea0ab6  prostorify.com/agent/bin/Pods
-7a95a2e3f94e635cc02c38931bc7eeb65f9f70405d2b104139815d28b57d3992  prostorify.com/sys/bin/Pods
-
-$ fashion prostorify.com/*/bin/Pods --exact
-eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com/agent/bin/Pods
-eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com/sys/bin/Pods
-```
-
-`--exact` works with any algorithm and combines with `--slices` to trim each architecture of a universal binary.
-Non-Mach-O files are hashed whole, and if a binary carries a load command we don't account for, `fashion` hashes the entire file rather than risk dropping referenced bytes.
-
 ### Match mode
 
 Use `-m` / `--match` to search for files matching one or more digests.
@@ -138,6 +120,24 @@ Just like `xar --dump-toc-cksum`, `--xar-toc` mode defaults to SHA1 of the compr
 `fashion` parses universal and thin Mach-O binaries natively.
 The `--slices` flag hashes each architecture individually in addition to the whole file.
 Supported architectures: `arm64`, `arm64e`, `x86_64`, `i386`, and legacy `ppc` / `ppc64`.
+
+### Exact flag
+
+Some malware families append garbage data after the Mach-O structure to evade hash based detection.
+With the `--exact` flag, we hash only the bytes the Mach-O actually references — its logical end computed from the load commands — so the same payload padded with different trailing junk collapses to one digest:
+
+```console
+$ fashion prostorify.com/*/bin/Pods
+73438af4c465a58aa019bce5c165bfb16be51549bcfb468ab1643bf205ea0ab6  prostorify.com/agent/bin/Pods
+7a95a2e3f94e635cc02c38931bc7eeb65f9f70405d2b104139815d28b57d3992  prostorify.com/sys/bin/Pods
+
+$ fashion prostorify.com/*/bin/Pods --exact
+eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com/agent/bin/Pods
+eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com/sys/bin/Pods
+```
+
+`--exact` works with any algorithm and combines with `--slices` to trim each architecture of a universal binary.
+Non-Mach-O files are hashed whole, and if a binary carries a load command we don't account for, `fashion` hashes the entire file rather than risk dropping referenced bytes.
 
 ### Concurrency
 
