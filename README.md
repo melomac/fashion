@@ -1,6 +1,7 @@
 # fashion
 
-Swift command-line interface to traverse a file hierarchy and compute or match popular hash digests. The project natively supports:
+Swift command-line interface to traverse a file hierarchy and compute or match popular hash digests.
+The project natively supports:
 
 * [CryptoKit](https://developer.apple.com/documentation/cryptokit/ "Perform cryptographic operations securely and efficiently.") hash functions: [SHA-2][] (SHA256 by default), insecure [SHA-1][] and [MD5][]
 * fuzzy hash functions: [ssdeep][] and [TLSH][] as submodules with Swift C bridging
@@ -51,13 +52,15 @@ MD5 and SHA1 both have known [collisions](https://en.wikipedia.org/wiki/Collisio
 
 #### TLSH
 
-Trend Micro library counts the total data length using an `unsigned int data_len` i.e. 32-bit, so any file larger than ~4GB is undefined behavior. Even worse, on Java, the code was using a signed integer (~2GB).
+Trend Micro library counts the total data length using an `unsigned int data_len` i.e. 32-bit, so any file larger than ~4GB is undefined behavior.
+Even worse, on Java, the code was using a signed integer (~2GB).
 
 `fashion` follows Trend Micro recommendations and backports the Java fix from TLSH 4.6.0 to define the TLSH of a file as the TLSH of its first ~4GB.
 
 #### Git hash
 
-The `git` and `git256` algo compute the hash of a [Git](https://git-scm.com/) blob object. With the hash, you can look for the object across all branches and commits of a repository.
+The `git` and `git256` algo compute the hash of a [Git](https://git-scm.com/) blob object.
+With the hash, you can look for the object across all branches and commits of a repository.
 
 ```console
 $ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quiet .swiftformat)
@@ -68,11 +71,31 @@ $ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quie
 
 #### CDHash
 
-Compute the Code Directory hash of signed Mach-O binaries, one digest per code directory, strongest first as ranked by [XNU][]. Dual-signed binaries emit one line per candidate, labeled with the hash type (`sha1`, `sha256`, `sha256t`, `sha384`). While we print the full hash, we can match any CDHashFull or truncated CDHash.
+Compute the Code Directory hash of signed Mach-O binaries, one digest per code directory, strongest first as ranked by [XNU][].
+Dual-signed binaries emit one line per candidate, labeled with the hash type (`sha1`, `sha256`, `sha256t`, `sha384`).
+While we print the full hash, we can match any CDHashFull or truncated CDHash.
 
 ### Quiet flag
 
 With the `-q` / `--quiet` flag, we only print file digests.
+
+### Exact flag
+
+Some malware families append garbage data after the Mach-O structure to evade hash based detection.
+With the `--exact` flag, we hash only the bytes the Mach-O actually references — its logical end computed from the load commands — so the same payload padded with different trailing junk collapses to one digest:
+
+```console
+$ fashion prostorify.com/*/bin/Pods
+73438af4c465a58aa019bce5c165bfb16be51549bcfb468ab1643bf205ea0ab6  prostorify.com/agent/bin/Pods
+7a95a2e3f94e635cc02c38931bc7eeb65f9f70405d2b104139815d28b57d3992  prostorify.com/sys/bin/Pods
+
+$ fashion prostorify.com/*/bin/Pods --exact
+eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com/agent/bin/Pods
+eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com/sys/bin/Pods
+```
+
+`--exact` works with any algorithm and combines with `--slices` to trim each architecture of a universal binary.
+Non-Mach-O files are hashed whole, and if a binary carries a load command we don't account for, `fashion` hashes the entire file rather than risk dropping referenced bytes.
 
 ### Match mode
 
@@ -101,7 +124,8 @@ $ fashion --symhash --algo ssdeep --match $(fashion --symhash --algo ssdeep admo
 
 ### XAR mode
 
-Installation packages on macOS. According to [xar(1)](x-man-page://1/xar "man 1 xar"):
+Installation packages on macOS.
+According to [xar(1)](x-man-page://1/xar "man 1 xar"):
 
 >xar is no longer under active development by Apple. Clients of xar should pursue alternative archive formats.
 
@@ -111,11 +135,14 @@ Just like `xar --dump-toc-cksum`, `--xar-toc` mode defaults to SHA1 of the compr
 
 ### Mach-O support
 
-`fashion` parses universal and thin Mach-O binaries natively. The `--slices` flag hashes each architecture individually in addition to the whole file. Supported architectures: `arm64`, `arm64e`, `x86_64`, `i386`, and legacy `ppc` / `ppc64`.
+`fashion` parses universal and thin Mach-O binaries natively.
+The `--slices` flag hashes each architecture individually in addition to the whole file.
+Supported architectures: `arm64`, `arm64e`, `x86_64`, `i386`, and legacy `ppc` / `ppc64`.
 
 ### Concurrency
 
-The `-j` / `--jobs` flag controls parallel workers. Set `-j 0` to use all available CPU cores.
+The `-j` / `--jobs` flag controls parallel workers.
+Set `-j 0` to use all available CPU cores.
 
 The `--sort` flag trades some throughput for deterministic output order—paths are collected, sorted, and results are emitted sequentially even under concurrent processing.
 
@@ -143,6 +170,7 @@ The original `fashion` was a workaround for repetitive loading of the Perl comma
 
 The name is a mashup between my original bash function `fsha` and the David Bowie song, more specifically [the duo](https://www.youtube.com/watch?v=3I-4ck0NXwA&t=928s "David Bowie & Friends: A Very Special Birthday Celebration Concert NYC 1997") with Frank Black from The Pixies.
 
-Python made it very easy thanks to built-in hashlib, io, and [python-ssdeep](https://github.com/DinoTools/python-ssdeep "GitHub: DinoTools/python-ssdeep") or tlsh / [py-tlsh](https://github.com/trendmicro/tlsh/tree/master/py_ext/pypi_package "GitHub: trendmicro/tlsh Python module") modules were straightforward. But [uv](https://docs.astral.sh/uv/ "An extremely fast Python package and project manager, written in Rust.") was [complaining](https://github.com/DinoTools/python-ssdeep/pull/70/changes#diff-60f61ab7a8d1910d86d9fda2261620314edcae5894d5aaa236b821c7256badd7R8 "GitHub: DinoTools/python-ssdeep PR70") about pkg_resources, and I needed features Python couldn't give me without significant effort.
+Python made it very easy thanks to built-in hashlib, io, and [python-ssdeep](https://github.com/DinoTools/python-ssdeep "GitHub: DinoTools/python-ssdeep") or tlsh / [py-tlsh](https://github.com/trendmicro/tlsh/tree/master/py_ext/pypi_package "GitHub: trendmicro/tlsh Python module") modules were straightforward.
+But [uv](https://docs.astral.sh/uv/ "An extremely fast Python package and project manager, written in Rust.") was [complaining](https://github.com/DinoTools/python-ssdeep/pull/70/changes#diff-60f61ab7a8d1910d86d9fda2261620314edcae5894d5aaa236b821c7256badd7R8 "GitHub: DinoTools/python-ssdeep PR70") about pkg_resources, and I needed features Python couldn't give me without significant effort.
 
 So here we are: Swift, native, concurrent, with C and C++ dependencies bridged as submodules, and zero external runtime requirements.
