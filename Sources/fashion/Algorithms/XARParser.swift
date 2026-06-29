@@ -61,7 +61,7 @@ enum XARParser {
      Extract and optionally decompress the TOC, then hash it.
      */
     static func hashToc(path: String, algorithm: Algorithm, decompress: Bool) throws -> String? {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
+        let data = try FileReader.map(path: path)
 
         let header: XARHeader
         do {

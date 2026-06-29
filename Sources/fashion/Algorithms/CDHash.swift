@@ -16,7 +16,7 @@ enum CDHash {
      Fat binaries return one result per signed slice.
      */
     static func hash(path: String) -> [SliceResult] {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) else {
+        guard let data = try? FileReader.map(path: path) else {
             return []
         }
 

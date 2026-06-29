@@ -189,7 +189,7 @@ struct Runner {
             if trimMachO {
                 // Mach-O: hash only the logical content. The map is lazy, so fileEnd faults just the
                 // header; crypto algorithms then stream the trimmed extent (no full map, no copy).
-                let data = try Data(contentsOf: URL(fileURLWithPath: item.path), options: .mappedIfSafe)
+                let data = try FileReader.map(path: item.path)
                 let end = MachOParser.fileEnd(data: data)
                 switch self.algorithm {
                 case .md5, .sha1, .sha256, .sha384, .sha512:
@@ -255,7 +255,7 @@ struct Runner {
         // Skip the map entirely for non-Mach-O input so a large unrelated file is never brought in just to check.
         do {
             if try MachOParser.isMachO(path: item.path) {
-                let data = try Data(contentsOf: URL(fileURLWithPath: item.path), options: .mappedIfSafe)
+                let data = try FileReader.map(path: item.path)
                 if case let .fat(archs) = MachOParser.open(data: data) {
                     for arch in archs {
                         let sliceData = MachOParser.sliceData(fileData: data, arch: arch)

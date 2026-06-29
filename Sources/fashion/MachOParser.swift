@@ -1,7 +1,6 @@
 import Foundation
 import MachO
 import os
-import System
 
 enum MachOParser {
     private static let logger = Logger(subsystem: "fashion", category: "mach-o")
@@ -50,7 +49,7 @@ enum MachOParser {
     }
 
     static func open(path: String) -> BinaryType {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) else {
+        guard let data = try? FileReader.map(path: path) else {
             return .notMachO
         }
         return self.open(data: data)
@@ -64,15 +63,8 @@ enum MachOParser {
      a file that reads successfully but is not Mach-O (or is too small) simply returns false.
      */
     static func isMachO(path: String) throws -> Bool {
-        let fd = try FileDescriptor.open(path, .readOnly)
-        defer {
-            try? fd.close()
-        }
-        _ = fcntl(fd.rawValue, F_NOCACHE, 1)
-
-        var head = [UInt8](repeating: 0, count: 8)
-        let count = try head.withUnsafeMutableBytes { try fd.read(into: $0) }
-        guard count >= 8 else {
+        let head = try FileReader.head(path: path, count: 8)
+        guard head.count >= 8 else {
             return false
         }
 

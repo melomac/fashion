@@ -9,7 +9,7 @@ enum SymHash {
     }
 
     static func compute(path: String, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> [SymHashResult] {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
+        let data = try FileReader.map(path: path)
         let binaryType = MachOParser.open(data: data)
 
         switch binaryType {

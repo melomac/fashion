@@ -1,6 +1,5 @@
 import CTLSHWrapper
 import Foundation
-import System
 
 /**
  Bridge to libtlsh for fuzzy hashing (Trend Micro Locality Sensitive Hash).
@@ -61,48 +60,20 @@ enum TLSHBridge {
      Returns nil if file is too small or hashing fails.
      */
     static func hash(path: String) throws -> String? {
-        let fd = try FileDescriptor.open(path, .readOnly)
-        defer {
-            try? fd.close()
-        }
-
-        _ = fcntl(fd.rawValue, F_NOCACHE, 1)
-
         let t = tlsh_new()
         defer {
             tlsh_free(t)
         }
 
-        let chunkSize = 1 << 20 // 1 MiB
-        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: chunkSize, alignment: 1)
-        defer {
-            buffer.deallocate()
-        }
-
-        var totalSize: UInt64 = 0
-
-        while true {
-            if self.isT1Build, totalSize >= self.maximumDataSize {
-                break
+        // For T1 builds, cap the data fed to libtlsh at maximumDataSize (~3.93 GiB) per issue #99.
+        let limit = self.isT1Build ? Int(clamping: self.maximumDataSize) : nil
+        var totalSize = 0
+        try FileReader.read(path: path, limit: limit) { chunk in
+            guard let base = chunk.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return
             }
-
-            let n = try fd.read(into: buffer)
-            if n == 0 {
-                break
-            }
-
-            var usable = n
-            if self.isT1Build {
-                let remaining = self.maximumDataSize - totalSize
-                usable = min(usable, Int(clamping: remaining))
-            }
-
-            tlsh_update(t, buffer.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt32(usable))
-            totalSize += UInt64(usable)
-
-            if usable < n {
-                break
-            }
+            tlsh_update(t, base, UInt32(chunk.count))
+            totalSize += chunk.count
         }
 
         guard totalSize >= self.minimumDataSize else {

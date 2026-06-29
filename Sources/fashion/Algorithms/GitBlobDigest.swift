@@ -11,8 +11,10 @@ enum GitBlobDigest {
      Compute git blob hash for a file.
      */
     static func hash(path: String, useSHA256: Bool) throws -> String {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        return try self.hashData(data, useSHA256: useSHA256)
+        // Stream "blob <size>\0" + content rather than reading the whole file into memory and copying it.
+        let size = try FileReader.size(path: path)
+        let prefix = Data("blob \(size)\0".utf8)
+        return try CryptoDigest.hash(path: path, algorithm: useSHA256 ? .sha256 : .sha1, prefix: prefix, limit: size)
     }
 
     /**
