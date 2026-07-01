@@ -14,6 +14,7 @@ enum GitBlobDigest {
         // Stream "blob <size>\0" + content rather than reading the whole file into memory and copying it.
         let size = try FileReader.size(path: path)
         let prefix = Data("blob \(size)\0".utf8)
+
         return try CryptoDigest.hash(path: path, algorithm: useSHA256 ? .sha256 : .sha1, prefix: prefix, limit: size)
     }
 

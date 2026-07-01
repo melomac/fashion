@@ -1,4 +1,5 @@
 @testable import fashion
+import Foundation
 import XCTest
 
 final class CDHashTests: XCTestCase {
@@ -73,6 +74,15 @@ final class CDHashTests: XCTestCase {
         }
 
         throw XCTSkip("No fat binary found — skip gracefully")
+    }
+
+    func testSignedSliceIsNotAdhoc() {
+        // /bin/ls is signed, so every slice must use its embedded cdhash — never the ad-hoc fall-back.
+        let results = CDHash.hash(path: "/bin/ls")
+        XCTAssertFalse(results.isEmpty)
+        for r in results {
+            XCTAssertFalse(r.adhoc, "A signed slice must not be tagged ADHOC")
+        }
     }
 
     // MARK: - Non-Mach-O
@@ -160,5 +170,79 @@ final class CDHashTests: XCTestCase {
         let fake = String(repeating: "0", count: first.hash.count)
         let match = Matching.check(digest: first.hash, against: [fake], algorithm: .cdhash, threshold: 0)
         XCTAssertNil(match)
+    }
+
+    // MARK: - codesign cross-check (self-contained, OS-version independent)
+
+    func testEmbeddedCDHashMatchesCodesign() throws {
+        // Every signed slice's embedded cdhash (truncated to 20 bytes) must equal codesign's CDHash.
+        let path = "/bin/ls"
+        let results = CDHash.hash(path: path)
+        try XCTSkipIf(results.isEmpty, "no cdhash for \(path)")
+
+        for r in results {
+            XCTAssertFalse(r.adhoc, "\(r.arch ?? "thin") slice of \(path) is signed")
+
+            let archArgs = r.arch.map { ["--arch", $0] } ?? []
+            let out = try self.codesign(["-dvvv"] + archArgs + [path])
+            let expected = try XCTUnwrap(Self.field(out, prefix: "CDHash="), "codesign printed no CDHash")
+
+            XCTAssertEqual(String(r.hash.prefix(40)), expected, "embedded cdhash ≠ codesign CDHash (\(r.arch ?? "thin"))")
+        }
+    }
+
+    func testAdhocMatchesCodesignDetached() throws {
+        // Strip a real system binary → unsigned, then each slice's synthesized ad-hoc cdhash must equal
+        // codesign --detached's CandidateCDHashFull. This also exercises the x86_64 (4 KiB page) and
+        // multi-code-slot synthesis branches, which the synthetic fixtures do not.
+        let dir = FileManager.default.temporaryDirectory / "fashion-adhoc-oracle-\(UUID())"
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let bin = dir / "ls"
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: bin)
+        _ = try self.codesign(["--remove-signature", bin.path()])
+
+        let results = CDHash.hash(path: bin.path())
+        try XCTSkipIf(results.isEmpty, "no cdhash after stripping the signature")
+
+        for r in results {
+            XCTAssertTrue(r.adhoc, "stripped slice \(r.arch ?? "thin") must be ADHOC")
+
+            let archArgs = r.arch.map { ["--arch", $0] } ?? []
+            let sig = dir / "detached.sig"
+            _ = try self.codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC"] + archArgs + [bin.path()])
+            let out = try self.codesign(["-dvvv", "--detached", sig.path()] + archArgs + [bin.path()])
+            let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull"), "codesign printed no CandidateCDHashFull")
+
+            XCTAssertEqual(r.hash, expected, "adhoc cdhash ≠ codesign --detached (\(r.arch ?? "thin"))")
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Run `/usr/bin/codesign` and return its combined stdout+stderr (codesign `-d` prints to stderr).
+    private func codesign(_ arguments: [String]) throws -> String {
+        let url = URL(fileURLWithPath: "/usr/bin/codesign")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: url.path()), "codesign unavailable")
+
+        let process = Process()
+        process.executableURL = url
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The hex value after `=` on the first line beginning with `prefix` (e.g. `CDHash=`, `CandidateCDHashFull`).
+    private static func field(_ output: String, prefix: String) -> String? {
+        for line in output.split(separator: "\n") where line.hasPrefix(prefix) {
+            return line.split(separator: "=").last.map(String.init)
+        }
+        return nil
     }
 }

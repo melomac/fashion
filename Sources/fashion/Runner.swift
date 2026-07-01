@@ -225,8 +225,11 @@ struct Runner {
     }
 
     private func processCDHash(_ item: WorkItem) -> [DigestResult] {
-        let sliceResults = CDHash.hash(path: item.path)
-        guard !sliceResults.isEmpty else { return [] }
+        // --exact trims an unsigned slice to its logical extent before synthesizing its ad-hoc cdhash.
+        let sliceResults = CDHash.hash(path: item.path, exact: self.exact)
+        guard !sliceResults.isEmpty else {
+            return []
+        }
 
         // Quiet match mode: return first matching slice and move on
         if self.quiet, !self.matchDigests.isEmpty {
@@ -239,7 +242,9 @@ struct Runner {
         }
 
         return sliceResults.map { result in
-            let suffix = [result.arch, result.type].compactMap(\.self).joined(separator: ", ")
+            // An unsigned slice is labeled ADHOC; a signed slice shows its hash type only when ambiguous.
+            let tag = result.adhoc ? "ADHOC" : result.type
+            let suffix = [result.arch, tag].compactMap(\.self).joined(separator: ", ")
             let displayPath = suffix.isEmpty ? item.path : "\(item.path) (\(suffix))"
             return DigestResult(digest: result.hash, path: displayPath, filePath: item.path)
         }

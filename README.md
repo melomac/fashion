@@ -9,7 +9,7 @@ The project natively supports:
 * [git-hash-object][]
 * [symhash][] with any algo, separator and optional sort (Mach-O binaries)
 * [XAR][] archives (macOS packages) table of contents checksum with any algo and optional decompress (zlib)
-* [CDHash][] (signed Mach-O binaries)
+* [CDHash][] of Mach-O binaries — embedded when signed, AD-HOC synthesized when not
 * multithreading
 
 With optimizations, `fashion` is very fast yet has a minimal real memory footprint < 150MB:
@@ -71,9 +71,12 @@ $ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quie
 
 #### CDHash
 
-Compute the Code Directory hash of signed Mach-O binaries, one digest per code directory, strongest first as ranked by [XNU][].
+Compute the Code Directory hash of Mach-O binaries, one digest per code directory, strongest first as ranked by [XNU][].
 Dual-signed binaries emit one line per candidate, labeled with the hash type (`sha1`, `sha256`, `sha256t`, `sha384`).
 While we print the full hash, we can match any CDHashFull or truncated CDHash.
+
+Unsigned slices are not skipped: `fashion` synthesizes their **ad-hoc CodeDirectory hash** and labels the line `ADHOC`.
+This is the identity `syspolicyd` computes for unsigned code and notarization revocation, byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`.
 
 ### Quiet flag
 

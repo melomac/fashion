@@ -20,7 +20,7 @@ extension Algorithm: ExpressibleByArgument {
         case .git256: "Git blob (SHA-256)"
         case .ssdeep: "ssdeep fuzzy hash"
         case .tlsh: "Trend Micro Locality Sensitive Hash"
-        case .cdhash: "CodeDirectory hash"
+        case .cdhash: "CodeDirectory hash (AD-HOC for unsigned slices)"
         }
     }
 }
