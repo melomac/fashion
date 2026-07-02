@@ -23,6 +23,23 @@ final class SSDeepBridgeTests: XCTestCase {
         XCTAssertNotNil(result)
     }
 
+    func testHashDataMatchesHashFile() throws {
+        // The streaming buffer path must produce the same digest as hashing the file directly.
+        let data = Data((0 ..< 8192).map { UInt8($0 & 0xff) })
+        let url = FileManager.default.temporaryDirectory / "fashion-ssdeep-eq-\(UUID())"
+        try data.write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        XCTAssertEqual(SSDeepBridge.hash(data: data), SSDeepBridge.hash(path: url.path()))
+    }
+
+    func testHashEmptyData() {
+        // Empty input has no base address; the bridge must not crash and should return the degenerate signature.
+        XCTAssertEqual(SSDeepBridge.hash(data: Data()), "3::")
+    }
+
     func testHashFileMissingReturnsNil() {
         let result = SSDeepBridge.hash(path: "/tmp/fashion-nonexistent-\(UUID())")
 
