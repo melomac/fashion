@@ -122,6 +122,23 @@ final class MachOParserTests: XCTestCase {
         return data
     }
 
+    private func makeFat64() -> Data {
+        let sliceData = self.makeThin64()
+        var data = Data()
+        data.appendUInt32BE(FAT_MAGIC_64)
+        data.appendUInt32BE(1) // 1 arch
+        data.appendInt32BE(CPU_TYPE_ARM64)
+        data.appendInt32BE(0) // cpusubtype
+        data.appendUInt64BE(UInt64(4096)) // offset (page-aligned)
+        data.appendUInt64BE(UInt64(sliceData.count)) // size
+        data.appendUInt32BE(14) // align (2^14 = 16384)
+        data.appendUInt32BE(0) // reserved
+        let currentSize = data.count
+        data.append(Data(repeating: 0, count: 4096 - currentSize))
+        data.append(sliceData)
+        return data
+    }
+
     // MARK: - Open tests
 
     func testOpenNotMachO() {
@@ -195,6 +212,26 @@ final class MachOParserTests: XCTestCase {
         } else {
             XCTFail("Expected fat binary")
         }
+    }
+
+    func testOpenFat64() {
+        let data = self.makeFat64()
+
+        if case let .fat(archs) = MachOParser.open(data: data) {
+            XCTAssertEqual(archs.count, 1)
+            XCTAssertEqual(archs[0].cpuType, CPU_TYPE_ARM64)
+            XCTAssertEqual(archs[0].offset, 4096)
+            let slice = MachOParser.sliceData(fileData: data, arch: archs[0])
+            XCTAssertEqual(slice.count, Int(archs[0].size))
+        } else {
+            XCTFail("Expected fat64 binary")
+        }
+    }
+
+    func testSliceDataRejectsHugeOffset() {
+        // A crafted 64-bit fat arch with an out-of-range offset must not trap on Int(exactly:).
+        let arch = MachOParser.FatArch(cpuType: 0, cpuSubtype: 0, offset: UInt64.max, size: 100, align: 0)
+        XCTAssertTrue(MachOParser.sliceData(fileData: Data(count: 4096), arch: arch).isEmpty)
     }
 
     func testOpenFromPath() throws {
@@ -355,9 +392,50 @@ final class MachOParserTests: XCTestCase {
         XCTAssertEqual(symbols[0].n_un.n_strx, 0)
         XCTAssertEqual(symbols[0].n_type, 0x0f)
 
-        let name = MachOParser.symbolName(data: data, stroff: stroff, strx: 0)
+        let name = MachOParser.symbolName(data: data, stroff: stroff, strsize: UInt32(strTable.count), strx: 0)
 
         XCTAssertEqual(name, symbolName)
+    }
+
+    func testSymbolNameUnterminatedTableIsBounded() {
+        // A string table with no NUL terminator: the scan must stop at strsize, not run off the buffer.
+        let strTable = Data("_main".utf8)
+        let symbolName = MachOParser.symbolName(data: strTable, stroff: 0, strsize: UInt32(strTable.count), strx: 0)
+
+        XCTAssertEqual(symbolName, "_main")
+    }
+
+    func testSymbolNameStrxBeyondStrsizeReturnsNil() {
+        // strx points past the declared string table extent even though it is within the buffer.
+        let data = Data("_main\u{0}padding".utf8)
+
+        XCTAssertNil(MachOParser.symbolName(data: data, stroff: 0, strsize: 6, strx: 6))
+    }
+
+    func testReadSymbols32BitStride() {
+        // A 32-bit slice packs symbols as 12-byte `nlist`; the reader must use the 12-byte stride so the
+        // second entry's n_strx is read at the right offset rather than 4 bytes into a 16-byte gap.
+        let strTable = Data("_a\u{0}_b\u{0}".utf8)
+        let symoff = UInt32(strTable.count)
+        var data = strTable
+
+        func nlist32(strx: UInt32, type: UInt8) -> Data {
+            var entry = Data(count: 12)
+            entry.withUnsafeMutableBytes { ptr in
+                ptr.storeBytes(of: strx, toByteOffset: 0, as: UInt32.self)
+                ptr.storeBytes(of: type, toByteOffset: 4, as: UInt8.self)
+            }
+            return entry
+        }
+        data.append(nlist32(strx: 0, type: 0x0f)) // "_a"
+        data.append(nlist32(strx: 3, type: 0x0f)) // "_b"
+
+        let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: symoff, nsyms: 2, stroff: 0, strsize: UInt32(strTable.count))
+        let symbols = MachOParser.readSymbols(data: data, symtab: symtab, is64: false, swap: false)
+
+        XCTAssertEqual(symbols.count, 2)
+        XCTAssertEqual(symbols[0].n_un.n_strx, 0)
+        XCTAssertEqual(symbols[1].n_un.n_strx, 3)
     }
 
     func testReadSymbolsOutOfBounds() {
@@ -370,7 +448,7 @@ final class MachOParserTests: XCTestCase {
     func testSymbolNameOutOfBounds() {
         let data = Data(count: 4)
 
-        XCTAssertNil(MachOParser.symbolName(data: data, stroff: 0, strx: 100))
+        XCTAssertNil(MachOParser.symbolName(data: data, stroff: 0, strsize: 4, strx: 100))
     }
 
     // MARK: - sliceData
@@ -667,6 +745,11 @@ private extension Data {
     mutating func appendInt32BE(_ value: Int32) {
         var v = value.bigEndian
         append(Data(bytes: &v, count: 4))
+    }
+
+    mutating func appendUInt64BE(_ value: UInt64) {
+        var v = value.bigEndian
+        append(Data(bytes: &v, count: 8))
     }
 
     mutating func appendUInt64(_ value: UInt64) {

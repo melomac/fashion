@@ -38,23 +38,25 @@ enum SymHash {
     // MARK: - Private
 
     private static func hashSlice(data: Data, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> String? {
-        let commands = MachOParser.loadCommands(data: data)
+        guard let slice = MachOSlice(data) else {
+            return nil
+        }
 
         guard
-            let symtabCmd = commands.first(where: { $0.cmd == UInt32(LC_SYMTAB) }),
-            let symtab = MachOParser.parseSymtab(command: symtabCmd)
+            let symtabCmd = slice.loadCommands.first(where: { $0.cmd == UInt32(LC_SYMTAB) }),
+            let symtab = MachOParser.parseSymtab(command: symtabCmd, swap: slice.swap)
         else {
             return nil
         }
 
-        let symbols = MachOParser.readSymbols(data: data, symtab: symtab)
+        let symbols = MachOParser.readSymbols(data: data, symtab: symtab, is64: slice.is64, swap: slice.swap)
         let mask = UInt8(N_STAB | N_EXT | N_TYPE)
 
         var names: [String] = symbols.compactMap { symbol in
             guard symbol.n_type & mask == UInt8(N_EXT) else {
                 return nil
             }
-            return MachOParser.symbolName(data: data, stroff: symtab.stroff, strx: symbol.n_un.n_strx)
+            return MachOParser.symbolName(data: data, stroff: symtab.stroff, strsize: symtab.strsize, strx: symbol.n_un.n_strx)
         }
 
         if sortSymbols {

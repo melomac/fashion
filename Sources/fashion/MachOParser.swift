@@ -35,7 +35,9 @@ enum MachOParser {
 
         switch magic {
         case FAT_MAGIC, FAT_CIGAM:
-            return self.parseFat(data: data)
+            return self.parseFat(data: data, is64: false)
+        case FAT_MAGIC_64, FAT_CIGAM_64:
+            return self.parseFat(data: data, is64: true)
         case MH_MAGIC_64, MH_CIGAM_64:
             return self.parseThinHeader(data: data, swap: magic == MH_CIGAM_64, headerSize: MemoryLayout<mach_header_64>.size)
         case MH_MAGIC, MH_CIGAM:
@@ -69,7 +71,7 @@ enum MachOParser {
             switch raw.loadUnaligned(as: UInt32.self) {
             case MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64:
                 return true
-            case FAT_MAGIC, FAT_CIGAM:
+            case FAT_MAGIC, FAT_CIGAM, FAT_MAGIC_64, FAT_CIGAM_64:
                 // 0xCAFEBABE is shared with compiled Java class data.
                 // Universal binaries have a small, big-endian, architecture count.
                 let nfatArch = UInt32(bigEndian: raw.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
@@ -109,7 +111,7 @@ enum MachOParser {
         MachOSlice(data)?.loadCommands ?? []
     }
 
-    static func parseSymtab(command: LoadCommand) -> symtab_command? {
+    static func parseSymtab(command: LoadCommand, swap: Bool = false) -> symtab_command? {
         guard
             command.cmd == UInt32(LC_SYMTAB),
             command.data.count >= MemoryLayout<symtab_command>.size
@@ -117,47 +119,76 @@ enum MachOParser {
             return nil
         }
 
-        return command.data.withUnsafeBytes { $0.loadUnaligned(as: symtab_command.self) }
+        let raw = command.data.withUnsafeBytes { $0.loadUnaligned(as: symtab_command.self) }
+        guard swap else { return raw }
+
+        return symtab_command(
+            cmd: raw.cmd.byteSwapped,
+            cmdsize: raw.cmdsize.byteSwapped,
+            symoff: raw.symoff.byteSwapped,
+            nsyms: raw.nsyms.byteSwapped,
+            stroff: raw.stroff.byteSwapped,
+            strsize: raw.strsize.byteSwapped,
+        )
     }
 
-    static func readSymbols(data: Data, symtab: symtab_command) -> [nlist_64] {
-        let entrySize = MemoryLayout<nlist_64>.stride
+    static func readSymbols(data: Data, symtab: symtab_command, is64: Bool = true, swap: Bool = false) -> [nlist_64] {
+        // 32-bit slices use the 12-byte `nlist`, 64-bit the 16-byte `nlist_64`. The leading fields we read
+        // (n_strx, n_type, n_sect) share the same offsets in both, so we extract them directly and build an
+        // nlist_64 carrying only what SymHash consumes.
+        let entrySize = is64 ? 16 : 12
         let symEnd = Int(symtab.symoff) + Int(symtab.nsyms) * entrySize
-        guard symEnd <= data.count else { return [] }
+        guard symEnd <= data.count else {
+            return []
+        }
 
         return data.withUnsafeBytes { ptr in
             (0 ..< Int(symtab.nsyms)).map { i in
-                ptr.loadUnaligned(fromByteOffset: Int(symtab.symoff) + i * entrySize, as: nlist_64.self)
+                let base = Int(symtab.symoff) + i * entrySize
+                let strx = ptr.loadUnaligned(fromByteOffset: base, as: UInt32.self)
+                return nlist_64(
+                    n_un: .init(n_strx: swap ? strx.byteSwapped : strx),
+                    n_type: ptr.loadUnaligned(fromByteOffset: base + 4, as: UInt8.self),
+                    n_sect: ptr.loadUnaligned(fromByteOffset: base + 5, as: UInt8.self),
+                    n_desc: 0,
+                    n_value: 0,
+                )
             }
         }
     }
 
-    static func symbolName(data: Data, stroff: UInt32, strx: UInt32) -> String? {
-        let offset = Int(stroff) + Int(strx)
-        guard offset < data.count else { return nil }
+    static func symbolName(data: Data, stroff: UInt32, strsize: UInt32, strx: UInt32) -> String? {
+        let start = Int(stroff) + Int(strx)
+        // The string is NUL-terminated, but a crafted table may omit the terminator: bound the
+        // scan to the declared string table extent and the buffer so we never read past either.
+        let tableEnd = Swift.min(Int(stroff) + Int(strsize), data.count)
+        guard start < tableEnd else { return nil }
 
-        return data.withUnsafeBytes { ptr -> String? in
-            guard let base = ptr.baseAddress?.advanced(by: offset).assumingMemoryBound(to: CChar.self) else {
-                return nil
+        return data.withUnsafeBytes { raw -> String in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            var end = start
+            while end < tableEnd, bytes[end] != 0 {
+                end += 1
             }
-            return String(cString: base)
+            return String(decoding: bytes[start ..< end], as: UTF8.self)
         }
     }
 
     // MARK: - Slice Data
 
     static func sliceData(fileData: Data, arch: FatArch) -> Data {
-        let start = Int(arch.offset)
-        let end = start + Int(arch.size)
-
+        // arch.offset/size come from an attacker-controllable fat header; convert through Int(exactly:)
+        // and check the sum in wide arithmetic so a crafted 64-bit fat cannot trap on conversion/overflow.
         guard
-            start < fileData.count,
-            end <= fileData.count
+            let start = Int(exactly: arch.offset),
+            let size = Int(exactly: arch.size),
+            start <= fileData.count,
+            size <= fileData.count - start
         else {
             return Data()
         }
 
-        return Data(fileData[start ..< end])
+        return Data(fileData[start ..< start + size])
     }
 
     // MARK: - Logical Extent
@@ -191,7 +222,7 @@ enum MachOParser {
 
     // MARK: - Private
 
-    private static func parseFat(data: Data) -> BinaryType {
+    private static func parseFat(data: Data, is64: Bool) -> BinaryType {
         guard data.count >= 8 else {
             return .notMachO
         }
@@ -210,7 +241,9 @@ enum MachOParser {
         }
 
         var archs: [FatArch] = []
-        let entrySize = MemoryLayout<fat_arch>.size
+        // fat_arch: cputype(4) cpusubtype(4) offset(4) size(4) align(4) = 20 bytes.
+        // fat_arch_64: cputype(4) cpusubtype(4) offset(8) size(8) align(4) reserved(4) = 32 bytes.
+        let entrySize = is64 ? 32 : 20
 
         for i in 0 ..< Int(nfatArch) {
             let offset = 8 + i * entrySize
@@ -219,12 +252,25 @@ enum MachOParser {
             }
 
             data.withUnsafeBytes { ptr in
+                let sliceOffset: UInt64
+                let sliceSize: UInt64
+                let align: UInt32
+                if is64 {
+                    sliceOffset = UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 8, as: UInt64.self))
+                    sliceSize = UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 16, as: UInt64.self))
+                    align = UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 24, as: UInt32.self))
+                } else {
+                    sliceOffset = UInt64(UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 8, as: UInt32.self)))
+                    sliceSize = UInt64(UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 12, as: UInt32.self)))
+                    align = UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 16, as: UInt32.self))
+                }
+
                 archs.append(FatArch(
                     cpuType: cpu_type_t(bigEndian: ptr.loadUnaligned(fromByteOffset: offset, as: cpu_type_t.self)),
                     cpuSubtype: cpu_subtype_t(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 4, as: cpu_subtype_t.self)),
-                    offset: UInt64(UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 8, as: UInt32.self))),
-                    size: UInt64(UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 12, as: UInt32.self))),
-                    align: UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: offset + 16, as: UInt32.self)),
+                    offset: sliceOffset,
+                    size: sliceSize,
+                    align: align,
                 ))
             }
         }
