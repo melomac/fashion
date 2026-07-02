@@ -98,6 +98,68 @@ final class XARParserTests: XCTestCase {
         XCTAssertEqual(result, try CryptoDigest.hash(data: tocBytes, algorithm: .sha256))
     }
 
+    func testParseHeaderRejectsUndersizedHeaderSize() throws {
+        var data = Data()
+        data.append(contentsOf: [0x78, 0x61, 0x72, 0x21]) // magic
+        data.append(contentsOf: [0x00, 0x08]) // header size: 8 (< 28)
+        data.append(contentsOf: [0x00, 0x01]) // version
+        data.append(Data(count: 20))
+
+        XCTAssertThrowsError(try XARParser.parseHeader(data: data))
+    }
+
+    func testHashTocHugeCompressedLengthReturnsNil() throws {
+        // compressedTocLength = UInt64.max would trap on Int(...) before the range check; must return nil.
+        var data = Data()
+        data.append(contentsOf: [0x78, 0x61, 0x72, 0x21]) // magic
+        data.append(contentsOf: [0x00, 0x1c]) // header size: 28
+        data.append(contentsOf: [0x00, 0x01]) // version
+        data.append(contentsOf: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]) // compressed TOC: UInt64.max
+        data.append(contentsOf: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) // uncompressed TOC
+        data.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // checksum
+
+        let url = FileManager.default.temporaryDirectory / "fashion-xar-huge-\(UUID())"
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false))
+    }
+
+    func testHashTocDecompressionBombReturnsNil() throws {
+        // A tiny compressed TOC claiming a huge uncompressed size must be rejected before allocation.
+        let toc = Data("<xar><toc></toc></xar>".utf8)
+        var compressedLen = uLong(compressBound(uLong(toc.count)))
+        var compressed = Data(count: Int(compressedLen))
+        _ = toc.withUnsafeBytes { src in
+            compressed.withUnsafeMutableBytes { dst in
+                compress(
+                    dst.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    &compressedLen,
+                    src.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    uLong(toc.count),
+                )
+            }
+        }
+        compressed = compressed.prefix(Int(compressedLen))
+
+        var data = Data()
+        data.append(contentsOf: [0x78, 0x61, 0x72, 0x21]) // magic
+        data.append(contentsOf: [0x00, 0x1c]) // header size: 28
+        data.append(contentsOf: [0x00, 0x01]) // version
+        var compLen = UInt64(compressed.count).bigEndian
+        data.append(Data(bytes: &compLen, count: 8))
+        var bombLen = UInt64(XARParser.maxUncompressedTocSize + 1).bigEndian // one past the cap
+        data.append(Data(bytes: &bombLen, count: 8))
+        data.append(contentsOf: [0x00, 0x00, 0x00, 0x01]) // checksum
+        data.append(compressed)
+
+        let url = FileManager.default.temporaryDirectory / "fashion-xar-bomb-\(UUID())"
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true))
+    }
+
     func testHashTocMissingFileThrows() {
         XCTAssertThrowsError(try XARParser.hashToc(path: "/tmp/fashion-nonexistent-\(UUID())", algorithm: .sha256, decompress: false))
     }

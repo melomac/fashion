@@ -9,6 +9,9 @@ enum XARParser {
     private static let logger = Logger(subsystem: "fashion", category: "xar")
     private static let XAR_MAGIC: UInt32 = 0x7861_7221 // "xar!"
 
+    /// Upper bound on a decompressed TOC (128 MiB), to bound memory against a decompression bomb.
+    static let maxUncompressedTocSize = 128 << 20
+
     struct XARHeader {
         let headerSize: UInt16
         let version: UInt16
@@ -40,21 +43,28 @@ enum XARParser {
         }
 
         let magic = data.withUnsafeBytes { ptr in
-            UInt32(bigEndian: ptr.load(as: UInt32.self))
+            UInt32(bigEndian: ptr.loadUnaligned(as: UInt32.self))
         }
         guard magic == self.XAR_MAGIC else {
             throw XARError.invalidMagic
         }
 
-        return data.withUnsafeBytes { ptr in
+        let header = data.withUnsafeBytes { ptr in
             XARHeader(
-                headerSize: UInt16(bigEndian: ptr.load(fromByteOffset: 4, as: UInt16.self)),
-                version: UInt16(bigEndian: ptr.load(fromByteOffset: 6, as: UInt16.self)),
-                compressedTocLength: UInt64(bigEndian: ptr.load(fromByteOffset: 8, as: UInt64.self)),
-                uncompressedTocLength: UInt64(bigEndian: ptr.load(fromByteOffset: 16, as: UInt64.self)),
-                checksumAlgorithm: UInt32(bigEndian: ptr.load(fromByteOffset: 24, as: UInt32.self)),
+                headerSize: UInt16(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt16.self)),
+                version: UInt16(bigEndian: ptr.loadUnaligned(fromByteOffset: 6, as: UInt16.self)),
+                compressedTocLength: UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: 8, as: UInt64.self)),
+                uncompressedTocLength: UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: 16, as: UInt64.self)),
+                checksumAlgorithm: UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 24, as: UInt32.self)),
             )
         }
+
+        // The XAR spec fixes the header at 28 bytes; a smaller value would place the TOC inside the header.
+        guard header.headerSize >= 28 else {
+            throw XARError.headerTooShort
+        }
+
+        return header
     }
 
     /**
@@ -70,31 +80,44 @@ enum XARParser {
             return nil
         }
 
-        var tocSize = Int(header.compressedTocLength)
-        let tocStart = Int(header.headerSize)
-        let tocEnd = tocStart + tocSize
-        guard tocEnd <= data.count else {
+        // Every length below is attacker-controlled; validate in wide (UInt64) arithmetic and only
+        // convert to Int once a value is known to be in range, so a crafted header cannot trap.
+        let tocStart = UInt64(header.headerSize)
+        let compressedLength = header.compressedTocLength
+        guard
+            compressedLength <= UInt64(data.count),
+            tocStart <= UInt64(data.count) - compressedLength
+        else {
             return nil
         }
 
-        let compressed = data[tocStart ..< tocEnd]
+        let start = Int(tocStart)
+        let compressed = data[start ..< start + Int(compressedLength)]
 
         let tocData: Data
+        let expectedSize: Int
         if decompress {
-            tocSize = Int(header.uncompressedTocLength)
-            guard let decompressed = decompressZlib(compressed, size: tocSize) else {
+            // Defend against a decompression bomb: reject a declared uncompressed size beyond a generous
+            // ceiling before allocating the output buffer. Real XAR tables of contents are a few MB at most.
+            guard header.uncompressedTocLength <= UInt64(self.maxUncompressedTocSize) else {
+                return nil
+            }
+            let size = Int(header.uncompressedTocLength)
+            guard let decompressed = decompressZlib(compressed, size: size) else {
                 return nil
             }
             tocData = decompressed
+            expectedSize = size
 
             if let xml = String(data: tocData, encoding: .utf8) {
                 self.logger.debug("XAR TOC:\n\(xml, privacy: .public)")
             }
         } else {
             tocData = Data(compressed)
+            expectedSize = Int(compressedLength)
         }
 
-        guard tocData.count == tocSize else {
+        guard tocData.count == expectedSize else {
             return nil
         }
 
