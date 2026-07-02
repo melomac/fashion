@@ -180,13 +180,15 @@ extension MachOSlice {
                 continue
             }
 
-            // hashType is at offset 37 in the CodeDirectory structure.
-            guard off + 38 <= signature.count else {
+            // hashType is at offset 37 in the CodeDirectory structure; require it to lie within the blob's
+            // own declared length, not merely within the signature, so a short blob cannot borrow a byte
+            // from the next one.
+            guard off + 38 <= blobEnd else {
                 continue
             }
 
             let hashType = signature.withUnsafeBytes { ptr -> UInt8 in
-                ptr.load(fromByteOffset: off + 37, as: UInt8.self)
+                ptr.loadUnaligned(fromByteOffset: off + 37, as: UInt8.self)
             }
 
             results.append(EmbeddedCodeDirectory(data: Data(signature[off ..< blobEnd]), hashType: hashType))
