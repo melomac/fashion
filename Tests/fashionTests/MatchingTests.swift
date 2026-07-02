@@ -79,4 +79,50 @@ final class MatchingTests: XCTestCase {
             XCTAssertEqual(result?.score, 0)
         }
     }
+
+    // MARK: - CDHash prefix matching
+
+    private let cdhash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+    func testCDHashFullMatch() {
+        let result = Matching.check(digest: self.cdhash, against: [self.cdhash], algorithm: .cdhash, threshold: 0)
+        XCTAssertNotNil(result)
+    }
+
+    func testCDHashTruncatedPrefixMatch() {
+        let result = Matching.check(digest: self.cdhash, against: [String(self.cdhash.prefix(40))], algorithm: .cdhash, threshold: 0)
+        XCTAssertNotNil(result)
+    }
+
+    func testCDHashCaseInsensitivePrefixMatch() {
+        let result = Matching.check(digest: self.cdhash, against: [String(self.cdhash.prefix(40)).uppercased()], algorithm: .cdhash, threshold: 0)
+        XCTAssertNotNil(result)
+    }
+
+    func testCDHashEmptyTargetDoesNotMatch() {
+        let result = Matching.check(digest: self.cdhash, against: [""], algorithm: .cdhash, threshold: 0)
+        XCTAssertNil(result, "An empty target must not prefix-match every digest")
+    }
+
+    func testCDHashShortTargetDoesNotMatch() {
+        // Below minPrefixHexLength: would otherwise match ~1/16 of all digests.
+        let result = Matching.check(digest: self.cdhash, against: [String(self.cdhash.prefix(4))], algorithm: .cdhash, threshold: 0)
+        XCTAssertNil(result)
+    }
+
+    func testCDHashNonHexTargetDoesNotMatch() {
+        let result = Matching.check(digest: self.cdhash, against: ["nothexvalue!!!"], algorithm: .cdhash, threshold: 0)
+        XCTAssertNil(result)
+    }
+
+    func testCDHashLongerTargetDoesNotMatch() {
+        // A target longer than the computed digest must not match via the (removed) reverse-prefix arm.
+        let result = Matching.check(digest: String(self.cdhash.prefix(40)), against: [self.cdhash], algorithm: .cdhash, threshold: 0)
+        XCTAssertNil(result)
+    }
+
+    func testCDHashDifferentPrefixDoesNotMatch() {
+        let result = Matching.check(digest: self.cdhash, against: ["ffffffffffffffff"], algorithm: .cdhash, threshold: 0)
+        XCTAssertNil(result)
+    }
 }

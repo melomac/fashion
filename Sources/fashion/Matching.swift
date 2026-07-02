@@ -4,6 +4,9 @@ import Foundation
  Exact and fuzzy match logic for digests.
  */
 enum Matching {
+    /// Minimum length (hex characters) for a truncated CDHash target, to avoid degenerate prefix matches.
+    static let minPrefixHexLength = 8
+
     /**
      Check if a digest matches any of the target digests for the given algorithm.
      */
@@ -39,7 +42,13 @@ enum Matching {
 
         for target in targets {
             let t = target.lowercased()
-            if lower == t || lower.hasPrefix(t) || t.hasPrefix(lower) {
+            // Reject degenerate targets: an empty or ultra-short string, or a non-hex value, would
+            // prefix-match (nearly) every digest. A truncated CDHash is a hex prefix of the full digest,
+            // so we only accept the target as a prefix of the computed digest — never the reverse.
+            guard t.count >= self.minPrefixHexLength, t.allSatisfy(\.isHexDigit) else {
+                continue
+            }
+            if lower.hasPrefix(t) {
                 return MatchResult(matched: true, score: nil)
             }
         }

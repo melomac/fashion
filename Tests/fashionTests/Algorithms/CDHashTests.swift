@@ -154,13 +154,16 @@ final class CDHashTests: XCTestCase {
         XCTAssertNotNil(match, "Truncated CDHash should match full CDHash")
     }
 
-    func testTruncatedDigestMatchesFullTarget() throws {
+    func testFullTargetDoesNotMatchTruncatedDigest() throws {
+        // A truncated target is matched as a prefix of the full computed digest, but not the reverse:
+        // a full-length target must not match a shorter digest, or a full sha256 target could spuriously
+        // match a 40-hex sha1 CodeDirectory line on a dual-signed binary.
         let results = CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
         let truncated = String(first.hash.prefix(40))
         let match = Matching.check(digest: truncated, against: [first.hash], algorithm: .cdhash, threshold: 0)
-        XCTAssertNotNil(match, "Full CDHash target should match truncated digest")
+        XCTAssertNil(match, "A longer target must not match a shorter computed digest")
     }
 
     func testNoMatchOnDifferentDigest() throws {
