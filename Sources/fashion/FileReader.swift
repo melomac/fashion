@@ -56,9 +56,20 @@ enum FileReader {
         }
         _ = fcntl(fd.rawValue, F_NOCACHE, 1)
 
+        // A single read(2) may return fewer bytes than requested (e.g. on network filesystems), so loop
+        // until the buffer is filled or EOF; otherwise a short read could misclassify a Mach-O header.
         var bytes = [UInt8](repeating: 0, count: count)
-        let n = try bytes.withUnsafeMutableBytes { try fd.read(into: $0) }
-        bytes.removeLast(count - n)
+        var filled = 0
+        try bytes.withUnsafeMutableBytes { raw in
+            while filled < count {
+                let n = try fd.read(into: UnsafeMutableRawBufferPointer(rebasing: raw[filled...]))
+                if n == 0 {
+                    break
+                }
+                filled += n
+            }
+        }
+        bytes.removeLast(count - filled)
 
         return bytes
     }
