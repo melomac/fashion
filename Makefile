@@ -61,7 +61,7 @@ xcode-clean: xcode
 
 .PHONY: distclean
 distclean: clean xcode-clean
-	git clean -dx --force --force
+	git clean -dx --force -e submodules
 
 .PHONY: xcode
 xcode:
