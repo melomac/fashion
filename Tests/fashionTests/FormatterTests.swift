@@ -27,13 +27,13 @@ final class FormatterTests: XCTestCase {
         let path = "/tmp/file.txt"
         let line = OutputFormatter.formatLine(digest: digest, path: path, algorithm: .cdhash)
 
-        // formatLine pads cdhash digests to SHA-256 length, then "  <path>"
+        // formatLine pads cdhash digests to the common SHA-256 length, then "  <path>"
         let expectedLength = OutputFormatter.cdhashPadWidth + 2 + path.count
         XCTAssertEqual(line.count, expectedLength)
         XCTAssertTrue(line.hasSuffix("  \(path)"))
 
-        // Full SHA-256 digests are left untouched
-        let full = String(repeating: "b", count: 64)
+        // A full-width digest (at the pad width) is left untouched
+        let full = String(repeating: "b", count: OutputFormatter.cdhashPadWidth)
         XCTAssertEqual(OutputFormatter.formatLine(digest: full, path: path, algorithm: .cdhash), "\(full)  \(path)")
 
         // formatQuiet returns the raw digest without padding (machine-consumable)
@@ -66,5 +66,30 @@ final class FormatterTests: XCTestCase {
         let line = OutputFormatter.formatMatchLine(digest: "abc123", score: 0, path: "/tmp/file.txt", algorithm: .sha256)
         XCTAssertTrue(line.hasPrefix("abc123"))
         XCTAssertTrue(line.hasSuffix("/tmp/file.txt"))
+    }
+
+    // MARK: - Path escaping
+
+    func testFormatLineEscapesNewlineInPath() {
+        // A crafted filename with a newline must not forge a second output line.
+        let line = OutputFormatter.formatLine(digest: "abc123", path: "/tmp/a\nb", algorithm: .sha256)
+        XCTAssertFalse(line.contains("\n"), "Newline must be escaped, not emitted literally")
+        XCTAssertEqual(line, "\\abc123  /tmp/a\\nb")
+    }
+
+    func testFormatLineEscapesBackslashInPath() {
+        let line = OutputFormatter.formatLine(digest: "abc123", path: "/tmp/a\\b", algorithm: .sha256)
+        XCTAssertEqual(line, "\\abc123  /tmp/a\\\\b")
+    }
+
+    func testFormatLineOrdinaryPathNotEscaped() {
+        let line = OutputFormatter.formatLine(digest: "abc123", path: "/tmp/file.txt", algorithm: .sha256)
+        XCTAssertEqual(line, "abc123  /tmp/file.txt")
+    }
+
+    func testFormatQuietMatchEscapesNewline() {
+        let line = OutputFormatter.formatQuietMatch(path: "/tmp/a\nb")
+        XCTAssertFalse(line.contains("\n"))
+        XCTAssertEqual(line, "\\/tmp/a\\nb")
     }
 }
