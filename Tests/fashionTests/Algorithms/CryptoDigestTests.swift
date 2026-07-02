@@ -2,6 +2,23 @@
 import XCTest
 
 final class CryptoDigestTests: XCTestCase {
+    func testExactLengthMismatchThrows() throws {
+        // Simulates a file that shrank between stat and read: fewer bytes are read than exactLength claims.
+        let url = FileManager.default.temporaryDirectory / "fashion-exactlen-\(UUID())"
+        try Data("hello".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertThrowsError(try CryptoDigest.hash(path: url.path(), algorithm: .sha256, exactLength: 999))
+    }
+
+    func testExactLengthMatchSucceeds() throws {
+        let url = FileManager.default.temporaryDirectory / "fashion-exactlen-ok-\(UUID())"
+        try Data("hello".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertNoThrow(try CryptoDigest.hash(path: url.path(), algorithm: .sha256, exactLength: 5))
+    }
+
     func testMD5Empty() throws {
         let data = Data()
         let result = try CryptoDigest.hash(data: data, algorithm: .md5)
