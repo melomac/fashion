@@ -149,6 +149,22 @@ Set `-j 0` to use all available CPU cores.
 
 The `--sort` flag trades some throughput for deterministic output order—paths are collected, sorted, and results are emitted sequentially even under concurrent processing.
 
+By default (unsorted) enumeration is demand-driven, so the walk never runs far ahead of hashing.
+
+The `-L` / `--follow` flag follows symlinks while walking; by default they are skipped.
+
+### Exit status
+
+`fashion` follows the grep/codesign convention so it can be scripted:
+
+| Code | Description                                                               |
+|:----:|:--------------------------------------------------------------------------|
+|  0   | success — in match mode, at least one match was found                     |
+|  1   | match mode — no file matched                                              |
+|  2   | one or more paths could not be enumerated or hashed                       |
+
+Per-path failures (a missing path, a permission-denied directory, an unreadable file) are written to standard error and set exit code `2`; they never abort the rest of the scan.
+
 ## Misc
 
 ### Completion

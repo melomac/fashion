@@ -35,6 +35,35 @@ actor OutputWriter {
     }
 }
 
+// MARK: - ErrorReporter
+
+/**
+ Thread-safe diagnostics sink: writes messages to both stderr (for the user and scripts) and the
+ unified log (for a persistent, queryable record), and counts them so the process can exit non-zero
+ when any path could not be enumerated or hashed. Lock-based so it is callable from the synchronous
+ worker code as well as the async pipeline.
+ */
+final class ErrorReporter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let handle = FileHandle.standardError
+    private let logger = Logger(subsystem: "fashion", category: "runner")
+    private var errorCount = 0
+
+    var count: Int {
+        self.lock.withLock { self.errorCount }
+    }
+
+    func report(path: String, message: String) {
+        self.logger.error("\(path, privacy: .public): \(message, privacy: .public)")
+        self.lock.withLock {
+            self.errorCount += 1
+            if let data = "fashion: \(path): \(message)\n".data(using: .utf8) {
+                self.handle.write(data)
+            }
+        }
+    }
+}
+
 // MARK: - Runner
 
 /**
@@ -57,28 +86,44 @@ struct Runner {
     let xarToc: Bool
     let decompress: Bool
 
-    private let logger = Logger(subsystem: "fashion", category: "runner")
+    private let reporter = ErrorReporter()
 
-    func run() async throws {
+    /**
+     Run the pipeline and return a process exit code:
+     - `0` success,
+     - `1` match mode found nothing,
+     - `2` one or more paths could not be enumerated or hashed.
+     */
+    func run() async -> Int32 {
         let writer = OutputWriter()
 
+        let matchFound: Bool
         if self.sortFiles {
-            let allPaths = FileEnumerator.collectSorted(paths: self.paths, follow: self.follow)
-            try await self.runSorted(paths: allPaths, writer: writer)
+            let allPaths = FileEnumerator.collectSorted(paths: self.paths, follow: self.follow, reporter: self.reporter)
+            matchFound = await self.runSorted(paths: allPaths, writer: writer)
         } else {
-            let pathStream = FileEnumerator.walk(paths: self.paths, follow: self.follow)
-            try await self.runStreaming(pathStream: pathStream, writer: writer)
+            let pathStream = FileEnumerator.walk(paths: self.paths, follow: self.follow, reporter: self.reporter)
+            matchFound = await self.runStreaming(pathStream: pathStream, writer: writer)
         }
+
+        if self.reporter.count > 0 {
+            return 2
+        }
+        if !self.matchDigests.isEmpty, !matchFound {
+            return 1
+        }
+        return 0
     }
 
     // MARK: - Sorted Mode
 
-    private func runSorted(paths: [String], writer: OutputWriter) async throws {
+    private func runSorted(paths: [String], writer: OutputWriter) async -> Bool {
         guard !paths.isEmpty else {
-            return
+            return false
         }
 
-        try await withThrowingTaskGroup(of: Batch.self) { group in
+        var matchFound = false
+        await withTaskGroup(of: Batch.self) { group in
             var pending = paths.enumerated().makeIterator()
             var buffer: [Int: Batch] = [:]
             var nextToEmit = 0
@@ -90,19 +135,19 @@ struct Runner {
                 }
                 let item = WorkItem(index: index, path: path)
                 group.addTask {
-                    try self.processItem(item)
+                    self.processItem(item)
                 }
             }
 
             // Process results, emit in order, feed more work
-            while let batch = try await group.next() {
+            while let batch = await group.next() {
                 buffer[batch.index] = batch
 
                 // Feed next item
                 if let (index, path) = pending.next() {
                     let item = WorkItem(index: index, path: path)
                     group.addTask {
-                        try self.processItem(item)
+                        self.processItem(item)
                     }
                 }
 
@@ -110,6 +155,7 @@ struct Runner {
                 while let ready = buffer.removeValue(forKey: nextToEmit) {
                     for result in ready.results {
                         if let line = formatResult(result) {
+                            matchFound = true
                             await writer.write(line)
                         }
                     }
@@ -117,14 +163,16 @@ struct Runner {
                 }
             }
         }
+        return matchFound
     }
 
     // MARK: - Streaming Mode
 
-    private func runStreaming(pathStream: AsyncStream<String>, writer: OutputWriter) async throws {
+    private func runStreaming(pathStream: AsyncStream<String>, writer: OutputWriter) async -> Bool {
         var index = 0
+        var matchFound = false
 
-        try await withThrowingTaskGroup(of: Batch.self) { group in
+        await withTaskGroup(of: Batch.self) { group in
             var activeCount = 0
 
             for await path in pathStream {
@@ -133,40 +181,43 @@ struct Runner {
 
                 if activeCount < self.jobs {
                     group.addTask {
-                        try self.processItem(item)
+                        self.processItem(item)
                     }
                     activeCount += 1
                 } else {
                     // Wait for one to finish before adding more
-                    if let batch = try await group.next() {
+                    if let batch = await group.next() {
                         activeCount -= 1
                         for result in batch.results {
                             if let line = formatResult(result) {
+                                matchFound = true
                                 await writer.write(line)
                             }
                         }
                     }
                     group.addTask {
-                        try self.processItem(item)
+                        self.processItem(item)
                     }
                     activeCount += 1
                 }
             }
 
             // Drain remaining
-            while let batch = try await group.next() {
+            while let batch = await group.next() {
                 for result in batch.results {
                     if let line = formatResult(result) {
+                        matchFound = true
                         await writer.write(line)
                     }
                 }
             }
         }
+        return matchFound
     }
 
     // MARK: - Processing
 
-    private func processItem(_ item: WorkItem) throws -> Batch {
+    private func processItem(_ item: WorkItem) -> Batch {
         let results: [DigestResult] = if self.symhash {
             self.processSymHash(item)
         } else if self.xarToc {
@@ -219,7 +270,7 @@ struct Runner {
             }
             return [DigestResult(digest: d, path: item.path, filePath: item.path)]
         } catch {
-            self.logger.info("Error processing \(item.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            self.reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
     }
@@ -272,7 +323,7 @@ struct Runner {
                 }
             }
         } catch {
-            self.logger.info("Error reading slices for \(item.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            self.reporter.report(path: item.path, message: error.localizedDescription)
         }
 
         // Quiet match mode: emit the file once on the first matching line (mirrors processCDHash).
@@ -340,7 +391,7 @@ struct Runner {
                 return DigestResult(digest: r.digest, path: displayPath, filePath: item.path)
             }
         } catch {
-            self.logger.info("Error computing symhash for \(item.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            self.reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
     }
@@ -352,7 +403,7 @@ struct Runner {
             }
             return []
         } catch {
-            self.logger.info("Error processing XAR \(item.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            self.reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
     }

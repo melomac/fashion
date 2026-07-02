@@ -102,7 +102,42 @@ struct Fashion: AsyncParsableCommand {
     }
 
     var resolvedScore: Int {
-        max(0, self.matchOptions.score)
+        self.matchOptions.score
+    }
+
+    // MARK: - Validation
+
+    mutating func validate() throws {
+        // The pipeline routes each item to exactly one of these modes, so combining them silently
+        // discards all but the highest-priority one. Reject the ambiguity up front.
+        let modeCount = [self.symbolOptions.symhash, self.xarOptions.xarToc, self.slices].count(where: { $0 })
+        if modeCount > 1 {
+            throw ValidationError("--symhash, --xar-toc, and --slices are mutually exclusive.")
+        }
+
+        // Reject algorithms a mode cannot compute; otherwise the mode silently emits nothing.
+        if let algo = self.algo {
+            if self.symbolOptions.symhash, [.git, .git256, .cdhash].contains(algo) {
+                throw ValidationError("--symhash does not support the \(algo.rawValue) algorithm.")
+            }
+            if self.xarOptions.xarToc, algo == .cdhash {
+                throw ValidationError("--xar-toc does not support the cdhash algorithm.")
+            }
+            if self.slices, algo == .cdhash {
+                throw ValidationError("--slices does not support the cdhash algorithm; use --algo cdhash on its own.")
+            }
+        }
+
+        // Flags that are silently ignored outside the mode they belong to.
+        if self.exact, self.symbolOptions.symhash || self.xarOptions.xarToc {
+            throw ValidationError("--exact does not apply to --symhash or --xar-toc.")
+        }
+        if self.xarOptions.decompress, !self.xarOptions.xarToc {
+            throw ValidationError("--decompress requires --xar-toc.")
+        }
+        if self.matchOptions.score < 0 {
+            throw ValidationError("--score must be zero or greater.")
+        }
     }
 
     // MARK: - Run
@@ -125,7 +160,10 @@ struct Fashion: AsyncParsableCommand {
             xarToc: self.xarOptions.xarToc,
             decompress: self.xarOptions.decompress,
         )
-        try await runner.run()
+        let code = await runner.run()
+        if code != 0 {
+            throw ExitCode(code)
+        }
     }
 }
 
