@@ -113,28 +113,36 @@ final class AdhocCDHashTests: XCTestCase {
         let slice = try XCTUnwrap(MachOSlice(self.makeMachO()))
         let directories = slice.codeDirectoryHashes(exact: false)
 
-        XCTAssertEqual(directories.count, 1)
-        let cd = try XCTUnwrap(directories.first)
-        XCTAssertTrue(cd.adhoc, "An unsigned slice yields the synthesized ad-hoc cdhash")
-        XCTAssertEqual(cd.type, "adhoc")
-        XCTAssertEqual(cd.hash.count, 64) // full SHA-256 of the CodeDirectory
-        XCTAssertTrue(cd.hash.allSatisfy(\.isHexDigit))
+        // An unsigned slice yields both synthesized ad-hoc cdhashes: SHA-256 first, then SHA-1.
+        XCTAssertEqual(directories.count, 2)
+
+        let sha256 = try XCTUnwrap(directories.first)
+        XCTAssertTrue(sha256.adhoc, "An unsigned slice yields the synthesized ad-hoc cdhash")
+        XCTAssertEqual(sha256.type, "sha256")
+        XCTAssertEqual(sha256.hash.count, 64) // full SHA-256 of the SHA-256 CodeDirectory
+        XCTAssertTrue(sha256.hash.allSatisfy(\.isHexDigit))
+
+        let sha1 = try XCTUnwrap(directories.last)
+        XCTAssertTrue(sha1.adhoc)
+        XCTAssertEqual(sha1.type, "sha1")
+        XCTAssertEqual(sha1.hash.count, 40) // full SHA-1 of the SHA-1 CodeDirectory
+        XCTAssertTrue(sha1.hash.allSatisfy(\.isHexDigit))
 
         // Deterministic.
-        XCTAssertEqual(cd.hash, MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).first?.hash)
+        XCTAssertEqual(directories.map(\.hash), MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).map(\.hash))
     }
 
     func testExactStripsTrailingGarbage() throws {
         let clean = self.makeMachO(fileSize: 256)
-        let cleanHash = try XCTUnwrap(MachOSlice(clean)?.codeDirectoryHashes(exact: false).first?.hash)
+        let cleanHashes = try XCTUnwrap(MachOSlice(clean)?.codeDirectoryHashes(exact: false).map(\.hash))
 
         var dirty = clean
         dirty.append(Data(repeating: 0x41, count: 100))
 
-        let dirtyExact = MachOSlice(dirty)?.codeDirectoryHashes(exact: true).first?.hash
-        let dirtyWhole = MachOSlice(dirty)?.codeDirectoryHashes(exact: false).first?.hash
-        XCTAssertEqual(dirtyExact, cleanHash, "Exact must strip appended garbage")
-        XCTAssertNotEqual(dirtyWhole, cleanHash, "Whole-slice adhoc must include garbage")
+        let dirtyExact = MachOSlice(dirty)?.codeDirectoryHashes(exact: true).map(\.hash)
+        let dirtyWhole = MachOSlice(dirty)?.codeDirectoryHashes(exact: false).map(\.hash)
+        XCTAssertEqual(dirtyExact, cleanHashes, "Exact must strip appended garbage (both cdhashes)")
+        XCTAssertNotEqual(dirtyWhole, cleanHashes, "Whole-slice adhoc must include garbage")
     }
 
     // MARK: - CDHash integration
@@ -146,10 +154,13 @@ final class AdhocCDHashTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let first = try XCTUnwrap(CDHash.hash(path: url.path()).first)
-        XCTAssertTrue(first.adhoc, "CDHash tags an unsigned slice ADHOC")
-        XCTAssertNil(first.arch, "thin binary → nil arch")
-        XCTAssertEqual(first.hash, MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).first?.hash)
+        let results = CDHash.hash(path: url.path())
+        XCTAssertEqual(results.count, 2, "an unsigned thin slice yields both ad-hoc cdhashes")
+        for r in results {
+            XCTAssertTrue(r.adhoc, "CDHash tags an unsigned slice ADHOC")
+            XCTAssertNil(r.arch, "thin binary → nil arch")
+        }
+        XCTAssertEqual(results.map(\.hash), MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).map(\.hash))
     }
 
     func testSignedButUnparseableSliceIsNotAdhoc() throws {

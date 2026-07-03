@@ -195,9 +195,10 @@ final class CDHashTests: XCTestCase {
     }
 
     func testAdhocMatchesCodesignDetached() throws {
-        // Strip a real system binary → unsigned, then each slice's synthesized ad-hoc cdhash must equal
-        // codesign --detached's CandidateCDHashFull. This also exercises the x86_64 (4 KiB page) and
-        // multi-code-slot synthesis branches, which the synthetic fixtures do not.
+        // Strip a real system binary → unsigned, then each slice's synthesized ad-hoc cdhashes (SHA-256 and
+        // SHA-1) must equal codesign --detached's CandidateCDHashFull for the matching algorithm. This also
+        // exercises the x86_64 (4 KiB page) and multi-code-slot synthesis branches, which the synthetic
+        // fixtures do not.
         let dir = FileManager.default.temporaryDirectory / "fashion-adhoc-oracle-\(UUID())"
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -211,14 +212,16 @@ final class CDHashTests: XCTestCase {
 
         for r in results {
             XCTAssertTrue(r.adhoc, "stripped slice \(r.arch ?? "thin") must be ADHOC")
+            let alg = try XCTUnwrap(r.type, "an ad-hoc result must carry its hash type (sha256 / sha1)")
 
             let archArgs = r.arch.map { ["--arch", $0] } ?? []
             let sig = dir / "detached.sig"
-            _ = try self.codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC"] + archArgs + [bin.path()])
+            // Sign with both algorithms so codesign emits both CandidateCDHashFull sha256 and sha1.
+            _ = try self.codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC", "--digest-algorithm=sha1,sha256"] + archArgs + [bin.path()])
             let out = try self.codesign(["-dvvv", "--detached", sig.path()] + archArgs + [bin.path()])
-            let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull"), "codesign printed no CandidateCDHashFull")
+            let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull \(alg)"), "codesign printed no CandidateCDHashFull \(alg)")
 
-            XCTAssertEqual(r.hash, expected, "adhoc cdhash ≠ codesign --detached (\(r.arch ?? "thin"))")
+            XCTAssertEqual(r.hash, expected, "adhoc \(alg) cdhash ≠ codesign --detached (\(r.arch ?? "thin"))")
         }
     }
 

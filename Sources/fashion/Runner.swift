@@ -293,8 +293,13 @@ struct Runner {
         }
 
         return sliceResults.map { result in
-            // An unsigned slice is labeled ADHOC; a signed slice shows its hash type only when ambiguous.
-            let tag = result.adhoc ? "ADHOC" : result.type
+            // An unsigned slice is labeled ADHOC; its hash type (sha256 / sha1) is appended to tell the two
+            // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous.
+            let tag: String? = if result.adhoc {
+                result.type.map { "ADHOC, \($0)" } ?? "ADHOC"
+            } else {
+                result.type
+            }
             let suffix = [result.arch, tag].compactMap(\.self).joined(separator: ", ")
             let displayPath = suffix.isEmpty ? item.path : "\(item.path) (\(suffix))"
             return DigestResult(digest: result.hash, path: displayPath, filePath: item.path)

@@ -79,17 +79,20 @@ enum CDHash {
 // MARK: - Per-slice code directory logic
 
 extension MachOSlice {
-    /// A single code directory digest of a slice.
+    /**
+     A single code directory digest of a slice.
+     */
     struct CodeDirectoryHash {
         let hash: String
-        /// `sha1` / `sha256` / `sha256t` / `sha384` for an embedded directory, `adhoc` when synthesized.
+        /// The hash algorithm: `sha1` / `sha256` / `sha256t` / `sha384` for an embedded directory,
+        /// or `sha1` / `sha256` for a synthesized ad-hoc directory.
         let type: String
         let adhoc: Bool
     }
 
     /**
      Digest every code directory of a signed slice, strongest first per hashRank — the head is the kernel-enforced cdhash.
-     An unsigned slice returns its synthesized ad-hoc cdhash instead.
+     An unsigned slice returns its synthesized ad-hoc cdhashes instead (SHA-256 then SHA-1).
      */
     func codeDirectoryHashes(exact: Bool) -> [CodeDirectoryHash] {
         // Only a slice with no signature at all falls back to the ad-hoc identity: a signed slice with an
@@ -98,10 +101,7 @@ extension MachOSlice {
             return self.embeddedCodeDirectories(in: sigRange)
         }
 
-        guard let hash = self.adhocCDHash(exact: exact) else {
-            return []
-        }
-        return [CodeDirectoryHash(hash: hash, type: "adhoc", adhoc: true)]
+        return self.adhocCDHashes(exact: exact)
     }
 
     // MARK: - Embedded signature
@@ -233,30 +233,34 @@ extension MachOSlice {
     // MARK: - Ad-hoc synthesis
 
     /**
-     Synthesize the ad-hoc cdhash of an unsigned slice: the full SHA-256 of the CodeDirectory that
-     `codesign --detached -s - --identifier ADHOC` builds, byte for byte.
+     Synthesize the ad-hoc cdhashes of an unsigned slice: for each hash algorithm codesign uses, the digest
+     of the CodeDirectory that `codesign --detached -s - --identifier ADHOC --digest-algorithm=sha1,sha256`
+     builds, byte for byte. Each cdhash is that directory digested under its own hash type.
 
-     While we print the full hash, we can match the truncated 20-byte cdhash too.
-     Code covers the whole slice, or its logical extent when `exact` is set.
+     Returns the SHA-256 cdhash first (the kernel-enforced identity, matching `CandidateCDHashFull sha256`)
+     then the SHA-1 cdhash (`CandidateCDHashFull sha1`). While we print the full hash, we can match the
+     truncated 20-byte cdhash too. Code covers the whole slice, or its logical extent when `exact` is set.
      */
-    private func adhocCDHash(exact: Bool) -> String? {
+    private func adhocCDHashes(exact: Bool) -> [CodeDirectoryHash] {
         let codeLimit = exact ? self.logicalEnd() : self.data.count
 
         // The synthesized CodeDirectory carries the 32-bit codeLimit field; a slice >= 4 GiB would need codeLimit64.
         guard codeLimit > 0, codeLimit <= UInt32.max else {
-            return nil
+            return []
         }
 
         // Code-signing page size follows the target architecture: 16 KiB on arm64, 4 KiB elsewhere.
         let pageSizeLog: UInt8 = self.cpuType == CPU_TYPE_ARM64 ? 14 : 12
-        let cd = self.synthesizeCodeDirectory(codeLimit: codeLimit, pageSizeLog: pageSizeLog)
 
-        return SHA256.hash(data: cd).hexString
+        return [AdhocHashType.sha256, .sha1].map { hashType in
+            let cd = self.synthesizeCodeDirectory(codeLimit: codeLimit, pageSizeLog: pageSizeLog, hashType: hashType)
+            return CodeDirectoryHash(hash: hashType.hexDigest(cd), type: hashType.name, adhoc: true)
+        }
     }
 
-    private func synthesizeCodeDirectory(codeLimit: Int, pageSizeLog: UInt8) -> Data {
+    private func synthesizeCodeDirectory(codeLimit: Int, pageSizeLog: UInt8, hashType: AdhocHashType) -> Data {
         let pageSize = 1 << Int(pageSizeLog)
-        let hashSize = 32
+        let hashSize = hashType.digestSize
         let nSpecialSlots = 2
         let nCodeSlots = (codeLimit + pageSize - 1) / pageSize
 
@@ -278,7 +282,7 @@ extension MachOSlice {
         cd.appendBigEndian(UInt32(nSpecialSlots)) // nSpecialSlots
         cd.appendBigEndian(UInt32(nCodeSlots)) // nCodeSlots
         cd.appendBigEndian(UInt32(codeLimit)) // codeLimit
-        cd.append(contentsOf: [UInt8(hashSize), Self.csHashTypeSHA256, 0, pageSizeLog]) // hashSize, hashType, platform, pageSize
+        cd.append(contentsOf: [UInt8(hashSize), hashType.csHashType, 0, pageSizeLog]) // hashSize, hashType, platform, pageSize
         cd.appendBigEndian(UInt32(0)) // spare2
         cd.appendBigEndian(UInt32(0)) // scatterOffset
         cd.appendBigEndian(UInt32(0)) // teamOffset
@@ -289,13 +293,13 @@ extension MachOSlice {
         cd.appendBigEndian(exec.flags) // execSegFlags
         cd.append(identifier)
 
-        cd.append(Self.emptyRequirementsHash) // special slot -2: requirements
+        cd.append(hashType.digest(Self.emptyRequirementsBlob)) // special slot -2: requirements
         cd.append(Data(repeating: 0, count: hashSize)) // special slot -1: Info.plist (absent)
 
         var offset = 0
         while offset < codeLimit {
             let end = min(offset + pageSize, codeLimit)
-            cd.append(Data(SHA256.hash(data: self.data.subdata(in: offset ..< end))))
+            cd.append(hashType.digest(self.data.subdata(in: offset ..< end)))
             offset += pageSize
         }
 
@@ -303,16 +307,16 @@ extension MachOSlice {
     }
 
     /**
-     SHA-256 of the empty requirements blob codesign embeds — special slot -2.
+     The empty requirements blob codesign embeds; special slot -2 is its digest under the directory's hash type.
      A constant, independent of the binary: magic, length 12, count 0.
      */
-    private static let emptyRequirementsHash: Data = {
+    private static let emptyRequirementsBlob: Data = {
         var blob = Data()
         blob.appendBigEndian(Self.csmagicRequirements)
         blob.appendBigEndian(UInt32(12))
         blob.appendBigEndian(UInt32(0))
 
-        return Data(SHA256.hash(data: blob))
+        return blob
     }()
 
     // MARK: - Constants (xnu cs_blobs.h, big-endian on disk)
@@ -340,6 +344,65 @@ extension MachOSlice {
 private struct EmbeddedCodeDirectory {
     let data: Data
     let hashType: UInt8
+}
+
+/**
+ A hash algorithm used to synthesize an ad-hoc CodeDirectory. codesign builds one directory per algorithm;
+ each carries hash slots of that algorithm's width and yields its own cdhash, digested under the same algorithm.
+ */
+private enum AdhocHashType {
+    case sha256
+    case sha1
+
+    /**
+     The `cs_blobs.h` hashType byte stored in the CodeDirectory (`CS_HASHTYPE_SHA1` / `CS_HASHTYPE_SHA256`).
+     */
+    var csHashType: UInt8 {
+        switch self {
+        case .sha1: 1
+        case .sha256: 2
+        }
+    }
+
+    /**
+     Width of one hash slot, in bytes.
+     */
+    var digestSize: Int {
+        switch self {
+        case .sha1: Insecure.SHA1.byteCount
+        case .sha256: SHA256.byteCount
+        }
+    }
+
+    /**
+     Output label identifying the algorithm on the synthesized line.
+     */
+    var name: String {
+        switch self {
+        case .sha1: "sha1"
+        case .sha256: "sha256"
+        }
+    }
+
+    /**
+     Raw digest of `data` — a special or code hash slot inside the CodeDirectory.
+     */
+    func digest(_ data: Data) -> Data {
+        switch self {
+        case .sha1: Data(Insecure.SHA1.hash(data: data))
+        case .sha256: Data(SHA256.hash(data: data))
+        }
+    }
+
+    /**
+     Hex-encoded digest of `data` — the cdhash of the assembled CodeDirectory.
+     */
+    func hexDigest(_ data: Data) -> String {
+        switch self {
+        case .sha1: Insecure.SHA1.hash(data: data).hexString
+        case .sha256: SHA256.hash(data: data).hexString
+        }
+    }
 }
 
 private extension Data {
