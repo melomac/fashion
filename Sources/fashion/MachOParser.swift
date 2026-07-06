@@ -120,7 +120,9 @@ enum MachOParser {
         }
 
         let raw = command.data.withUnsafeBytes { $0.loadUnaligned(as: symtab_command.self) }
-        guard swap else { return raw }
+        guard swap else {
+            return raw
+        }
 
         return symtab_command(
             cmd: raw.cmd.byteSwapped,
@@ -162,7 +164,9 @@ enum MachOParser {
         // The string is NUL-terminated, but a crafted table may omit the terminator: bound the
         // scan to the declared string table extent and the buffer so we never read past either.
         let tableEnd = Swift.min(Int(stroff) + Int(strsize), data.count)
-        guard start < tableEnd else { return nil }
+        guard start < tableEnd else {
+            return nil
+        }
 
         return data.withUnsafeBytes { raw -> String in
             let bytes = raw.bindMemory(to: UInt8.self)

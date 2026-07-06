@@ -32,7 +32,7 @@ struct Fashion: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fashion",
         abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
-        version: "1.1.0",
+        version: "1.1.1",
     )
 
     @Argument(help: "Paths to scan (default: current directory).", completion: .file())
