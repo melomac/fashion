@@ -27,3 +27,5 @@ OTHER_CODE_SIGN_FLAGS = $(inherited) --identifier $(PRODUCT_NAME) --options runt
 
 // SDKSettings.plist
 ENTITLEMENTS_REQUIRED = NO
+
+#include? "local.xcconfig"
