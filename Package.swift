@@ -26,7 +26,6 @@ let package = Package(
                 "configure.ac",
                 "m4",
                 "sample.c",
-                "ssdeep.1",
                 "Doxyfile",
                 "INSTALL",
                 "bootstrap",
