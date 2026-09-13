@@ -182,12 +182,14 @@ final class CDHashTests: XCTestCase {
         let path = "/bin/ls"
         let results = CDHash.hash(path: path)
         try XCTSkipIf(results.isEmpty, "no cdhash for \(path)")
+        try self.assertSliceNamesMatchCodesign(results, path: path)
 
         for r in results {
             XCTAssertFalse(r.adhoc, "\(r.arch ?? "thin") slice of \(path) is signed")
 
             let archArgs = r.arch.map { ["--arch", $0] } ?? []
-            let out = try self.codesign(["-dvvv"] + archArgs + [path])
+            let out = try codesign(["-dvvv"] + archArgs + [path])
+            Self.assertInspectedSlice(out, arch: r.arch)
             let expected = try XCTUnwrap(Self.field(out, prefix: "CDHash="), "codesign printed no CDHash")
 
             XCTAssertEqual(String(r.hash.prefix(40)), expected, "embedded cdhash ≠ codesign CDHash (\(r.arch ?? "thin"))")
@@ -205,7 +207,7 @@ final class CDHashTests: XCTestCase {
 
         let bin = dir / "ls"
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: bin)
-        _ = try self.codesign(["--remove-signature", bin.path()])
+        _ = try codesign(["--remove-signature", bin.path()])
 
         let results = CDHash.hash(path: bin.path())
         try XCTSkipIf(results.isEmpty, "no cdhash after stripping the signature")
@@ -217,8 +219,9 @@ final class CDHashTests: XCTestCase {
             let archArgs = r.arch.map { ["--arch", $0] } ?? []
             let sig = dir / "detached.sig"
             // Sign with both algorithms so codesign emits both CandidateCDHashFull sha256 and sha1.
-            _ = try self.codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC", "--digest-algorithm=sha1,sha256"] + archArgs + [bin.path()])
-            let out = try self.codesign(["-dvvv", "--detached", sig.path()] + archArgs + [bin.path()])
+            _ = try codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC", "--digest-algorithm=sha1,sha256"] + archArgs + [bin.path()])
+            let out = try codesign(["-dvvv", "--detached", sig.path()] + archArgs + [bin.path()])
+            Self.assertInspectedSlice(out, arch: r.arch)
             let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull \(alg)"), "codesign printed no CandidateCDHashFull \(alg)")
 
             XCTAssertEqual(r.hash, expected, "adhoc \(alg) cdhash ≠ codesign --detached (\(r.arch ?? "thin"))")
@@ -227,21 +230,32 @@ final class CDHashTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// Run `/usr/bin/codesign` and return its combined stdout+stderr (codesign `-d` prints to stderr).
-    private func codesign(_ arguments: [String]) throws -> String {
-        let url = URL(fileURLWithPath: "/usr/bin/codesign")
-        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: url.path()), "codesign unavailable")
+    /**
+     Every slice codesign lists for a universal `path` must appear in `results` under the same name, the name
+     `codesign --arch` resolves. A slice reported under another name (macOS 27's arm64e.x1 as `arm64`) makes
+     codesign inspect a different slice, and a slice `CDHash` silently dropped would otherwise go unchecked.
+     */
+    private func assertSliceNamesMatchCodesign(_ results: [CDHash.SliceResult], path: String) throws {
+        let names = Set(results.compactMap(\.arch))
+        guard !names.isEmpty else {
+            return // thin binary: nothing to cross-check
+        }
 
-        let process = Process()
-        process.executableURL = url
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
+        let archs = try codesignArchs(path) // outside XCTUnwrap, so a skip from the helper stays a skip
+        let expected = try XCTUnwrap(archs, "codesign printed no Format line for \(path)")
+        XCTAssertEqual(names, expected, "slice names must match codesign's for \(path)")
+    }
+
+    /**
+     `codesign -d` output must describe the slice we asked for: `--arch` resolves a generic name (`arm64`) to
+     whichever matching slice codesign prefers rather than failing, silently comparing against the wrong slice.
+     */
+    private static func assertInspectedSlice(_ output: String, arch: String?) {
+        guard let arch else {
+            return
+        }
+
+        XCTAssertEqual(Self.field(output, prefix: "Format="), "Mach-O thin (\(arch))", "codesign --arch \(arch) inspected another slice")
     }
 
     /// The hex value after `=` on the first line beginning with `prefix` (e.g. `CDHash=`, `CandidateCDHashFull`).

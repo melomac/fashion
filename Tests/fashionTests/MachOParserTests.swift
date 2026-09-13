@@ -11,8 +11,28 @@ final class MachOParserTests: XCTestCase {
         XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64E), "arm64e")
     }
 
+    /**
+     `CPU_SUBTYPE_ARM64E_X1` (12): the third slice of macOS 27 system binaries, `arm64e.x1` to codesign.
+     */
+    func testArchNameARM64EX1() {
+        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 12), "arm64e.x1")
+    }
+
+    /**
+     An arm64 subtype neither the OS nor the fallback table knows is labelled like lipo does, never folded
+     into `arm64`: codesign resolves --arch arm64 to some other arm64-family slice without complaint.
+     */
+    func testArchNameUnknownARM64SubtypeIsVisible() {
+        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 99), "unknown(16777228,99)")
+    }
+
     func testArchNameX86_64() {
         XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: 3), "x86_64")
+    }
+
+    func testArchNameX86_64H() {
+        // CPU_SUBTYPE_X86_64_H (8): a Haswell slice is its own architecture to codesign, not a second `x86_64`.
+        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_H), "x86_64h")
     }
 
     func testArchNameI386() {
@@ -34,10 +54,34 @@ final class MachOParserTests: XCTestCase {
     func testArchNameMasksCapabilityBits() {
         let subtypeWithCaps = CPU_SUBTYPE_ARM64E | cpu_subtype_t(bitPattern: 0x8000_0000)
         XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: subtypeWithCaps), "arm64e")
+
+        // Shipping arm64e.x1 slices carry the same versioned-ABI flag: cpusubtype 0x8000000c.
+        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: cpu_subtype_t(bitPattern: 0x8000_000c)), "arm64e.x1")
     }
 
     func testArchNameUnknownCPU() {
-        XCTAssertEqual(MachOParser.archName(cpuType: 9999, cpuSubtype: 0), "unknown")
+        XCTAssertEqual(MachOParser.archName(cpuType: 9999, cpuSubtype: 0), "unknown(9999,0)")
+    }
+
+    /**
+     Slice names must be the ones codesign uses (`--arch`), so that a new subtype such as arm64e.x1 is not reported
+     under its base architecture.
+
+     codesign is the oracle rather than `lipo`: it ships with the OS,while Xcode's lipo may predate the OS and print
+     `unknown(16777228,12)` for a slice it has never seen.
+     */
+    func testArchNamesMatchCodesign() throws {
+        let path = "/bin/ls"
+        let names: [String] = switch MachOParser.open(path: path) {
+        case let .fat(archs): archs.map { MachOParser.archName(cpuType: $0.cpuType, cpuSubtype: $0.cpuSubtype) }
+        case let .thin(cpuType, cpuSubtype): [MachOParser.archName(cpuType: cpuType, cpuSubtype: cpuSubtype)]
+        case .notMachO: []
+        }
+        try XCTSkipIf(names.isEmpty, "\(path) is not a Mach-O")
+
+        let archs = try codesignArchs(path) // outside XCTUnwrap, so a skip from the helper stays a skip
+        let expected = try XCTUnwrap(archs, "codesign printed no Format line for \(path)")
+        XCTAssertEqual(Set(names), expected)
     }
 
     // MARK: - Synthetic Mach-O 64-bit (native endian)

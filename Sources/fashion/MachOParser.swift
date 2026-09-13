@@ -1,5 +1,7 @@
+import CMachOCompat // CPU_SUBTYPE_ARM64E_X1 on SDKs older than macOS 27
 import Foundation
 import MachO
+import MachO.dyld.utils // macho_arch_name_for_cpu_type
 
 enum MachOParser {
     // MARK: - Types
@@ -84,11 +86,32 @@ enum MachOParser {
 
     // MARK: - Architecture Naming
 
+    /**
+     The architecture name of a slice, as `codesign --arch` spells it.
+
+     Names come from the OS's own Mach-O naming (`macho_arch_name_for_cpu_type`, the table `codesign` draws on),
+     so every subtype the running OS knows — `arm64e.x1`, `x86_64h`, `armv7k`… — is spelled the way Apple's tools
+     spell it, capability bits included.
+
+     A slice the OS cannot name (newer than the OS, or legacy `ppc64`) falls
+     back to a built-in table. The closed families there keep their base name for any subtype; the still-growing
+     arm64 family labels an unrecognized subtype `unknown(cputype,cpusubtype)` like `lipo -archs`, because a
+     base name `codesign --arch` would resolve to some other slice.
+     */
     static func archName(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t) -> String {
+        if let name = macho_arch_name_for_cpu_type(cpuType, cpuSubtype) {
+            return String(cString: name)
+        }
+
         let masked = cpuSubtype & ~cpu_subtype_t(bitPattern: CPU_SUBTYPE_MASK)
         switch cpuType {
         case CPU_TYPE_ARM64:
-            return masked == CPU_SUBTYPE_ARM64E ? "arm64e" : "arm64"
+            switch masked {
+            case CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_V8: return "arm64"
+            case CPU_SUBTYPE_ARM64E: return "arm64e"
+            case CPU_SUBTYPE_ARM64E_X1: return "arm64e.x1"
+            default: return self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
+            }
         case CPU_TYPE_X86_64:
             return "x86_64"
         case CPU_TYPE_I386:
@@ -100,7 +123,7 @@ enum MachOParser {
         case CPU_TYPE_POWERPC64:
             return "ppc64"
         default:
-            return "unknown"
+            return self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
         }
     }
 
@@ -225,6 +248,13 @@ enum MachOParser {
     }
 
     // MARK: - Private
+
+    /**
+     Label for a slice neither the OS nor the fallback table can name, in `lipo -archs` style: `unknown(16777228,13)`.
+     */
+    private static func unknownArchName(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t) -> String {
+        "unknown(\(cpuType),\(cpuSubtype))"
+    }
 
     private static func parseFat(data: Data, is64: Bool) -> BinaryType {
         guard data.count >= 8 else {

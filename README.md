@@ -122,7 +122,9 @@ Just like `xar --dump-toc-cksum`, `--xar-toc` mode defaults to SHA1 of the compr
 
 `fashion` parses universal and thin Mach-O binaries natively.
 The `--slices` flag hashes each architecture individually in addition to the whole file.
-Supported architectures: `arm64`, `arm64e`, `x86_64`, `i386`, and legacy `ppc` / `ppc64`.
+
+Architecture names come from the OS's own Mach-O naming. It's notably the source `codesign` uses, so they read `arm64`, `arm64e`, `arm64e.x1`, `x86_64`, `x86_64h`, `i386`, legacy `ppc` / `ppc64`, and so on.
+A slice the running OS cannot name yet falls back to a built-in table (`arm64e.x1` on macOS 26 and earlier), then to `unknown(cputype,cpusubtype)` like `lipo -archs`.
 
 ### Exact flag
 

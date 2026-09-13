@@ -115,10 +115,15 @@ let package = Package(
                 .define("CHECKSUM_1B"),
             ],
         ),
+        .target(
+            name: "CMachOCompat",
+            path: "Sources/CMachOCompat",
+        ),
         .executableTarget(
             name: "fashion",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "CMachOCompat",
                 "CSSDeep",
                 "CTLSHWrapper",
             ],
