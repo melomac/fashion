@@ -49,7 +49,9 @@ final class XARParserTests: XCTestCase {
     func testHashTocNotXARReturnsNil() throws {
         let url = FileManager.default.temporaryDirectory / "fashion-notxar-\(UUID())"
         try Data("not a xar file, needs enough bytes to be meaningful padding here".utf8).write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)
         XCTAssertNil(result)
@@ -67,7 +69,9 @@ final class XARParserTests: XCTestCase {
 
         let url = FileManager.default.temporaryDirectory / "fashion-xar-trunc-\(UUID())"
         try data.write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)
         XCTAssertNil(result)
@@ -90,7 +94,9 @@ final class XARParserTests: XCTestCase {
 
         let url = FileManager.default.temporaryDirectory / "fashion-xar-valid-\(UUID())"
         try data.write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)
         XCTAssertNotNil(result)
@@ -120,7 +126,9 @@ final class XARParserTests: XCTestCase {
 
         let url = FileManager.default.temporaryDirectory / "fashion-xar-huge-\(UUID())"
         try data.write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         XCTAssertNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false))
     }
@@ -155,7 +163,9 @@ final class XARParserTests: XCTestCase {
 
         let url = FileManager.default.temporaryDirectory / "fashion-xar-bomb-\(UUID())"
         try data.write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         XCTAssertNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true))
     }

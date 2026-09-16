@@ -45,8 +45,24 @@ enum OutputFormatter {
      Format quiet match output: path only
      */
     static func formatQuietMatch(path: String) -> String {
+        self.formatPath(path)
+    }
+
+    /**
+     Escape a path for safe display as a complete field.
+     */
+    static func formatPath(_ path: String) -> String {
         let (escaped, prefix) = self.escapePath(path)
         return "\(prefix)\(escaped)"
+    }
+
+    /**
+     Keep a diagnostic message on one physical output line.
+     */
+    static func formatDiagnostic(_ message: String) -> String {
+        message
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
     }
 
     // MARK: - Private

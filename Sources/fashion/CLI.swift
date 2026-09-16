@@ -1,6 +1,43 @@
 import ArgumentParser
 import Foundation
 
+private enum OptionError: Error, Equatable {
+    case conflictingModes
+    case unsupportedSymHashAlgorithm(Algorithm)
+    case unsupportedXarCDHash
+    case unsupportedSlicesCDHash
+    case exactWithIncompatibleMode
+    case decompressWithoutXarToc
+    case negativeScore
+}
+
+extension OptionError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .conflictingModes:
+            NSLocalizedString("--symhash, --xar-toc, and --slices are mutually exclusive.", comment: "Conflicting command-line modes")
+        case let .unsupportedSymHashAlgorithm(algorithm):
+            String(format: NSLocalizedString("--symhash does not support the %@ algorithm.", comment: "Unsupported SymHash algorithm"), algorithm.rawValue)
+        case .unsupportedXarCDHash:
+            NSLocalizedString("--xar-toc does not support the cdhash algorithm.", comment: "Unsupported XAR table-of-contents algorithm")
+        case .unsupportedSlicesCDHash:
+            NSLocalizedString("--slices does not support the cdhash algorithm; use --algo cdhash on its own.", comment: "Unsupported architecture-slice algorithm")
+        case .exactWithIncompatibleMode:
+            NSLocalizedString("--exact does not apply to --symhash or --xar-toc.", comment: "Exact mode used with an incompatible command-line mode")
+        case .decompressWithoutXarToc:
+            NSLocalizedString("--decompress requires --xar-toc.", comment: "Missing command-line mode required for decompression")
+        case .negativeScore:
+            NSLocalizedString("--score must be zero or greater.", comment: "Invalid fuzzy matching score")
+        }
+    }
+}
+
+private extension ValidationError {
+    init(_ error: OptionError) {
+        self.init(error.localizedDescription)
+    }
+}
+
 extension Algorithm: ExpressibleByArgument {
     init?(argument: String) {
         guard let algorithm = Algorithm.parse(argument) else {
@@ -112,31 +149,31 @@ struct Fashion: AsyncParsableCommand {
         // discards all but the highest-priority one. Reject the ambiguity up front.
         let modeCount = [self.symbolOptions.symhash, self.xarOptions.xarToc, self.slices].count(where: { $0 })
         if modeCount > 1 {
-            throw ValidationError("--symhash, --xar-toc, and --slices are mutually exclusive.")
+            throw ValidationError(OptionError.conflictingModes)
         }
 
         // Reject algorithms a mode cannot compute; otherwise the mode silently emits nothing.
         if let algo = self.algo {
             if self.symbolOptions.symhash, [.git, .git256, .cdhash].contains(algo) {
-                throw ValidationError("--symhash does not support the \(algo.rawValue) algorithm.")
+                throw ValidationError(OptionError.unsupportedSymHashAlgorithm(algo))
             }
             if self.xarOptions.xarToc, algo == .cdhash {
-                throw ValidationError("--xar-toc does not support the cdhash algorithm.")
+                throw ValidationError(OptionError.unsupportedXarCDHash)
             }
             if self.slices, algo == .cdhash {
-                throw ValidationError("--slices does not support the cdhash algorithm; use --algo cdhash on its own.")
+                throw ValidationError(OptionError.unsupportedSlicesCDHash)
             }
         }
 
         // Flags that are silently ignored outside the mode they belong to.
         if self.exact, self.symbolOptions.symhash || self.xarOptions.xarToc {
-            throw ValidationError("--exact does not apply to --symhash or --xar-toc.")
+            throw ValidationError(OptionError.exactWithIncompatibleMode)
         }
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
-            throw ValidationError("--decompress requires --xar-toc.")
+            throw ValidationError(OptionError.decompressWithoutXarToc)
         }
         if self.matchOptions.score < 0 {
-            throw ValidationError("--score must be zero or greater.")
+            throw ValidationError(OptionError.negativeScore)
         }
     }
 

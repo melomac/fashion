@@ -92,4 +92,12 @@ final class FormatterTests: XCTestCase {
         XCTAssertFalse(line.contains("\n"))
         XCTAssertEqual(line, "\\/tmp/a\\nb")
     }
+
+    func testFormatPathEscapesDiagnosticPath() {
+        XCTAssertEqual(OutputFormatter.formatPath("/tmp/a\nb\\c"), "\\/tmp/a\\nb\\\\c")
+    }
+
+    func testFormatDiagnosticEscapesLineBreaks() {
+        XCTAssertEqual(OutputFormatter.formatDiagnostic("first\nsecond\rthird"), "first\\nsecond\\rthird")
+    }
 }

@@ -91,7 +91,7 @@ final class FileWalker: @unchecked Sendable {
     private func start(root: String) -> String? {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir) else {
-            self.reporter?.report(path: root, message: "No such file or directory")
+            self.reporter?.report(path: root, message: NSLocalizedString("No such file or directory", comment: "Missing scan root"))
             return nil
         }
 
@@ -110,7 +110,14 @@ final class FileWalker: @unchecked Sendable {
     }
 
     private func openFTS(root: String) {
-        let options: Int32 = (self.follow ? FTS_LOGICAL : FTS_PHYSICAL) | FTS_NOCHDIR
+        // fts builds child paths as the root exactly as given plus "/" plus the entry name. Below a macOS 26
+        // deployment target libc appends the slash unconditionally, so `dir/` walks as `dir//file`; newer libc
+        // collapses one trailing slash but not two. Trim them all here, keeping a bare "/".
+        let root = Self.trimmingTrailingSlashes(root)
+
+        // FTS_COMFOLLOW follows a symlink named as a root (`find -H`), which start() already resolved to a
+        // directory; under FTS_PHYSICAL inner symlinks are still skipped, and under FTS_LOGICAL it is a no-op.
+        let options: Int32 = (self.follow ? FTS_LOGICAL : FTS_PHYSICAL) | FTS_NOCHDIR | FTS_COMFOLLOW
 
         // fts_open expects a null-terminated array of C strings.
         guard let cPath = root.withCString({ strndup($0, root.utf8.count) }) else {
@@ -161,5 +168,16 @@ final class FileWalker: @unchecked Sendable {
             return false
         }
         return (info.st_mode & S_IFMT) == S_IFREG
+    }
+
+    /**
+     Drop trailing slashes from a root path, keeping a bare "/". Runs once per root, before the walk starts.
+     */
+    private static func trimmingTrailingSlashes(_ path: String) -> String {
+        var trimmed = path[...]
+        while trimmed.utf8.count > 1, trimmed.last == "/" {
+            trimmed.removeLast()
+        }
+        return String(trimmed)
     }
 }

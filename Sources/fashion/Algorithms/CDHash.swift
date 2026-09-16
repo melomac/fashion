@@ -29,25 +29,21 @@ enum CDHash {
      With `exact`, an unsigned slice is trimmed to its logical extent before synthesis,
      so appended trailing garbage does not change its ad-hoc cdhash.
      */
-    static func hash(path: String, exact: Bool = false) -> [SliceResult] {
-        guard let data = try? FileReader.map(path: path) else {
-            return []
-        }
+    static func hash(path: String, exact: Bool = false) throws -> [SliceResult] {
+        let data = try FileReader.map(path: path)
 
-        switch MachOParser.open(data: data) {
+        switch try MachOParser.open(data: data) {
         case let .fat(archs):
-            return archs.flatMap { arch -> [SliceResult] in
-                guard let slice = MachOSlice(MachOParser.sliceData(fileData: data, arch: arch)) else {
+            return try archs.flatMap { arch -> [SliceResult] in
+                // A universal static library carries `ar` archives, which have no code directory to report.
+                guard let slice = try MachOSlice(MachOParser.sliceData(fileData: data, arch: arch)) else {
                     return []
                 }
                 let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
-                return self.results(for: slice, arch: name, exact: exact)
+                return try self.results(for: slice, arch: name, exact: exact)
             }
-        case .thin:
-            guard let slice = MachOSlice(data) else {
-                return []
-            }
-            return self.results(for: slice, arch: nil, exact: exact)
+        case let .thin(slice):
+            return try self.results(for: slice, arch: nil, exact: exact)
         case .notMachO:
             return []
         }
@@ -57,8 +53,8 @@ enum CDHash {
      Compute CDHash from raw Mach-O data (single thin slice).
      Returns the strongest embedded cdhash, or the ad-hoc cdhash when unsigned. Nil for non-Mach-O input.
      */
-    static func hash(data: Data, exact: Bool = false) -> String? {
-        MachOSlice(data)?.codeDirectoryHashes(exact: exact).first?.hash
+    static func hash(data: Data, exact: Bool = false) throws -> String? {
+        try MachOSlice(data)?.codeDirectoryHashes(exact: exact).first?.hash
     }
 
     // MARK: - Private
@@ -66,8 +62,8 @@ enum CDHash {
     /**
      One SliceResult per code directory. The hash type is only set when a slice carries several directories.
      */
-    private static func results(for slice: MachOSlice, arch: String?, exact: Bool) -> [SliceResult] {
-        let directories = slice.codeDirectoryHashes(exact: exact)
+    private static func results(for slice: MachOSlice, arch: String?, exact: Bool) throws -> [SliceResult] {
+        let directories = try slice.codeDirectoryHashes(exact: exact)
         let ambiguous = directories.count > 1
 
         return directories.map { cd in
@@ -94,11 +90,11 @@ extension MachOSlice {
      Digest every code directory of a signed slice, strongest first per hashRank — the head is the kernel-enforced cdhash.
      An unsigned slice returns its synthesized ad-hoc cdhashes instead (SHA-256 then SHA-1).
      */
-    func codeDirectoryHashes(exact: Bool) -> [CodeDirectoryHash] {
+    func codeDirectoryHashes(exact: Bool) throws -> [CodeDirectoryHash] {
         // Only a slice with no signature at all falls back to the ad-hoc identity: a signed slice with an
         // unreadable signature yields nothing, as the ad-hoc cdhash only describes unsigned code.
-        if let sigRange = self.codeSignatureRange() {
-            return self.embeddedCodeDirectories(in: sigRange)
+        if let sigRange = try self.codeSignatureRange() {
+            return try self.embeddedCodeDirectories(in: sigRange)
         }
 
         return self.adhocCDHashes(exact: exact)
@@ -106,10 +102,10 @@ extension MachOSlice {
 
     // MARK: - Embedded signature
 
-    private func embeddedCodeDirectories(in sigRange: Range<Int>) -> [CodeDirectoryHash] {
+    private func embeddedCodeDirectories(in sigRange: Range<Int>) throws -> [CodeDirectoryHash] {
         let signature = Data(self.data[sigRange])
 
-        return Self.parseCodeDirectories(signature: signature)
+        return try Self.parseCodeDirectories(signature: signature)
             .sorted { Self.hashRank($0.hashType) > Self.hashRank($1.hashType) }
             .compactMap { cd in
                 guard let digest = Self.digest(codeDirectory: cd.data, hashType: cd.hashType) else {
@@ -122,12 +118,12 @@ extension MachOSlice {
     /**
      Every code directory in an embedded signature blob (primary slot plus alternates).
      */
-    private static func parseCodeDirectories(signature: Data) -> [EmbeddedCodeDirectory] {
+    private static func parseCodeDirectories(signature: Data) throws -> [EmbeddedCodeDirectory] {
         guard signature.count >= 12 else {
-            return []
+            throw ParserError.truncatedCodeSignatureSuperblob(signatureSize: signature.count)
         }
 
-        let (magic, _, count) = signature.withUnsafeBytes { ptr -> (UInt32, UInt32, UInt32) in
+        let (magic, length, count) = signature.withUnsafeBytes { ptr -> (UInt32, UInt32, UInt32) in
             (
                 UInt32(bigEndian: ptr.loadUnaligned(as: UInt32.self)),
                 UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt32.self)),
@@ -136,19 +132,31 @@ extension MachOSlice {
         }
 
         guard magic == self.csmagicEmbeddedSignature else {
-            return []
+            throw ParserError.invalidCodeSignatureMagic(magic: magic)
         }
 
-        var results: [EmbeddedCodeDirectory] = []
+        let superblobLength = Int(length)
+        guard
+            superblobLength >= 12,
+            superblobLength <= signature.count
+        else {
+            throw ParserError.invalidCodeSignatureSuperblobLength(length: length, signatureSize: signature.count)
+        }
+
         let indexBase = 12
+        guard Int(count) <= (superblobLength - indexBase) / 8 else {
+            throw ParserError.invalidCodeSignatureIndexTable(count: count, length: length)
+        }
 
-        for i in 0 ..< Int(count) {
-            let entryOffset = indexBase + i * 8
-            guard entryOffset + 8 <= signature.count else {
-                break
-            }
+        // LC_CODE_SIGNATURE may include padding after the superblob. Every index and nested blob is
+        // relative to, and bounded by, the superblob's own declared length.
+        let superblob = Data(signature.prefix(superblobLength))
+        var results: [EmbeddedCodeDirectory] = []
 
-            let (slotType, blobOffset) = signature.withUnsafeBytes { ptr -> (UInt32, UInt32) in
+        for entryIndex in 0 ..< Int(count) {
+            let entryOffset = indexBase + entryIndex * 8
+
+            let (slotType, blobOffset) = superblob.withUnsafeBytes { ptr -> (UInt32, UInt32) in
                 (
                     UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entryOffset, as: UInt32.self)),
                     UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entryOffset + 4, as: UInt32.self)),
@@ -160,11 +168,11 @@ extension MachOSlice {
             }
 
             let off = Int(blobOffset)
-            guard off + 12 <= signature.count else {
-                continue
+            guard off <= superblob.count - 12 else {
+                throw ParserError.invalidCodeDirectoryOffset(offset: blobOffset, signatureSize: superblob.count)
             }
 
-            let (blobMagic, blobLength) = signature.withUnsafeBytes { ptr -> (UInt32, UInt32) in
+            let (blobMagic, blobLength) = superblob.withUnsafeBytes { ptr -> (UInt32, UInt32) in
                 (
                     UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: off, as: UInt32.self)),
                     UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: off + 4, as: UInt32.self)),
@@ -172,26 +180,25 @@ extension MachOSlice {
             }
 
             guard blobMagic == self.csmagicCodeDirectory else {
-                continue
+                throw ParserError.invalidCodeDirectoryMagic(offset: blobOffset, magic: blobMagic)
             }
 
+            guard blobLength >= 38 else {
+                throw ParserError.truncatedCodeDirectory(offset: blobOffset, length: blobLength)
+            }
             let blobEnd = off + Int(blobLength)
-            guard blobEnd <= signature.count else {
-                continue
+            guard blobEnd <= superblob.count else {
+                throw ParserError.invalidCodeDirectoryRange(offset: blobOffset, size: blobLength, signatureSize: superblob.count)
             }
 
             // hashType is at offset 37 in the CodeDirectory structure; require it to lie within the blob's
             // own declared length, not merely within the signature, so a short blob cannot borrow a byte
             // from the next one.
-            guard off + 38 <= blobEnd else {
-                continue
-            }
-
-            let hashType = signature.withUnsafeBytes { ptr -> UInt8 in
+            let hashType = superblob.withUnsafeBytes { ptr -> UInt8 in
                 ptr.loadUnaligned(fromByteOffset: off + 37, as: UInt8.self)
             }
 
-            results.append(EmbeddedCodeDirectory(data: Data(signature[off ..< blobEnd]), hashType: hashType))
+            results.append(EmbeddedCodeDirectory(data: Data(superblob[off ..< blobEnd]), hashType: hashType))
         }
 
         return results
@@ -245,7 +252,10 @@ extension MachOSlice {
         let codeLimit = exact ? self.logicalEnd() : self.data.count
 
         // The synthesized CodeDirectory carries the 32-bit codeLimit field; a slice >= 4 GiB would need codeLimit64.
-        guard codeLimit > 0, codeLimit <= UInt32.max else {
+        guard
+            codeLimit > 0,
+            codeLimit <= UInt32.max
+        else {
             return []
         }
 
@@ -347,8 +357,10 @@ private struct EmbeddedCodeDirectory {
 }
 
 /**
- A hash algorithm used to synthesize an ad-hoc CodeDirectory. codesign builds one directory per algorithm;
- each carries hash slots of that algorithm's width and yields its own cdhash, digested under the same algorithm.
+ A hash algorithm used to synthesize an ad-hoc CodeDirectory.
+
+ codesign builds one directory per algorithm; each carries hash slots of that algorithm's width and yields its own
+ cdhash, digested under the same algorithm.
  */
 private enum AdhocHashType {
     case sha256

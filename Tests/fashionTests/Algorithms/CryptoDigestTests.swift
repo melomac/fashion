@@ -6,7 +6,9 @@ final class CryptoDigestTests: XCTestCase {
         // Simulates a file that shrank between stat and read: fewer bytes are read than exactLength claims.
         let url = FileManager.default.temporaryDirectory / "fashion-exactlen-\(UUID())"
         try Data("hello".utf8).write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         XCTAssertThrowsError(try CryptoDigest.hash(path: url.path(), algorithm: .sha256, exactLength: 999))
     }
@@ -14,7 +16,9 @@ final class CryptoDigestTests: XCTestCase {
     func testExactLengthMatchSucceeds() throws {
         let url = FileManager.default.temporaryDirectory / "fashion-exactlen-ok-\(UUID())"
         try Data("hello".utf8).write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         XCTAssertNoThrow(try CryptoDigest.hash(path: url.path(), algorithm: .sha256, exactLength: 5))
     }
@@ -77,7 +81,9 @@ final class CryptoDigestTests: XCTestCase {
 
     func testFileHashMD5() throws {
         let url = try tmpFile(Data("hello".utf8))
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try CryptoDigest.hash(path: url.path(), algorithm: .md5)
         XCTAssertEqual(result, "5d41402abc4b2a76b9719d911017c592")
@@ -85,7 +91,9 @@ final class CryptoDigestTests: XCTestCase {
 
     func testFileHashSHA1() throws {
         let url = try tmpFile(Data("hello".utf8))
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try CryptoDigest.hash(path: url.path(), algorithm: .sha1)
         XCTAssertEqual(result, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d")
@@ -93,7 +101,9 @@ final class CryptoDigestTests: XCTestCase {
 
     func testFileHashSHA256() throws {
         let url = try tmpFile(Data("hello".utf8))
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try CryptoDigest.hash(path: url.path(), algorithm: .sha256)
         XCTAssertEqual(result, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
@@ -101,7 +111,9 @@ final class CryptoDigestTests: XCTestCase {
 
     func testFileHashSHA384() throws {
         let url = try tmpFile(Data("hello".utf8))
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try CryptoDigest.hash(path: url.path(), algorithm: .sha384)
         XCTAssertEqual(result, try CryptoDigest.hash(data: Data("hello".utf8), algorithm: .sha384))
@@ -109,7 +121,9 @@ final class CryptoDigestTests: XCTestCase {
 
     func testFileHashSHA512() throws {
         let url = try tmpFile(Data("hello".utf8))
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try CryptoDigest.hash(path: url.path(), algorithm: .sha512)
         XCTAssertEqual(result, try CryptoDigest.hash(data: Data("hello".utf8), algorithm: .sha512))
@@ -117,7 +131,9 @@ final class CryptoDigestTests: XCTestCase {
 
     func testFileHashEmptyFile() throws {
         let url = try tmpFile(Data())
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try CryptoDigest.hash(path: url.path(), algorithm: .sha256)
         XCTAssertEqual(result, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
@@ -134,7 +150,9 @@ final class CryptoDigestTests: XCTestCase {
         let size = 65536 + 1024
         let data = Data(repeating: 0x41, count: size)
         let url = try tmpFile(data)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let streaming = try CryptoDigest.hash(path: url.path(), algorithm: .sha256)
         let oneshot = try CryptoDigest.hash(data: data, algorithm: .sha256)
@@ -145,7 +163,9 @@ final class CryptoDigestTests: XCTestCase {
         let size = 65536 * 3
         let data = Data(repeating: 0xbb, count: size)
         let url = try tmpFile(data)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let streaming = try CryptoDigest.hash(path: url.path(), algorithm: .md5)
         let oneshot = try CryptoDigest.hash(data: data, algorithm: .md5)
@@ -156,7 +176,9 @@ final class CryptoDigestTests: XCTestCase {
         let size = 65536 * 2 + 100
         let data = Data(repeating: 0xcc, count: size)
         let url = try tmpFile(data)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let streaming = try CryptoDigest.hash(path: url.path(), algorithm: .sha512)
         let oneshot = try CryptoDigest.hash(data: data, algorithm: .sha512)
@@ -167,7 +189,9 @@ final class CryptoDigestTests: XCTestCase {
     func testFileHashConsistencyAllAlgorithms() throws {
         let data = Data("the quick brown fox jumps over the lazy dog".utf8)
         let url = try tmpFile(data)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         for algo: Algorithm in [.md5, .sha1, .sha256, .sha384, .sha512] {
             let streaming = try CryptoDigest.hash(path: url.path(), algorithm: algo)

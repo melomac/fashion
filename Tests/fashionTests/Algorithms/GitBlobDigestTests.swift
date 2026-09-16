@@ -34,7 +34,9 @@ final class GitBlobDigestTests: XCTestCase {
     func testGitBlobFileSHA1() throws {
         let data = Data("hello".utf8)
         let url = try tmpFile(data)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try GitBlobDigest.hash(path: url.path(), useSHA256: false)
         XCTAssertEqual(result, try GitBlobDigest.hashData(data, useSHA256: false))
@@ -43,7 +45,9 @@ final class GitBlobDigestTests: XCTestCase {
     func testGitBlobFileSHA256() throws {
         let data = Data("hello".utf8)
         let url = try tmpFile(data)
-        defer { try? FileManager.default.removeItem(at: url) }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
 
         let result = try GitBlobDigest.hash(path: url.path(), useSHA256: true)
         XCTAssertEqual(result, try GitBlobDigest.hashData(data, useSHA256: true))

@@ -34,12 +34,12 @@ enum FileReader {
         var remaining = limit ?? Int.max
         while remaining > 0 {
             let want = Swift.min(self.chunkSize, remaining)
-            let n = try fd.read(into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<want]))
-            if n == 0 {
+            let bytesRead = try fd.read(into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<want]))
+            if bytesRead == 0 {
                 break
             }
-            consume(UnsafeRawBufferPointer(rebasing: buffer[..<n]))
-            remaining -= n
+            consume(UnsafeRawBufferPointer(rebasing: buffer[..<bytesRead]))
+            remaining -= bytesRead
         }
     }
 
@@ -62,11 +62,11 @@ enum FileReader {
         var filled = 0
         try bytes.withUnsafeMutableBytes { raw in
             while filled < count {
-                let n = try fd.read(into: UnsafeMutableRawBufferPointer(rebasing: raw[filled...]))
-                if n == 0 {
+                let bytesRead = try fd.read(into: UnsafeMutableRawBufferPointer(rebasing: raw[filled...]))
+                if bytesRead == 0 {
                     break
                 }
-                filled += n
+                filled += bytesRead
             }
         }
         bytes.removeLast(count - filled)
@@ -99,6 +99,24 @@ enum FileReader {
      Throws on failure.
      */
     static func map(path: String) throws -> Data {
-        try Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
+        do {
+            return try Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe)
+        } catch {
+            throw self.posixError(error)
+        }
+    }
+
+    /**
+     The POSIX failure behind a Foundation file error, so every reader and writer describes an I/O error
+     the same way and no file name is echoed inside the message. Any other error is returned unchanged.
+     */
+    static func posixError(_ error: Error) -> Error {
+        guard
+            let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError,
+            underlying.domain == NSPOSIXErrorDomain
+        else {
+            return error
+        }
+        return Errno(rawValue: Int32(underlying.code))
     }
 }

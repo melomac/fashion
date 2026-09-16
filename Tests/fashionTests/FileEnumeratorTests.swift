@@ -28,6 +28,20 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertEqual(paths, [url.path])
     }
 
+    func testRootSymlinkToDirectoryIsWalked() throws {
+        // A root named on the command line is followed even without -L, like `find -H`; inner symlinks are not.
+        let dir = FileManager.default.temporaryDirectory / "fashion-rootlink-\(UUID())"
+        try FileManager.default.createDirectory(at: dir / "sub", withIntermediateDirectories: true)
+        try Data("hi".utf8).write(to: dir / "sub" / "f")
+        try FileManager.default.createSymbolicLink(at: dir / "link", withDestinationURL: dir / "sub")
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        XCTAssertEqual(FileEnumerator.collectSorted(paths: [(dir / "link").path], follow: false), [(dir / "link" / "f").path])
+        XCTAssertEqual(FileEnumerator.collectSorted(paths: [dir.path], follow: false), [(dir / "sub" / "f").path])
+    }
+
     func testCollectSortedMissingPathReturnsEmpty() {
         let paths = FileEnumerator.collectSorted(paths: ["/tmp/fashion-nonexistent-\(UUID())"], follow: false)
         XCTAssertTrue(paths.isEmpty)
@@ -75,5 +89,19 @@ final class FileEnumeratorTests: XCTestCase {
 
         // The FIFO inside a walked directory is skipped by fts; only the regular file is emitted.
         XCTAssertEqual(streamed.map { ($0 as NSString).lastPathComponent }, ["real.txt"])
+    }
+
+    func testDirectoryRootTrailingSlashesDoNotDoubleUp() throws {
+        // libc's fts appends "/" to the root as given, so `dir/` used to enumerate as `dir//file`.
+        let dir = FileManager.default.temporaryDirectory / "fashion-slash-\(UUID())"
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: dir / "f")
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        for root in [dir.path + "/", dir.path + "//"] {
+            XCTAssertEqual(FileEnumerator.collectSorted(paths: [root], follow: false), [(dir / "f").path])
+        }
     }
 }

@@ -41,14 +41,17 @@ enum Matching {
         let lower = digest.lowercased()
 
         for target in targets {
-            let t = target.lowercased()
+            let lowerTarget = target.lowercased()
             // Reject degenerate targets: an empty or ultra-short string, or a non-hex value, would
             // prefix-match (nearly) every digest. A truncated CDHash is a hex prefix of the full digest,
             // so we only accept the target as a prefix of the computed digest — never the reverse.
-            guard t.count >= self.minPrefixHexLength, t.allSatisfy(\.isHexDigit) else {
+            guard
+                lowerTarget.count >= self.minPrefixHexLength,
+                lowerTarget.allSatisfy(\.isHexDigit)
+            else {
                 continue
             }
-            if lower.hasPrefix(t) {
+            if lower.hasPrefix(lowerTarget) {
                 return MatchResult(matched: true, score: nil)
             }
         }

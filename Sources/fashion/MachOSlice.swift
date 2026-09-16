@@ -8,7 +8,8 @@ import os
  The header (endianness, architecture, filetype) and the load commands are parsed once at initialization;
  the executable-segment, code-signature, and logical-extent accessors all reuse that single pass.
 
- `init?` returns nil for anything that is not a thin Mach-O.
+ `init?(_:)` returns nil for anything that is not a thin Mach-O and throws for one whose load-command table is
+ damaged; `init?(lenient:)` keeps whatever prefix of such a table parses, for best-effort inspection.
  For a fat binary, open the container with `MachOParser` and wrap each architecture slice in its own `MachOSlice`.
  */
 struct MachOSlice {
@@ -16,48 +17,73 @@ struct MachOSlice {
     let is64: Bool
     let swap: Bool
     let cpuType: cpu_type_t
+    let cpuSubtype: cpu_subtype_t
 
     private let filetype: UInt32
+    private let headerSize: Int
+    private let commandCount: UInt32
     private let sizeofcmds: Int
     let loadCommands: [MachOParser.LoadCommand]
 
     private static let logger = Logger(subsystem: "fashion", category: "mach-o")
 
-    init?(_ data: Data) {
-        guard data.count >= MemoryLayout<mach_header>.size else {
-            return nil
-        }
-
-        let magic = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
-        let is64: Bool
-        let swap: Bool
-
-        switch magic {
-        case MH_MAGIC_64: is64 = true; swap = false
-        case MH_CIGAM_64: is64 = true; swap = true
-        case MH_MAGIC: is64 = false; swap = false
-        case MH_CIGAM: is64 = false; swap = true
-        default: return nil
-        }
-
-        let headerSize = is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
-        guard data.count >= headerSize else {
+    init?(lenient data: Data) {
+        guard
+            let layout = Self.layout(of: data),
+            data.count >= layout.headerSize
+        else {
             return nil
         }
 
         // mach_header and mach_header_64 share their leading fields, so the 32-bit struct reads them all.
         let header = data.withUnsafeBytes { $0.loadUnaligned(as: mach_header.self) }
         func swapped<T: FixedWidthInteger>(_ value: T) -> T {
-            swap ? value.byteSwapped : value
+            layout.swap ? value.byteSwapped : value
         }
 
         self.data = data
-        self.is64 = is64
-        self.swap = swap
+        self.is64 = layout.is64
+        self.swap = layout.swap
         self.cpuType = swapped(header.cputype)
+        self.cpuSubtype = swapped(header.cpusubtype)
         self.filetype = swapped(header.filetype)
+        self.headerSize = layout.headerSize
+        self.commandCount = swapped(header.ncmds)
         self.sizeofcmds = Int(swapped(header.sizeofcmds))
-        self.loadCommands = Self.parseLoadCommands(data: data, headerSize: headerSize, sizeofcmds: self.sizeofcmds, ncmds: swapped(header.ncmds), swap: swap)
+        self.loadCommands = Self.parseLoadCommands(data: data, headerSize: layout.headerSize, sizeofcmds: self.sizeofcmds, ncmds: self.commandCount, swap: layout.swap)
+    }
+
+    /**
+     Parse a thin Mach-O and require its complete load-command table to be structurally valid.
+
+     Returns nil for data that is not a thin Mach-O at all, and throws for one that is cut short or
+     declares a load-command table its commands do not fill, so a malformed command cannot be mistaken
+     for an unsigned or shorter binary.
+     */
+    init?(_ data: Data) throws {
+        guard let layout = Self.layout(of: data) else {
+            return nil
+        }
+        guard let slice = MachOSlice(lenient: data) else {
+            throw ParserError.truncatedMachHeader(expectedSize: layout.headerSize, fileSize: data.count)
+        }
+
+        // parseLoadCommands only keeps commands that lie inside the data, so a table that they fill exactly
+        // also fits the file.
+        let alignment = slice.is64 ? 8 : 4
+        let commandsFillTable = slice.loadCommands.reduce(0) { $0 + $1.data.count } == slice.sizeofcmds
+        let commandsHaveValidSizes = slice.loadCommands.allSatisfy { command in
+            command.data.count >= Self.minimumSize(of: command.cmd) && command.data.count % alignment == 0
+        }
+        guard
+            slice.loadCommands.count == Int(slice.commandCount),
+            commandsFillTable,
+            commandsHaveValidSizes
+        else {
+            throw ParserError.invalidLoadCommandTable(count: slice.commandCount, size: UInt32(slice.sizeofcmds), fileSize: data.count)
+        }
+
+        self = slice
     }
 
     /**
@@ -77,19 +103,11 @@ struct MachOSlice {
         let flags: UInt64 = self.filetype == UInt32(MH_EXECUTE) ? 1 : 0
 
         for cmd in self.loadCommands {
-            let d = cmd.data
-            if self.is64, cmd.cmd == UInt32(LC_SEGMENT_64), d.count >= MemoryLayout<segment_command_64>.size {
-                let seg = d.withUnsafeBytes { $0.loadUnaligned(as: segment_command_64.self) }
-                let name = withUnsafeBytes(of: seg.segname) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
-                if name == "__TEXT" {
-                    return (self.sw(seg.fileoff), self.sw(seg.filesize), flags)
-                }
-            } else if !self.is64, cmd.cmd == UInt32(LC_SEGMENT), d.count >= MemoryLayout<segment_command>.size {
-                let seg = d.withUnsafeBytes { $0.loadUnaligned(as: segment_command.self) }
-                let name = withUnsafeBytes(of: seg.segname) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
-                if name == "__TEXT" {
-                    return (UInt64(self.sw(seg.fileoff)), UInt64(self.sw(seg.filesize)), flags)
-                }
+            if self.is64, cmd.cmd == UInt32(LC_SEGMENT_64), let seg = cmd.payload(as: segment_command_64.self), Self.name(of: seg.segname) == "__TEXT" {
+                return (self.sw(seg.fileoff), self.sw(seg.filesize), flags)
+            }
+            if !self.is64, cmd.cmd == UInt32(LC_SEGMENT), let seg = cmd.payload(as: segment_command.self), Self.name(of: seg.segname) == "__TEXT" {
+                return (UInt64(self.sw(seg.fileoff)), UInt64(self.sw(seg.filesize)), flags)
             }
         }
         return (0, 0, flags)
@@ -99,19 +117,29 @@ struct MachOSlice {
 
     /**
      File range `[dataoff, dataoff + datasize)` of an embedded code signature, or nil when unsigned.
+     Throws when an `LC_CODE_SIGNATURE` command is present but its range does not fit the slice.
      */
-    func codeSignatureRange() -> Range<Int>? {
+    func codeSignatureRange() throws -> Range<Int>? {
         for cmd in self.loadCommands where cmd.cmd == UInt32(LC_CODE_SIGNATURE) {
-            guard cmd.data.count >= MemoryLayout<linkedit_data_command>.size else {
-                continue
+            // Every strictly parsed command holds its fixed structure; a lenient slice must still not read
+            // a truncated command as "unsigned".
+            guard let linkedit = cmd.payload(as: linkedit_data_command.self) else {
+                throw ParserError.invalidLoadCommandTable(count: self.commandCount, size: UInt32(self.sizeofcmds), fileSize: self.data.count)
             }
-            let ld = cmd.data.withUnsafeBytes { $0.loadUnaligned(as: linkedit_data_command.self) }
-            let start = Int(self.sw(ld.dataoff))
-            let end = start + Int(self.sw(ld.datasize))
-            guard start > 0, end > start, end <= self.data.count else {
-                continue
+
+            let offset = self.sw(linkedit.dataoff)
+            let size = self.sw(linkedit.datasize)
+            let start = Int(offset)
+            let length = Int(size)
+            guard
+                start > 0,
+                length > 0,
+                start <= self.data.count,
+                length <= self.data.count - start
+            else {
+                throw ParserError.invalidCodeSignatureRange(offset: offset, size: size, fileSize: self.data.count)
             }
-            return start ..< end
+            return start ..< (start + length)
         }
         return nil
     }
@@ -125,13 +153,11 @@ struct MachOSlice {
      Returns `data.count` (no trimming) when an unrecognized load command might reference data we don't model.
      */
     func logicalEnd() -> Int {
-        let headerSize = self.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
-
         // Trust the declared load-command region only when it fits the file. A hostile, oversized
         // sizeofcmds must not push maxEnd past the data and silently defeat trimming; real extents are
         // still recovered from the parsed load commands below.
-        let loadCommandsEnd = headerSize + self.sizeofcmds
-        var maxEnd = loadCommandsEnd <= self.data.count ? loadCommandsEnd : headerSize
+        let loadCommandsEnd = self.headerSize + self.sizeofcmds
+        var maxEnd = loadCommandsEnd <= self.data.count ? loadCommandsEnd : self.headerSize
 
         // Raise maxEnd to cover a referenced region [offset, offset + count * stride), byte-swapping and
         // widening the raw header fields. Out-of-range or wrapping ends are ignored.
@@ -143,32 +169,27 @@ struct MachOSlice {
         }
 
         for cmd in self.loadCommands {
-            let d = cmd.data
             switch ExtentCommand(rawValue: cmd.cmd) {
             case .segment64:
-                guard d.count >= MemoryLayout<segment_command_64>.size else {
+                guard let seg = cmd.payload(as: segment_command_64.self) else {
                     continue
                 }
-                let seg = d.withUnsafeBytes { $0.loadUnaligned(as: segment_command_64.self) }
                 extend(offset: seg.fileoff, count: seg.filesize)
             case .segment:
-                guard d.count >= MemoryLayout<segment_command>.size else {
+                guard let seg = cmd.payload(as: segment_command.self) else {
                     continue
                 }
-                let seg = d.withUnsafeBytes { $0.loadUnaligned(as: segment_command.self) }
                 extend(offset: seg.fileoff, count: seg.filesize)
             case .symtab:
-                guard d.count >= MemoryLayout<symtab_command>.size else {
+                guard let symtab = cmd.payload(as: symtab_command.self) else {
                     continue
                 }
-                let symtab = d.withUnsafeBytes { $0.loadUnaligned(as: symtab_command.self) }
                 extend(offset: symtab.symoff, count: symtab.nsyms, stride: self.is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size)
                 extend(offset: symtab.stroff, count: symtab.strsize)
             case .dysymtab:
-                guard d.count >= MemoryLayout<dysymtab_command>.size else {
+                guard let dysym = cmd.payload(as: dysymtab_command.self) else {
                     continue
                 }
-                let dysym = d.withUnsafeBytes { $0.loadUnaligned(as: dysymtab_command.self) }
                 let moduleSize = self.is64 ? MemoryLayout<dylib_module_64>.size : MemoryLayout<dylib_module>.size
                 extend(offset: dysym.tocoff, count: dysym.ntoc, stride: MemoryLayout<dylib_table_of_contents>.size)
                 extend(offset: dysym.modtaboff, count: dysym.nmodtab, stride: moduleSize)
@@ -177,10 +198,9 @@ struct MachOSlice {
                 extend(offset: dysym.extreloff, count: dysym.nextrel, stride: MemoryLayout<relocation_info>.size)
                 extend(offset: dysym.locreloff, count: dysym.nlocrel, stride: MemoryLayout<relocation_info>.size)
             case .dyldInfo, .dyldInfoOnly:
-                guard d.count >= MemoryLayout<dyld_info_command>.size else {
+                guard let info = cmd.payload(as: dyld_info_command.self) else {
                     continue
                 }
-                let info = d.withUnsafeBytes { $0.loadUnaligned(as: dyld_info_command.self) }
                 extend(offset: info.rebase_off, count: info.rebase_size)
                 extend(offset: info.bind_off, count: info.bind_size)
                 extend(offset: info.weak_bind_off, count: info.weak_bind_size)
@@ -189,22 +209,20 @@ struct MachOSlice {
             case .codeSignature, .segmentSplitInfo, .functionStarts, .dataInCode,
                  .dylibCodeSignDrs, .linkerOptimizationHint, .atomInfo, .functionVariants,
                  .functionVariantFixups, .dyldExportsTrie, .dyldChainedFixups:
-                guard d.count >= MemoryLayout<linkedit_data_command>.size else {
+                guard let linkedit = cmd.payload(as: linkedit_data_command.self) else {
                     continue
                 }
-                let linkedit = d.withUnsafeBytes { $0.loadUnaligned(as: linkedit_data_command.self) }
                 extend(offset: linkedit.dataoff, count: linkedit.datasize)
             case .encryptionInfo, .encryptionInfo64:
-                guard d.count >= MemoryLayout<encryption_info_command>.size else {
+                // Both layouts place cryptoff and cryptsize at the same offsets.
+                guard let enc = cmd.payload(as: encryption_info_command.self) else {
                     continue
                 }
-                let enc = d.withUnsafeBytes { $0.loadUnaligned(as: encryption_info_command.self) }
                 extend(offset: enc.cryptoff, count: enc.cryptsize)
             case .note:
-                guard d.count >= MemoryLayout<note_command>.size else {
+                guard let note = cmd.payload(as: note_command.self) else {
                     continue
                 }
-                let note = d.withUnsafeBytes { $0.loadUnaligned(as: note_command.self) }
                 extend(offset: note.offset, count: note.size)
             case .none:
                 // A known command with no on-disk payload is ignored; anything else may reference bytes we
@@ -213,7 +231,6 @@ struct MachOSlice {
                     Self.logger.warning("Unrecognized load command: \(String(format: "0x%x", cmd.cmd), privacy: .public) -> hashing whole file.")
                     return self.data.count
                 }
-                continue
             }
         }
 
@@ -222,13 +239,40 @@ struct MachOSlice {
 
     // MARK: - Private
 
+    /**
+     Header geometry implied by the leading magic number; nil for anything that is not a thin Mach-O.
+     */
+    private static func layout(of data: Data) -> (is64: Bool, swap: Bool, headerSize: Int)? {
+        guard data.count >= MemoryLayout<UInt32>.size else {
+            return nil
+        }
+
+        switch data.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
+        case MH_MAGIC_64: return (true, false, MemoryLayout<mach_header_64>.size)
+        case MH_CIGAM_64: return (true, true, MemoryLayout<mach_header_64>.size)
+        case MH_MAGIC: return (false, false, MemoryLayout<mach_header>.size)
+        case MH_CIGAM: return (false, true, MemoryLayout<mach_header>.size)
+        default: return nil
+        }
+    }
+
+    /**
+     The NUL-padded name in a `segname` / `sectname` field.
+     */
+    private static func name(of field: some Any) -> String {
+        withUnsafeBytes(of: field) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
+    }
+
     private static func parseLoadCommands(data: Data, headerSize: Int, sizeofcmds: Int, ncmds: UInt32, swap: Bool) -> [MachOParser.LoadCommand] {
         var commands: [MachOParser.LoadCommand] = []
         var offset = headerSize
         let endOffset = headerSize + sizeofcmds
 
         for _ in 0 ..< ncmds {
-            guard offset + 8 <= data.count, offset + 8 <= endOffset else {
+            guard
+                offset + 8 <= data.count,
+                offset + 8 <= endOffset
+            else {
                 break
             }
 
@@ -238,15 +282,48 @@ struct MachOSlice {
                 return (swap ? rawCmd.byteSwapped : rawCmd, swap ? rawSize.byteSwapped : rawSize)
             }
 
-            guard cmdSize >= 8, offset + Int(cmdSize) <= data.count else {
+            let size = Int(cmdSize)
+            guard
+                cmdSize >= 8,
+                size <= data.count - offset,
+                size <= endOffset - offset
+            else {
                 break
             }
 
-            commands.append(MachOParser.LoadCommand(cmd: cmd, cmdSize: cmdSize, data: data[offset ..< (offset + Int(cmdSize))]))
-            offset += Int(cmdSize)
+            commands.append(MachOParser.LoadCommand(cmd: cmd, data: data[offset ..< (offset + size)]))
+            offset += size
         }
 
         return commands
+    }
+
+    /** Minimum fixed size for load commands whose payload affects hashing. */
+    private static func minimumSize(of command: UInt32) -> Int {
+        switch ExtentCommand(rawValue: command) {
+        case .segment64:
+            MemoryLayout<segment_command_64>.size
+        case .segment:
+            MemoryLayout<segment_command>.size
+        case .symtab:
+            MemoryLayout<symtab_command>.size
+        case .dysymtab:
+            MemoryLayout<dysymtab_command>.size
+        case .dyldInfo, .dyldInfoOnly:
+            MemoryLayout<dyld_info_command>.size
+        case .codeSignature, .segmentSplitInfo, .functionStarts, .dataInCode,
+             .dylibCodeSignDrs, .linkerOptimizationHint, .atomInfo, .functionVariants,
+             .functionVariantFixups, .dyldExportsTrie, .dyldChainedFixups:
+            MemoryLayout<linkedit_data_command>.size
+        case .encryptionInfo:
+            MemoryLayout<encryption_info_command>.size
+        case .encryptionInfo64:
+            MemoryLayout<encryption_info_command_64>.size
+        case .note:
+            MemoryLayout<note_command>.size
+        case .none:
+            MemoryLayout<load_command>.size
+        }
     }
 
     /**
@@ -300,4 +377,18 @@ struct MachOSlice {
 
         return Set(plain.map { UInt32(bitPattern: $0) } + reqDyld)
     }()
+}
+
+// MARK: -
+
+extension MachOParser.LoadCommand {
+    /**
+     The command's fixed structure, or nil when the command is too short to hold it.
+     */
+    func payload<T: BitwiseCopyable>(as type: T.Type) -> T? {
+        guard self.data.count >= MemoryLayout<T>.size else {
+            return nil
+        }
+        return self.data.withUnsafeBytes { $0.loadUnaligned(as: type) }
+    }
 }

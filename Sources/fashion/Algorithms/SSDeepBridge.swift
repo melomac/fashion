@@ -1,5 +1,19 @@
 import CSSDeep
 import Foundation
+import System
+
+enum SSDeepError: Error, Equatable {
+    case fileHashFailed(status: Int)
+}
+
+extension SSDeepError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case let .fileHashFailed(status):
+            String(format: NSLocalizedString("ssdeep failed to hash the file (status %d)", comment: "ssdeep file hashing failure"), status)
+        }
+    }
+}
 
 /**
  Bridge to libfuzzy (ssdeep) for fuzzy hashing.
@@ -11,11 +25,17 @@ enum SSDeepBridge {
     /**
      Compute ssdeep hash for a file.
      */
-    static func hash(path: String) -> String? {
+    static func hash(path: String) throws -> String {
         var result = [CChar](repeating: 0, count: self.resultSize)
 
-        guard fuzzy_hash_filename(path, &result) == 0 else {
-            return nil
+        errno = 0
+        let status = fuzzy_hash_filename(path, &result)
+        guard status == 0 else {
+            // libfuzzy folds every failure into one status; the errno its open or read left names the cause.
+            guard errno == 0 else {
+                throw Errno(rawValue: errno)
+            }
+            throw SSDeepError.fileHashFailed(status: Int(status))
         }
 
         return self.decode(result)

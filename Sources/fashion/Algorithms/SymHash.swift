@@ -10,26 +10,24 @@ enum SymHash {
 
     static func compute(path: String, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> [SymHashResult] {
         let data = try FileReader.map(path: path)
-        let binaryType = MachOParser.open(data: data)
 
-        switch binaryType {
+        switch try MachOParser.open(data: data) {
         case let .fat(archs):
-            var results: [SymHashResult] = []
-            for arch in archs {
-                let slice = MachOParser.sliceData(fileData: data, arch: arch)
-                if let digest = try hashSlice(data: slice, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols) {
-                    let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
-                    results.append(SymHashResult(digest: digest, arch: name))
+            return try archs.compactMap { arch in
+                // A universal static library carries `ar` archives, which have no symbol table to hash.
+                guard
+                    let slice = try MachOSlice(MachOParser.sliceData(fileData: data, arch: arch)),
+                    let digest = try self.hash(slice, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols)
+                else {
+                    return nil
                 }
+                return SymHashResult(digest: digest, arch: MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
             }
-            return results
-
-        case .thin:
-            if let digest = try hashSlice(data: data, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols) {
-                return [SymHashResult(digest: digest, arch: nil)]
+        case let .thin(slice):
+            guard let digest = try self.hash(slice, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols) else {
+                return []
             }
-            return []
-
+            return [SymHashResult(digest: digest, arch: nil)]
         case .notMachO:
             return []
         }
@@ -37,34 +35,20 @@ enum SymHash {
 
     // MARK: - Private
 
-    private static func hashSlice(data: Data, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> String? {
-        guard let slice = MachOSlice(data) else {
+    /**
+     The symhash of one slice, or nil when it carries no symbol table.
+     */
+    private static func hash(_ slice: MachOSlice, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> String? {
+        guard let symtab = slice.loadCommands.lazy.compactMap({ MachOParser.parseSymtab(command: $0, swap: slice.swap) }).first else {
             return nil
         }
 
-        guard
-            let symtabCmd = slice.loadCommands.first(where: { $0.cmd == UInt32(LC_SYMTAB) }),
-            let symtab = MachOParser.parseSymtab(command: symtabCmd, swap: slice.swap)
-        else {
-            return nil
-        }
-
-        let symbols = MachOParser.readSymbols(data: data, symtab: symtab, is64: slice.is64, swap: slice.swap)
-        let mask = UInt8(N_STAB | N_EXT | N_TYPE)
-
-        var names: [String] = symbols.compactMap { symbol in
-            guard symbol.n_type & mask == UInt8(N_EXT) else {
-                return nil
-            }
-            return MachOParser.symbolName(data: data, stroff: symtab.stroff, strsize: symtab.strsize, strx: symbol.n_un.n_strx)
-        }
-
+        var names = try MachOParser.externalSymbolNames(data: slice.data, symtab: symtab, is64: slice.is64, swap: slice.swap)
         if sortSymbols {
             names.sort()
         }
 
-        let joined = names.joined(separator: separator)
-        let joinedData = Data(joined.utf8)
+        let joinedData = Data(names.joined(separator: separator).utf8)
 
         switch algorithm {
         case .ssdeep:

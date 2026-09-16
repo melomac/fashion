@@ -1,5 +1,58 @@
+@testable import fashion
 import Foundation
 import XCTest
+
+/**
+ Test conveniences over the parser: open a file by path, and best-effort views of a fixture that read as far
+ as a damaged load-command table parses instead of throwing (production only uses the throwing initializer).
+ */
+extension MachOParser {
+    static func open(path: String) throws -> BinaryType {
+        try self.open(data: FileReader.map(path: path))
+    }
+
+    static func loadCommands(data: Data) -> [LoadCommand] {
+        MachOSlice(lenient: data)?.loadCommands ?? []
+    }
+
+    static func machOEnd(data: Data) -> Int {
+        MachOSlice(lenient: data)?.logicalEnd() ?? data.count
+    }
+}
+
+/**
+ Byte builders for synthetic Mach-O fixtures: native-endian for thin headers and load commands,
+ big-endian for fat headers and embedded code signatures.
+ */
+extension Data {
+    mutating func appendUInt32(_ value: UInt32) {
+        self.appendRaw(value)
+    }
+
+    mutating func appendInt32(_ value: Int32) {
+        self.appendRaw(value)
+    }
+
+    mutating func appendUInt64(_ value: UInt64) {
+        self.appendRaw(value)
+    }
+
+    mutating func appendUInt32BE(_ value: UInt32) {
+        self.appendRaw(value.bigEndian)
+    }
+
+    mutating func appendInt32BE(_ value: Int32) {
+        self.appendRaw(value.bigEndian)
+    }
+
+    mutating func appendUInt64BE(_ value: UInt64) {
+        self.appendRaw(value.bigEndian)
+    }
+
+    private mutating func appendRaw(_ value: some FixedWidthInteger) {
+        Swift.withUnsafeBytes(of: value) { self.append(contentsOf: $0) }
+    }
+}
 
 extension URL {
     /**
@@ -64,7 +117,11 @@ func codesign(_ arguments: [String]) throws -> String {
 func codesignArchs(_ path: String) throws -> Set<String>? {
     for line in try codesign(["-dv", path]).split(separator: "\n") where line.hasPrefix("Format=") {
         // The list is the outermost parenthesis: a slice codesign cannot name appears inside it as `(cputype:subtype)`.
-        guard let open = line.firstIndex(of: "("), let close = line.lastIndex(of: ")"), open < close else {
+        guard
+            let open = line.firstIndex(of: "("),
+            let close = line.lastIndex(of: ")"),
+            open < close
+        else {
             return nil
         }
         return Set(line[line.index(after: open) ..< close].split(separator: " ").map(String.init))

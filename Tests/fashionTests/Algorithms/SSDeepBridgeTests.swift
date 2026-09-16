@@ -1,4 +1,5 @@
 @testable import fashion
+import System
 import XCTest
 
 final class SSDeepBridgeTests: XCTestCase {
@@ -19,8 +20,8 @@ final class SSDeepBridgeTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = SSDeepBridge.hash(path: url.path())
-        XCTAssertNotNil(result)
+        let result = try SSDeepBridge.hash(path: url.path())
+        XCTAssertFalse(result.isEmpty)
     }
 
     func testHashDataMatchesHashFile() throws {
@@ -32,7 +33,7 @@ final class SSDeepBridgeTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertEqual(SSDeepBridge.hash(data: data), SSDeepBridge.hash(path: url.path()))
+        XCTAssertEqual(SSDeepBridge.hash(data: data), try SSDeepBridge.hash(path: url.path()))
     }
 
     func testHashEmptyData() {
@@ -40,10 +41,11 @@ final class SSDeepBridgeTests: XCTestCase {
         XCTAssertEqual(SSDeepBridge.hash(data: Data()), "3::")
     }
 
-    func testHashFileMissingReturnsNil() {
-        let result = SSDeepBridge.hash(path: "/tmp/fashion-nonexistent-\(UUID())")
-
-        XCTAssertNil(result)
+    func testHashFileMissingThrows() {
+        // The cause libfuzzy's open left in errno is reported, like every other reader does.
+        XCTAssertThrowsError(try SSDeepBridge.hash(path: "/tmp/fashion-nonexistent-\(UUID())")) { error in
+            XCTAssertEqual(error as? Errno, .noSuchFileOrDirectory)
+        }
     }
 
     func testCompareIdenticalSignatures() {

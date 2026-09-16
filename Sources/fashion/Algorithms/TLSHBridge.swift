@@ -50,38 +50,27 @@ enum TLSHBridge {
      Returns nil if file is too small or hashing fails.
      */
     static func hash(path: String) throws -> String? {
-        let t = tlsh_new()
+        let context = tlsh_new()
         defer {
-            tlsh_free(t)
+            tlsh_free(context)
         }
 
         // Cap the data fed to libtlsh at maximumDataSize (~3.93 GiB) per issue #99 (fail-closed).
         let limit = Int(clamping: self.maximumDataSize)
-        var totalSize = 0
+        var total = 0
         try FileReader.read(path: path, limit: limit) { chunk in
             guard let base = chunk.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return
             }
-            tlsh_update(t, base, UInt32(chunk.count))
-            totalSize += chunk.count
+            tlsh_update(context, base, UInt32(chunk.count))
+            total += chunk.count
         }
 
-        guard totalSize >= self.minimumDataSize else {
+        guard total >= self.minimumDataSize else {
             return nil
         }
 
-        tlsh_final(t)
-
-        guard let cStr = tlsh_get_hash(t, 1) else {
-            return nil
-        }
-
-        let hashStr = String(cString: cStr)
-        guard !hashStr.isEmpty else {
-            return nil
-        }
-
-        return hashStr.uppercased()
+        return self.digest(of: context)
     }
 
     /**
@@ -94,9 +83,9 @@ enum TLSHBridge {
             return nil
         }
 
-        let t = tlsh_new()
+        let context = tlsh_new()
         defer {
-            tlsh_free(t)
+            tlsh_free(context)
         }
 
         let usableCount = min(data.count, Int(clamping: self.maximumDataSize))
@@ -105,26 +94,13 @@ enum TLSHBridge {
             guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return
             }
-            let chunkSize = 1 << 20 // 1MB
-            var offset = 0
-            while offset < usableCount {
-                let len = min(chunkSize, usableCount - offset)
-                tlsh_update(t, base.advanced(by: offset), UInt32(len))
-                offset += len
+            for offset in stride(from: 0, to: usableCount, by: FileReader.chunkSize) {
+                let length = min(FileReader.chunkSize, usableCount - offset)
+                tlsh_update(context, base.advanced(by: offset), UInt32(length))
             }
         }
-        tlsh_final(t)
 
-        guard let cStr = tlsh_get_hash(t, 1) else {
-            return nil
-        }
-
-        let hashStr = String(cString: cStr)
-        guard !hashStr.isEmpty else {
-            return nil
-        }
-
-        return hashStr.uppercased()
+        return self.digest(of: context)
     }
 
     /**
@@ -149,6 +125,20 @@ enum TLSHBridge {
         }
 
         return Int(tlsh_total_diff(t1, t2, 1))
+    }
+
+    /**
+     Close a running hash and return its upper-case `T1` digest, or nil when libtlsh produced none.
+     */
+    private static func digest(of context: tlsh_t?) -> String? {
+        tlsh_final(context)
+
+        guard let cString = tlsh_get_hash(context, 1) else {
+            return nil
+        }
+
+        let hash = String(cString: cString)
+        return hash.isEmpty ? nil : hash.uppercased()
     }
 
     private static func stripPrefix(_ hash: String) -> String {

@@ -154,6 +154,7 @@ The `--sort` flag trades some throughput for deterministic output order—paths 
 By default (unsorted) enumeration is demand-driven, so the walk never runs far ahead of hashing.
 
 The `-L` / `--follow` flag follows symlinks while walking; by default they are skipped.
+A symlink named directly on the command line is always followed, like `find -H`.
 
 ### Exit status
 
@@ -165,7 +166,7 @@ The `-L` / `--follow` flag follows symlinks while walking; by default they are s
 |  1   | match mode — no file matched                                              |
 |  2   | one or more paths could not be enumerated or hashed                       |
 
-Per-path failures (a missing path, a permission-denied directory, an unreadable file) are written to standard error and set exit code `2`; they never abort the rest of the scan.
+Per-path failures (a missing path, a permission-denied directory, an unreadable file, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`; they never abort the rest of the scan.
 
 ## Misc
 

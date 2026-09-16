@@ -28,10 +28,15 @@ actor OutputWriter {
     private let handle = FileHandle.standardOutput
 
     func write(_ string: String) {
-        guard let data = (string + "\n").data(using: .utf8) else {
-            return
+        do {
+            try self.handle.write(contentsOf: Data((string + "\n").utf8))
+        } catch {
+            // A consumer that went away (EPIPE with SIGPIPE ignored) or a closed stdout: nothing more can be
+            // delivered, so stop like coreutils does rather than die on an uncaught Foundation exception.
+            let description = OutputFormatter.formatDiagnostic(FileReader.posixError(error).localizedDescription)
+            try? FileHandle.standardError.write(contentsOf: Data("fashion: write error: \(description)\n".utf8))
+            exit(2)
         }
-        self.handle.write(data)
     }
 }
 
@@ -55,11 +60,12 @@ final class ErrorReporter: @unchecked Sendable {
 
     func report(path: String, message: String) {
         self.logger.error("\(path, privacy: .public): \(message, privacy: .public)")
+        let displayPath = OutputFormatter.formatPath(path)
+        let displayMessage = OutputFormatter.formatDiagnostic(message)
         self.lock.withLock {
             self.errorCount += 1
-            if let data = "fashion: \(path): \(message)\n".data(using: .utf8) {
-                self.handle.write(data)
-            }
+            // A failing stderr must never abort the scan.
+            try? self.handle.write(contentsOf: Data("fashion: \(displayPath): \(displayMessage)\n".utf8))
         }
     }
 }
@@ -239,14 +245,17 @@ struct Runner {
             let trimMachO = self.exact ? try MachOParser.isMachO(path: item.path) : false
             if trimMachO {
                 // Mach-O: hash only the logical content. The map is lazy, so fileEnd faults just the
-                // header; crypto algorithms then stream the trimmed extent (no full map, no copy).
+                // header; crypto and git algorithms then stream the trimmed extent (no full map, no copy),
+                // failing closed if the file shrank in between.
                 let data = try FileReader.map(path: item.path)
-                let end = MachOParser.fileEnd(data: data)
+                let end = try MachOParser.fileEnd(data: data)
                 switch self.algorithm {
                 case .md5, .sha1, .sha256, .sha384, .sha512:
-                    digest = try CryptoDigest.hash(path: item.path, algorithm: self.algorithm, limit: end)
+                    digest = try CryptoDigest.hash(path: item.path, algorithm: self.algorithm, limit: end, exactLength: end)
+                case .git, .git256:
+                    digest = try GitBlobDigest.hash(path: item.path, useSHA256: self.algorithm == .git256, limit: end)
                 default:
-                    digest = self.hashData(end < data.count ? data.prefix(end) : data)
+                    digest = try self.hashData(end < data.count ? data.prefix(end) : data)
                 }
             } else {
                 digest = switch self.algorithm {
@@ -257,18 +266,18 @@ struct Runner {
                 case .git256:
                     try GitBlobDigest.hash(path: item.path, useSHA256: true)
                 case .ssdeep:
-                    SSDeepBridge.hash(path: item.path)
+                    try SSDeepBridge.hash(path: item.path)
                 case .tlsh:
                     try TLSHBridge.hash(path: item.path)
                 case .cdhash:
-                    CDHash.hash(path: item.path).first?.hash
+                    try CDHash.hash(path: item.path).first?.hash
                 }
             }
 
-            guard let d = digest else {
+            guard let digest else {
                 return []
             }
-            return [DigestResult(digest: d, path: item.path, filePath: item.path)]
+            return [DigestResult(digest: digest, path: item.path, filePath: item.path)]
         } catch {
             self.reporter.report(path: item.path, message: error.localizedDescription)
             return []
@@ -277,22 +286,15 @@ struct Runner {
 
     private func processCDHash(_ item: WorkItem) -> [DigestResult] {
         // --exact trims an unsigned slice to its logical extent before synthesizing its ad-hoc cdhash.
-        let sliceResults = CDHash.hash(path: item.path, exact: self.exact)
-        guard !sliceResults.isEmpty else {
+        let sliceResults: [CDHash.SliceResult]
+        do {
+            sliceResults = try CDHash.hash(path: item.path, exact: self.exact)
+        } catch {
+            self.reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
 
-        // Quiet match mode: return first matching slice and move on
-        if self.quiet, !self.matchDigests.isEmpty {
-            for result in sliceResults {
-                if Matching.check(digest: result.hash, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
-                    return [DigestResult(digest: result.hash, path: item.path, filePath: item.path)]
-                }
-            }
-            return []
-        }
-
-        return sliceResults.map { result in
+        let results = sliceResults.map { result in
             // An unsigned slice is labeled ADHOC; its hash type (sha256 / sha1) is appended to tell the two
             // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous.
             let tag: String? = if result.adhoc {
@@ -304,76 +306,87 @@ struct Runner {
             let displayPath = suffix.isEmpty ? item.path : "\(item.path) (\(suffix))"
             return DigestResult(digest: result.hash, path: displayPath, filePath: item.path)
         }
-    }
 
-    private func processSlices(_ item: WorkItem) -> [DigestResult] {
-        var results: [DigestResult] = []
-
-        // Whole-file hash first (trimmed to the Mach-O logical end when --exact is set).
-        results.append(contentsOf: self.processRegular(item))
-
-        // If fat Mach-O, hash each architecture slice (each trimmed when --exact is set).
-        // Skip the map entirely for non-Mach-O input so a large unrelated file is never brought in just to check.
-        do {
-            if try MachOParser.isMachO(path: item.path) {
-                let data = try FileReader.map(path: item.path)
-                if case let .fat(archs) = MachOParser.open(data: data) {
-                    for arch in archs {
-                        let sliceData = MachOParser.sliceData(fileData: data, arch: arch)
-                        let archName = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
-                        if let d = self.hashData(self.trimmedIfExact(sliceData)) {
-                            results.append(DigestResult(digest: d, path: "\(item.path) (\(archName))", filePath: item.path))
-                        }
-                    }
-                }
-            }
-        } catch {
-            self.reporter.report(path: item.path, message: error.localizedDescription)
-        }
-
-        // Quiet match mode: emit the file once on the first matching line (mirrors processCDHash).
         if self.quiet, !self.matchDigests.isEmpty {
-            for r in results where Matching.check(digest: r.digest, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
-                return [DigestResult(digest: r.digest, path: item.path, filePath: item.path)]
-            }
-            return []
+            return self.firstMatch(in: results, for: item)
         }
-
         return results
     }
 
     /**
-     Trim a Mach-O slice to its logical end when --exact is set; otherwise return it unchanged.
+     The first result whose digest matches, reduced to the bare file path, or nothing.
+     A quiet match listing names each file once, whichever of its slices matched.
      */
-    private func trimmedIfExact(_ slice: Data) -> Data {
-        guard self.exact else {
+    private func firstMatch(in results: [DigestResult], for item: WorkItem) -> [DigestResult] {
+        for result in results where Matching.check(digest: result.digest, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
+            return [DigestResult(digest: result.digest, path: item.path, filePath: item.path)]
+        }
+        return []
+    }
+
+    private func processSlices(_ item: WorkItem) -> [DigestResult] {
+        do {
+            // Read the container before hashing anything, so a malformed one yields an error, not a partial listing.
+            var fatBinary: (data: Data, archs: [MachOParser.FatArch])?
+            if try MachOParser.isMachO(path: item.path) {
+                let data = try FileReader.map(path: item.path)
+                if case let .fat(archs) = try MachOParser.open(data: data) {
+                    fatBinary = (data, archs)
+                }
+            }
+
+            // Whole-file hash first (trimmed to the Mach-O logical end when --exact is set).
+            var results = self.processRegular(item)
+
+            // If fat Mach-O, hash each architecture slice (each trimmed when --exact is set).
+            if let fatBinary {
+                for arch in fatBinary.archs {
+                    let sliceData = MachOParser.sliceData(fileData: fatBinary.data, arch: arch)
+                    let archName = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
+                    if let digest = try self.hashData(self.validatedSlice(sliceData)) {
+                        results.append(DigestResult(digest: digest, path: "\(item.path) (\(archName))", filePath: item.path))
+                    }
+                }
+            }
+
+            if self.quiet, !self.matchDigests.isEmpty {
+                return self.firstMatch(in: results, for: item)
+            }
+            return results
+        } catch {
+            self.reporter.report(path: item.path, message: error.localizedDescription)
+            return []
+        }
+    }
+
+    /**
+     Validate a fat slice as a thin Mach-O, so a malformed slice is rejected like a malformed thin file,
+     and trim it to its logical end when --exact is set. A slice that is not Mach-O at all is returned unchanged.
+     */
+    private func validatedSlice(_ slice: Data) throws -> Data {
+        guard let machO = try MachOSlice(slice), self.exact else {
             return slice
         }
-        let end = MachOParser.machOEnd(data: slice)
-        return end < slice.count ? Data(slice.prefix(end)) : slice
+        return slice.prefix(machO.logicalEnd())
     }
 
     /**
      Hash raw bytes with the configured algorithm (shared by the regular and slice paths).
      */
-    private func hashData(_ data: Data) -> String? {
-        do {
-            switch self.algorithm {
-            case .md5, .sha1, .sha256, .sha384, .sha512:
-                return try CryptoDigest.hash(data: data, algorithm: self.algorithm)
-            case .git:
-                return try GitBlobDigest.hashData(data, useSHA256: false)
-            case .git256:
-                return try GitBlobDigest.hashData(data, useSHA256: true)
-            case .ssdeep:
-                return SSDeepBridge.hash(data: data)
-            case .tlsh:
-                return TLSHBridge.hash(data: data)
-            case .cdhash:
-                return CDHash.hash(data: data)
-            }
-        } catch {
-            return nil
+    private func hashData(_ data: Data) throws -> String? {
+        switch self.algorithm {
+        case .md5, .sha1, .sha256, .sha384, .sha512:
+            try CryptoDigest.hash(data: data, algorithm: self.algorithm)
+        case .git:
+            try GitBlobDigest.hashData(data, useSHA256: false)
+        case .git256:
+            try GitBlobDigest.hashData(data, useSHA256: true)
+        case .ssdeep:
+            SSDeepBridge.hash(data: data)
+        case .tlsh:
+            TLSHBridge.hash(data: data)
+        case .cdhash:
+            try CDHash.hash(data: data)
         }
     }
 
@@ -381,20 +394,17 @@ struct Runner {
         do {
             let results = try SymHash.compute(path: item.path, algorithm: self.algorithm, separator: self.separator, sortSymbols: self.sortSymbols)
 
-            // In match mode, when slices flag is off or when quiet flag is on, emit file path on first matching slice.
-            if !self.slices || self.quiet, !self.matchDigests.isEmpty {
-                for r in results {
-                    if Matching.check(digest: r.digest, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
-                        return [DigestResult(digest: r.digest, path: item.path, filePath: item.path)]
-                    }
-                }
-                return []
+            let labelled = results.map { result in
+                let displayPath = result.arch.map { "\(item.path) (\($0))" } ?? item.path
+                return DigestResult(digest: result.digest, path: displayPath, filePath: item.path)
             }
 
-            return results.map { r in
-                let displayPath = r.arch != nil ? "\(item.path) (\(r.arch!))" : item.path
-                return DigestResult(digest: r.digest, path: displayPath, filePath: item.path)
+            // Match mode: a symhash search reports files, not slices, so name the file once on its first
+            // matching slice (the slices of one binary usually share a symhash).
+            if !self.matchDigests.isEmpty {
+                return self.firstMatch(in: labelled, for: item)
             }
+            return labelled
         } catch {
             self.reporter.report(path: item.path, message: error.localizedDescription)
             return []

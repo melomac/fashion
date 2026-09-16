@@ -5,9 +5,9 @@ import XCTest
 final class CDHashTests: XCTestCase {
     // MARK: - Thin binary (system binary)
 
-    func testHashThinBinaryNonNil() {
+    func testHashThinBinaryNonNil() throws {
         // /bin/ls is a signed Mach-O on macOS
-        let results = CDHash.hash(path: "/bin/ls")
+        let results = try CDHash.hash(path: "/bin/ls")
         XCTAssertFalse(results.isEmpty, "Expected CDHash for /bin/ls")
 
         let first = results[0]
@@ -19,21 +19,21 @@ final class CDHashTests: XCTestCase {
 
     func testHashDataThinBinary() throws {
         let data = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"), options: .mappedIfSafe)
-        let pathResults = CDHash.hash(path: "/bin/ls")
+        let pathResults = try CDHash.hash(path: "/bin/ls")
         guard !pathResults.isEmpty else {
             XCTFail("Expected CDHash for /bin/ls")
             return
         }
 
         // For thin binary or first slice, hash(data:) on the slice should match
-        switch MachOParser.open(data: data) {
+        switch try MachOParser.open(data: data) {
         case .thin:
-            let dataHash = CDHash.hash(data: data)
+            let dataHash = try CDHash.hash(data: data)
             XCTAssertEqual(dataHash, pathResults[0].hash)
         case let .fat(archs):
             // hash(data:) on first slice should match first path result
             let slice = MachOParser.sliceData(fileData: data, arch: archs[0])
-            let dataHash = CDHash.hash(data: slice)
+            let dataHash = try CDHash.hash(data: slice)
             XCTAssertEqual(dataHash, pathResults[0].hash)
         case .notMachO:
             XCTFail("/bin/ls should be Mach-O")
@@ -53,22 +53,22 @@ final class CDHashTests: XCTestCase {
         for candidate in candidates {
             guard
                 FileManager.default.fileExists(atPath: candidate),
-                case .fat = MachOParser.open(path: candidate)
+                case .fat? = try? MachOParser.open(path: candidate)
             else {
                 continue
             }
 
-            let results = CDHash.hash(path: candidate)
+            let results = try CDHash.hash(path: candidate)
 
             // Candidate should have multiple CDHashes
             guard results.count > 1 else {
                 continue
             }
 
-            for r in results {
-                XCTAssertNotNil(r.arch, "Fat binary slices should have arch names")
-                XCTAssertFalse(r.hash.isEmpty)
-                XCTAssertTrue(r.hash.count == 40 || r.hash.count == 64)
+            for result in results {
+                XCTAssertNotNil(result.arch, "Fat binary slices should have arch names")
+                XCTAssertFalse(result.hash.isEmpty)
+                XCTAssertTrue(result.hash.count == 40 || result.hash.count == 64)
             }
             return
         }
@@ -76,44 +76,43 @@ final class CDHashTests: XCTestCase {
         throw XCTSkip("No fat binary found — skip gracefully")
     }
 
-    func testSignedSliceIsNotAdhoc() {
+    func testSignedSliceIsNotAdhoc() throws {
         // /bin/ls is signed, so every slice must use its embedded cdhash — never the ad-hoc fall-back.
-        let results = CDHash.hash(path: "/bin/ls")
+        let results = try CDHash.hash(path: "/bin/ls")
         XCTAssertFalse(results.isEmpty)
-        for r in results {
-            XCTAssertFalse(r.adhoc, "A signed slice must not be tagged ADHOC")
+        for result in results {
+            XCTAssertFalse(result.adhoc, "A signed slice must not be tagged ADHOC")
         }
     }
 
     // MARK: - Non-Mach-O
 
-    func testHashNonMachOReturnsEmpty() {
+    func testHashNonMachOReturnsEmpty() throws {
         let url = FileManager.default.temporaryDirectory / "fashion-cdhash-\(UUID()).txt"
         try? Data("Hello, World!".utf8).write(to: url)
         defer {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let results = CDHash.hash(path: url.path())
+        let results = try CDHash.hash(path: url.path())
         XCTAssertTrue(results.isEmpty)
     }
 
-    func testHashDataNonMachOReturnsNil() {
+    func testHashDataNonMachOReturnsNil() throws {
         let data = Data("Hello, World!".utf8)
-        XCTAssertNil(CDHash.hash(data: data))
+        XCTAssertNil(try CDHash.hash(data: data))
     }
 
-    func testHashMissingFileReturnsEmpty() {
-        let results = CDHash.hash(path: "/tmp/fashion-nonexistent-\(UUID())")
-        XCTAssertTrue(results.isEmpty)
+    func testHashMissingFileThrows() {
+        XCTAssertThrowsError(try CDHash.hash(path: "/tmp/fashion-nonexistent-\(UUID())"))
     }
 
     // MARK: - Determinism
 
-    func testHashDeterministic() {
-        let first = CDHash.hash(path: "/bin/ls")
+    func testHashDeterministic() throws {
+        let first = try CDHash.hash(path: "/bin/ls")
         for _ in 0 ..< 5 {
-            let again = CDHash.hash(path: "/bin/ls")
+            let again = try CDHash.hash(path: "/bin/ls")
             XCTAssertEqual(first.count, again.count)
 
             for (a, b) in zip(first, again) {
@@ -125,7 +124,7 @@ final class CDHashTests: XCTestCase {
     // MARK: - Matching integration
 
     func testExactMatchWorks() throws {
-        let results = CDHash.hash(path: "/bin/ls")
+        let results = try CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
         let match = Matching.check(digest: first.hash, against: [first.hash], algorithm: .cdhash, threshold: 0)
@@ -134,7 +133,7 @@ final class CDHashTests: XCTestCase {
     }
 
     func testExactMatchCaseInsensitive() throws {
-        let results = CDHash.hash(path: "/bin/ls")
+        let results = try CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
         let upper = first.hash.uppercased()
@@ -143,7 +142,7 @@ final class CDHashTests: XCTestCase {
     }
 
     func testTruncatedTargetMatches() throws {
-        let results = CDHash.hash(path: "/bin/ls")
+        let results = try CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
         // 20-byte truncated CDHash (40 hex chars) should match full 32-byte hash
@@ -158,7 +157,7 @@ final class CDHashTests: XCTestCase {
         // A truncated target is matched as a prefix of the full computed digest, but not the reverse:
         // a full-length target must not match a shorter digest, or a full sha256 target could spuriously
         // match a 40-hex sha1 CodeDirectory line on a dual-signed binary.
-        let results = CDHash.hash(path: "/bin/ls")
+        let results = try CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
         let truncated = String(first.hash.prefix(40))
@@ -167,7 +166,7 @@ final class CDHashTests: XCTestCase {
     }
 
     func testNoMatchOnDifferentDigest() throws {
-        let results = CDHash.hash(path: "/bin/ls")
+        let results = try CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
         let fake = String(repeating: "0", count: first.hash.count)
@@ -180,19 +179,19 @@ final class CDHashTests: XCTestCase {
     func testEmbeddedCDHashMatchesCodesign() throws {
         // Every signed slice's embedded cdhash (truncated to 20 bytes) must equal codesign's CDHash.
         let path = "/bin/ls"
-        let results = CDHash.hash(path: path)
+        let results = try CDHash.hash(path: path)
         try XCTSkipIf(results.isEmpty, "no cdhash for \(path)")
         try self.assertSliceNamesMatchCodesign(results, path: path)
 
-        for r in results {
-            XCTAssertFalse(r.adhoc, "\(r.arch ?? "thin") slice of \(path) is signed")
+        for result in results {
+            XCTAssertFalse(result.adhoc, "\(result.arch ?? "thin") slice of \(path) is signed")
 
-            let archArgs = r.arch.map { ["--arch", $0] } ?? []
+            let archArgs = result.arch.map { ["--arch", $0] } ?? []
             let out = try codesign(["-dvvv"] + archArgs + [path])
-            Self.assertInspectedSlice(out, arch: r.arch)
+            Self.assertInspectedSlice(out, arch: result.arch)
             let expected = try XCTUnwrap(Self.field(out, prefix: "CDHash="), "codesign printed no CDHash")
 
-            XCTAssertEqual(String(r.hash.prefix(40)), expected, "embedded cdhash ≠ codesign CDHash (\(r.arch ?? "thin"))")
+            XCTAssertEqual(String(result.hash.prefix(40)), expected, "embedded cdhash ≠ codesign CDHash (\(result.arch ?? "thin"))")
         }
     }
 
@@ -203,28 +202,30 @@ final class CDHashTests: XCTestCase {
         // fixtures do not.
         let dir = FileManager.default.temporaryDirectory / "fashion-adhoc-oracle-\(UUID())"
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
 
         let bin = dir / "ls"
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: bin)
         _ = try codesign(["--remove-signature", bin.path()])
 
-        let results = CDHash.hash(path: bin.path())
+        let results = try CDHash.hash(path: bin.path())
         try XCTSkipIf(results.isEmpty, "no cdhash after stripping the signature")
 
-        for r in results {
-            XCTAssertTrue(r.adhoc, "stripped slice \(r.arch ?? "thin") must be ADHOC")
-            let alg = try XCTUnwrap(r.type, "an ad-hoc result must carry its hash type (sha256 / sha1)")
+        for result in results {
+            XCTAssertTrue(result.adhoc, "stripped slice \(result.arch ?? "thin") must be ADHOC")
+            let alg = try XCTUnwrap(result.type, "an ad-hoc result must carry its hash type (sha256 / sha1)")
 
-            let archArgs = r.arch.map { ["--arch", $0] } ?? []
+            let archArgs = result.arch.map { ["--arch", $0] } ?? []
             let sig = dir / "detached.sig"
             // Sign with both algorithms so codesign emits both CandidateCDHashFull sha256 and sha1.
             _ = try codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC", "--digest-algorithm=sha1,sha256"] + archArgs + [bin.path()])
             let out = try codesign(["-dvvv", "--detached", sig.path()] + archArgs + [bin.path()])
-            Self.assertInspectedSlice(out, arch: r.arch)
+            Self.assertInspectedSlice(out, arch: result.arch)
             let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull \(alg)"), "codesign printed no CandidateCDHashFull \(alg)")
 
-            XCTAssertEqual(r.hash, expected, "adhoc \(alg) cdhash ≠ codesign --detached (\(r.arch ?? "thin"))")
+            XCTAssertEqual(result.hash, expected, "adhoc \(alg) cdhash ≠ codesign --detached (\(result.arch ?? "thin"))")
         }
     }
 
