@@ -196,6 +196,7 @@ struct Fashion: AsyncParsableCommand {
             sortSymbols: self.symbolOptions.sortSymbols,
             xarToc: self.xarOptions.xarToc,
             decompress: self.xarOptions.decompress,
+            trapSignals: true,
         )
         let code = await runner.run()
         if code != 0 {

@@ -12,7 +12,7 @@ enum FileEnumerator {
     /**
      Collect all file paths, sort them, and return as an array.
      */
-    static func collectSorted(paths: [String], follow: Bool, reporter: ErrorReporter? = nil) -> [String] {
+    static func collectSorted(paths: [String], follow: Bool, reporter: Reporter? = nil) -> [String] {
         let walker = FileWalker(paths: paths, follow: follow, reporter: reporter)
         var allPaths: [String] = []
         while let path = walker.next() {
@@ -28,7 +28,7 @@ enum FileEnumerator {
      The stream is demand-driven: each `next()` on the consumer side advances the walk by one path, so
      enumeration cannot run arbitrarily ahead of hashing and pile paths up in memory.
      */
-    static func walk(paths: [String], follow: Bool, reporter: ErrorReporter? = nil) -> AsyncStream<String> {
+    static func walk(paths: [String], follow: Bool, reporter: Reporter? = nil) -> AsyncStream<String> {
         let walker = FileWalker(paths: paths, follow: follow, reporter: reporter)
         return AsyncStream(unfolding: { walker.next() })
     }
@@ -40,13 +40,13 @@ enum FileEnumerator {
  */
 final class FileWalker: @unchecked Sendable {
     private let follow: Bool
-    private let reporter: ErrorReporter?
+    private let reporter: Reporter?
     private var roots: IndexingIterator<[String]>
     private var fts: UnsafeMutablePointer<FTS>?
 
     private static let logger = Logger(subsystem: "fashion", category: "walk")
 
-    init(paths: [String], follow: Bool, reporter: ErrorReporter?) {
+    init(paths: [String], follow: Bool, reporter: Reporter?) {
         self.follow = follow
         self.reporter = reporter
         self.roots = paths.makeIterator()

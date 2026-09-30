@@ -1,5 +1,8 @@
 import Foundation
 import os
+import System
+
+private let logger = Logger(subsystem: "fashion", category: "runner")
 
 // MARK: Pipeline Types
 
@@ -26,46 +29,226 @@ struct Batch {
  */
 actor OutputWriter {
     private let handle = FileHandle.standardOutput
+    private let reporter: Reporter
+    private let trap: SignalTrap?
+
+    init(reporter: Reporter, trap: SignalTrap?) {
+        self.reporter = reporter
+        self.trap = trap
+    }
 
     func write(_ string: String) {
         do {
             try self.handle.write(contentsOf: Data((string + "\n").utf8))
         } catch {
-            // A consumer that went away (EPIPE with SIGPIPE ignored) or a closed stdout: nothing more can be
-            // delivered, so stop like coreutils does rather than die on an uncaught Foundation exception.
-            let description = OutputFormatter.formatDiagnostic(FileReader.posixError(error).localizedDescription)
+            let error = FileReader.posixError(error)
+            if error as? Errno == .brokenPipe {
+                // The reader went away (`| head`): if the trap holds SIGPIPE, this logs the end and dies of it
+                // silently, as the process would have without the trap.
+                self.trap?.brokenPipe()
+            }
+
+            // Otherwise nothing more can be delivered (SIGPIPE inherited as ignored, or stdout closed): report
+            // and exit like coreutils, rather than crash on the uncaught error.
+            let description = OutputFormatter.formatDiagnostic(error.localizedDescription)
+            self.reporter.end("stopped by write error: \(description)")
             try? FileHandle.standardError.write(contentsOf: Data("fashion: write error: \(description)\n".utf8))
+
             exit(2)
         }
     }
 }
 
-// MARK: - ErrorReporter
+// MARK: - Reporter
 
 /**
- Thread-safe diagnostics sink: writes messages to both stderr (for the user and scripts) and the
- unified log (for a persistent, queryable record), and counts them so the process can exit non-zero
- when any path could not be enumerated or hashed. Lock-based so it is callable from the synchronous
- worker code as well as the async pipeline.
+ Thread-safe bookkeeping for one run, callable from the synchronous worker code as well as the async pipeline:
+ - diagnostics go to both stderr (for the user and scripts) and the unified log (for a persistent, queryable record),
+   and are counted so the process can exit non-zero when any path could not be enumerated or hashed;
+ - files are counted as workers finish them, for the progress report on SIGINFO and the end of the run,
+   which is logged exactly once whether the run completes or is interrupted.
  */
-final class ErrorReporter: @unchecked Sendable {
+final class Reporter: @unchecked Sendable {
     private let lock = NSLock()
     private let handle = FileHandle.standardError
-    private let logger = Logger(subsystem: "fashion", category: "runner")
-    private var errorCount = 0
+    private let clock = ContinuousClock()
+    private let start: ContinuousClock.Instant
+    private var fileCount = 0
+    private var errors = 0
+    private var ended = false
 
-    var count: Int {
-        self.lock.withLock { self.errorCount }
+    init() {
+        self.start = self.clock.now
+    }
+
+    var errorCount: Int {
+        self.lock.withLock { self.errors }
     }
 
     func report(path: String, message: String) {
-        self.logger.error("\(path, privacy: .public): \(message, privacy: .public)")
+        logger.error("\(path, privacy: .public): \(message, privacy: .public)")
+
         let displayPath = OutputFormatter.formatPath(path)
         let displayMessage = OutputFormatter.formatDiagnostic(message)
         self.lock.withLock {
-            self.errorCount += 1
-            // A failing stderr must never abort the scan.
-            try? self.handle.write(contentsOf: Data("fashion: \(displayPath): \(displayMessage)\n".utf8))
+            self.errors += 1
+            self.write("fashion: \(displayPath): \(displayMessage)")
+        }
+    }
+
+    func fileProcessed() {
+        self.lock.withLock { self.fileCount += 1 }
+    }
+
+    /**
+     Report the counts and elapsed time so far to the log and to stderr, like `dd` on `SIGINFO` (⌃T).
+     */
+    func progress() {
+        let summary = self.summary(self.lock.withLock { (self.fileCount, self.errors) })
+        logger.info("progress: \(summary, privacy: .public)")
+
+        self.lock.withLock {
+            self.write("fashion: \(summary)")
+        }
+    }
+
+    /**
+     Log the counts and elapsed time; calls after the first are ignored.
+     */
+    func end(_ reason: String) {
+        let counts: (files: Int, errors: Int)? = self.lock.withLock {
+            guard !self.ended else {
+                return nil
+            }
+            self.ended = true
+            return (self.fileCount, self.errors)
+        }
+        guard let counts else {
+            return
+        }
+        logger.info("\(reason, privacy: .public): \(self.summary(counts), privacy: .public)")
+    }
+
+    /**
+     Call without holding the lock: the first format loads ICU, which would stall every worker's `fileProcessed()`.
+     */
+    private func summary(_ counts: (files: Int, errors: Int)) -> String {
+        let duration = (self.clock.now - self.start).formatted(.units(allowed: [.hours, .minutes, .seconds, .milliseconds], width: .narrow))
+
+        return "\(counts.files) file(s) with \(counts.errors) error(s) in \(duration)"
+    }
+
+    /**
+     Caller holds the lock, so lines from concurrent workers never interleave.
+     */
+    private func write(_ line: String) {
+        // A write error must not abort the scan; a closed stderr pipe still ends it through the trapped SIGPIPE.
+        try? self.handle.write(contentsOf: Data((line + "\n").utf8))
+    }
+}
+
+// MARK: - SignalTrap
+
+/**
+ Signal handling for the duration of a run:
+ - `SIGINT` / `SIGTERM` log the end of the run, then the process dies of that signal so the parent sees the usual status;
+ - `SIGINFO` reports progress on ⌃T;
+ - `SIGPIPE` is held back so a write to a closed pipe fails with `EPIPE` instead of killing the process mid-write;
+   the end of the run is then logged before dying of it, by the stdout writer or, for a closed stderr, when the
+   signal reaches its source.
+
+ A signal inherited as ignored (a background job in a script, `nohup`) stays ignored, and `restore()` puts back
+ the inherited dispositions once the run is over. Dispositions are process-wide, so only the command line installs
+ a trap (see `Runner.trapSignals`).
+ */
+final class SignalTrap: @unchecked Sendable {
+    private let reporter: Reporter
+    private let lock = NSLock()
+    private var active = true
+    private var sources: [DispatchSourceSignal] = []
+    private var inherited: [(signo: Int32, action: sigaction)] = []
+    private var holdsBrokenPipe = false
+
+    init(reporter: Reporter) {
+        self.reporter = reporter
+        self.watch(SIGINT) { $0.stop("interrupted", dyingOf: SIGINT) }
+        self.watch(SIGTERM) { $0.stop("terminated", dyingOf: SIGTERM) }
+        self.watch(SIGINFO) { $0.reporter.progress() }
+        self.holdsBrokenPipe = self.watch(SIGPIPE) { $0.stop("broken pipe", dyingOf: SIGPIPE) }
+    }
+
+    /**
+     Die of the `SIGPIPE` held back by the trap, as the process would have without it.
+     Returns when `SIGPIPE` was inherited as ignored, or once the run is over.
+     */
+    func brokenPipe() {
+        if self.holdsBrokenPipe {
+            self.stop("broken pipe", dyingOf: SIGPIPE)
+        }
+    }
+
+    func restore() {
+        self.lock.withLock {
+            // A signal handled from now on came in as the run finished: let the run complete rather than die after "done".
+            self.active = false
+            for var entry in self.inherited {
+                sigaction(entry.signo, &entry.action, nil)
+            }
+        }
+        for source in self.sources {
+            source.cancel()
+        }
+    }
+
+    /**
+     Watch `signo` unless it was inherited as ignored; returns whether it is watched.
+     */
+    @discardableResult
+    private func watch(_ signo: Int32, handler: @escaping @Sendable (SignalTrap) -> Void) -> Bool {
+        var action = sigaction()
+        sigaction(signo, nil, &action)
+
+        // Compare as addresses: C function pointers are not Equatable.
+        if unsafeBitCast(action.__sigaction_u.__sa_handler, to: Int.self) == unsafeBitCast(SIG_IGN, to: Int.self) {
+            return false
+        }
+
+        let source = DispatchSource.makeSignalSource(signal: signo, queue: .global())
+        source.setEventHandler { [weak self] in
+            if let self {
+                handler(self)
+            }
+        }
+
+        // Ignore the signal only once the source is registered: one arriving in between would otherwise be lost.
+        let registered = DispatchSemaphore(value: 0)
+        source.setRegistrationHandler {
+            registered.signal()
+        }
+
+        source.resume()
+        registered.wait()
+        signal(signo, SIG_IGN)
+
+        self.inherited.append((signo, action))
+        self.sources.append(source)
+
+        return true
+    }
+
+    /**
+     Log the end of the run and die of `signo`, unless the run is already over.
+     */
+    private func stop(_ reason: String, dyingOf signo: Int32) {
+        // The lock is held until the process dies, so restore() cannot interleave.
+        self.lock.withLock {
+            guard self.active else {
+                return
+            }
+            self.reporter.end(reason)
+
+            signal(signo, SIG_DFL)
+            raise(signo)
         }
     }
 }
@@ -91,8 +274,9 @@ struct Runner {
     let sortSymbols: Bool
     let xarToc: Bool
     let decompress: Bool
-
-    private let reporter = ErrorReporter()
+    /// Log the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
+    /// Signal dispositions are process-wide, so only the command line sets this.
+    var trapSignals = false
 
     /**
      Run the pipeline and return a process exit code:
@@ -101,18 +285,27 @@ struct Runner {
      - `2` one or more paths could not be enumerated or hashed.
      */
     func run() async -> Int32 {
-        let writer = OutputWriter()
+        logger.info("run with \(self.jobs, privacy: .public) job(s) and \(self.algorithm.rawValue, privacy: .public) algorithm in path(s): \(self.paths.joined(separator: ", "), privacy: .public)")
+        if !self.matchDigests.isEmpty {
+            logger.info("match digest(s): \(self.matchDigests.joined(separator: ", "), privacy: .public)")
+        }
+        let reporter = Reporter()
+        let trap = self.trapSignals ? SignalTrap(reporter: reporter) : nil
+        let writer = OutputWriter(reporter: reporter, trap: trap)
 
         let matchFound: Bool
         if self.sortFiles {
-            let allPaths = FileEnumerator.collectSorted(paths: self.paths, follow: self.follow, reporter: self.reporter)
-            matchFound = await self.runSorted(paths: allPaths, writer: writer)
+            let allPaths = FileEnumerator.collectSorted(paths: self.paths, follow: self.follow, reporter: reporter)
+            matchFound = await self.runSorted(paths: allPaths, reporter: reporter, writer: writer)
         } else {
-            let pathStream = FileEnumerator.walk(paths: self.paths, follow: self.follow, reporter: self.reporter)
-            matchFound = await self.runStreaming(pathStream: pathStream, writer: writer)
+            let pathStream = FileEnumerator.walk(paths: self.paths, follow: self.follow, reporter: reporter)
+            matchFound = await self.runStreaming(pathStream: pathStream, reporter: reporter, writer: writer)
         }
 
-        if self.reporter.count > 0 {
+        reporter.end("done")
+        trap?.restore()
+
+        if reporter.errorCount > 0 {
             return 2
         }
         if !self.matchDigests.isEmpty, !matchFound {
@@ -123,7 +316,7 @@ struct Runner {
 
     // MARK: - Sorted Mode
 
-    private func runSorted(paths: [String], writer: OutputWriter) async -> Bool {
+    private func runSorted(paths: [String], reporter: Reporter, writer: OutputWriter) async -> Bool {
         guard !paths.isEmpty else {
             return false
         }
@@ -141,7 +334,7 @@ struct Runner {
                 }
                 let item = WorkItem(index: index, path: path)
                 group.addTask {
-                    self.processItem(item)
+                    self.processItem(item, reporter: reporter)
                 }
             }
 
@@ -153,7 +346,7 @@ struct Runner {
                 if let (index, path) = pending.next() {
                     let item = WorkItem(index: index, path: path)
                     group.addTask {
-                        self.processItem(item)
+                        self.processItem(item, reporter: reporter)
                     }
                 }
 
@@ -174,7 +367,7 @@ struct Runner {
 
     // MARK: - Streaming Mode
 
-    private func runStreaming(pathStream: AsyncStream<String>, writer: OutputWriter) async -> Bool {
+    private func runStreaming(pathStream: AsyncStream<String>, reporter: Reporter, writer: OutputWriter) async -> Bool {
         var index = 0
         var matchFound = false
 
@@ -187,7 +380,7 @@ struct Runner {
 
                 if activeCount < self.jobs {
                     group.addTask {
-                        self.processItem(item)
+                        self.processItem(item, reporter: reporter)
                     }
                     activeCount += 1
                 } else {
@@ -202,7 +395,7 @@ struct Runner {
                         }
                     }
                     group.addTask {
-                        self.processItem(item)
+                        self.processItem(item, reporter: reporter)
                     }
                     activeCount += 1
                 }
@@ -223,23 +416,24 @@ struct Runner {
 
     // MARK: - Processing
 
-    private func processItem(_ item: WorkItem) -> Batch {
+    private func processItem(_ item: WorkItem, reporter: Reporter) -> Batch {
         let results: [DigestResult] = if self.symhash {
-            self.processSymHash(item)
+            self.processSymHash(item, reporter: reporter)
         } else if self.xarToc {
-            self.processXarToc(item)
+            self.processXarToc(item, reporter: reporter)
         } else if self.algorithm == .cdhash {
-            self.processCDHash(item)
+            self.processCDHash(item, reporter: reporter)
         } else if self.slices {
-            self.processSlices(item)
+            self.processSlices(item, reporter: reporter)
         } else {
-            self.processRegular(item)
+            self.processRegular(item, reporter: reporter)
         }
 
+        reporter.fileProcessed()
         return Batch(index: item.index, results: results)
     }
 
-    private func processRegular(_ item: WorkItem) -> [DigestResult] {
+    private func processRegular(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
         do {
             let digest: String?
             let trimMachO = self.exact ? try MachOParser.isMachO(path: item.path) : false
@@ -279,18 +473,18 @@ struct Runner {
             }
             return [DigestResult(digest: digest, path: item.path, filePath: item.path)]
         } catch {
-            self.reporter.report(path: item.path, message: error.localizedDescription)
+            reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
     }
 
-    private func processCDHash(_ item: WorkItem) -> [DigestResult] {
+    private func processCDHash(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
         // --exact trims an unsigned slice to its logical extent before synthesizing its ad-hoc cdhash.
         let sliceResults: [CDHash.SliceResult]
         do {
             sliceResults = try CDHash.hash(path: item.path, exact: self.exact)
         } catch {
-            self.reporter.report(path: item.path, message: error.localizedDescription)
+            reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
 
@@ -324,7 +518,7 @@ struct Runner {
         return []
     }
 
-    private func processSlices(_ item: WorkItem) -> [DigestResult] {
+    private func processSlices(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
         do {
             // Read the container before hashing anything, so a malformed one yields an error, not a partial listing.
             var fatBinary: (data: Data, archs: [MachOParser.FatArch])?
@@ -336,7 +530,7 @@ struct Runner {
             }
 
             // Whole-file hash first (trimmed to the Mach-O logical end when --exact is set).
-            var results = self.processRegular(item)
+            var results = self.processRegular(item, reporter: reporter)
 
             // If fat Mach-O, hash each architecture slice (each trimmed when --exact is set).
             if let fatBinary {
@@ -354,7 +548,7 @@ struct Runner {
             }
             return results
         } catch {
-            self.reporter.report(path: item.path, message: error.localizedDescription)
+            reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
     }
@@ -390,7 +584,7 @@ struct Runner {
         }
     }
 
-    private func processSymHash(_ item: WorkItem) -> [DigestResult] {
+    private func processSymHash(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
         do {
             let results = try SymHash.compute(path: item.path, algorithm: self.algorithm, separator: self.separator, sortSymbols: self.sortSymbols)
 
@@ -406,19 +600,19 @@ struct Runner {
             }
             return labelled
         } catch {
-            self.reporter.report(path: item.path, message: error.localizedDescription)
+            reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
     }
 
-    private func processXarToc(_ item: WorkItem) -> [DigestResult] {
+    private func processXarToc(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
         do {
             if let digest = try XARParser.hashToc(path: item.path, algorithm: algorithm, decompress: decompress) {
                 return [DigestResult(digest: digest, path: item.path, filePath: item.path)]
             }
             return []
         } catch {
-            self.reporter.report(path: item.path, message: error.localizedDescription)
+            reporter.report(path: item.path, message: error.localizedDescription)
             return []
         }
     }
