@@ -220,18 +220,22 @@ final class SignalTrap: @unchecked Sendable {
             }
         }
 
-        // Ignore the signal only once the source is registered: one arriving in between would otherwise be lost.
-        let registered = DispatchSemaphore(value: 0)
-        source.setRegistrationHandler {
-            registered.signal()
+        // Ignore the signal only once the source is registered, which happens asynchronously: until then it keeps its
+        // default action rather than being lost. Not once the run is over, when restore() has already put it back.
+        source.setRegistrationHandler { [weak self] in
+            guard let self else {
+                return
+            }
+            self.lock.withLock {
+                if self.active {
+                    signal(signo, SIG_IGN)
+                }
+            }
         }
-
-        source.resume()
-        registered.wait()
-        signal(signo, SIG_IGN)
 
         self.inherited.append((signo, action))
         self.sources.append(source)
+        source.resume()
 
         return true
     }

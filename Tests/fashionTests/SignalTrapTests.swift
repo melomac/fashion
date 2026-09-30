@@ -18,13 +18,34 @@ final class SignalTrapTests: XCTestCase {
         unsafeBitCast(SIG_IGN, to: Int.self)
     }
 
+    /**
+     Whether every signal is ignored within a second: a trap ignores each one once its source is registered, asynchronously.
+     */
+    private func eventuallyAllIgnored() -> Bool {
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            if Self.signals.allSatisfy({ self.handler($0) == self.ignored }) {
+                return true
+            }
+            usleep(1000)
+        }
+        return false
+    }
+
     func testTrapIgnoresWhileActiveAndRestores() {
         let before = Self.signals.map(self.handler)
         let trap = SignalTrap(reporter: Reporter())
-        for signo in Self.signals {
-            XCTAssertEqual(self.handler(signo), self.ignored, "signal \(signo)")
-        }
+        XCTAssertTrue(self.eventuallyAllIgnored())
         trap.restore()
+        XCTAssertEqual(Self.signals.map(self.handler), before)
+    }
+
+    func testRestoreBeforeRegistrationLeavesSignalsRestored() {
+        let before = Self.signals.map(self.handler)
+        let trap = SignalTrap(reporter: Reporter())
+        trap.restore()
+        // A registration handler running late must not ignore a signal the trap already gave back.
+        usleep(100_000)
         XCTAssertEqual(Self.signals.map(self.handler), before)
     }
 
