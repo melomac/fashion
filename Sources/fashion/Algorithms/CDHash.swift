@@ -260,7 +260,7 @@ extension MachOSlice {
         }
 
         // Code-signing page size follows the target architecture: 16 KiB on arm64, 4 KiB elsewhere.
-        let pageSizeLog: UInt8 = self.cpuType == CPU_TYPE_ARM64 ? 14 : 12
+        let pageSizeLog: UInt8 = [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(self.cpuType) ? 14 : 12
 
         return [AdhocHashType.sha256, .sha1].map { hashType in
             let cd = self.synthesizeCodeDirectory(codeLimit: codeLimit, pageSizeLog: pageSizeLog, hashType: hashType)

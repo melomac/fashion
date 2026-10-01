@@ -171,6 +171,8 @@ enum MachOParser {
             case CPU_SUBTYPE_ARM64E_X1: return "arm64e.x1"
             default: return self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
             }
+        case CPU_TYPE_ARM64_32:
+            return "arm64_32"
         case CPU_TYPE_X86_64:
             return "x86_64"
         case CPU_TYPE_I386:

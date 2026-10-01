@@ -35,6 +35,10 @@ final class MachOParserTests: XCTestCase {
         XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_H), "x86_64h")
     }
 
+    func testArchNameARM64_32() {
+        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64_32, cpuSubtype: CPU_SUBTYPE_ARM64_32_V8), "arm64_32")
+    }
+
     func testArchNameI386() {
         XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_I386, cpuSubtype: 0), "i386")
     }

@@ -210,11 +210,41 @@ final class CDHashTests: XCTestCase {
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: bin)
         _ = try codesign(["--remove-signature", bin.path()])
 
+        try self.assertAdhocMatchesCodesignDetached(bin, in: dir)
+    }
+
+    func testAdhocArm64_32MatchesCodesignDetached() throws {
+        // arm64_32 (watchOS) has its own CPU type but signs with 16 KiB pages like arm64. macOS ships no such
+        // binary, so build an unsigned universal arm64_32 + arm64 one with the watchOS SDK when it is installed.
+        let dir = FileManager.default.temporaryDirectory / "fashion-adhoc-arm64_32-\(UUID())"
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let source = dir / "main.c"
+        try "int main(void) { return 0; }\n".write(to: source, atomically: true, encoding: .utf8)
+        let bin = dir / "watch"
+        let built = try Self.run("/usr/bin/xcrun", ["-sdk", "watchos", "clang", "-arch", "arm64_32", "-arch", "arm64", source.path(), "-o", bin.path()])
+        try XCTSkipUnless(built, "watchOS SDK unavailable")
+
         let results = try CDHash.hash(path: bin.path())
-        try XCTSkipIf(results.isEmpty, "no cdhash after stripping the signature")
+        XCTAssertEqual(Set(results.compactMap(\.arch)), ["arm64_32", "arm64"])
+        try self.assertAdhocMatchesCodesignDetached(bin, in: dir)
+    }
+
+    // MARK: - Helpers
+
+    /**
+     Each slice of the unsigned `bin` must yield synthesized ad-hoc cdhashes (SHA-256 and SHA-1) equal to
+     `codesign --detached`'s CandidateCDHashFull for the matching algorithm. The detached signature goes in `dir`.
+     */
+    private func assertAdhocMatchesCodesignDetached(_ bin: URL, in dir: URL) throws {
+        let results = try CDHash.hash(path: bin.path())
+        try XCTSkipIf(results.isEmpty, "no cdhash for unsigned \(bin.lastPathComponent)")
 
         for result in results {
-            XCTAssertTrue(result.adhoc, "stripped slice \(result.arch ?? "thin") must be ADHOC")
+            XCTAssertTrue(result.adhoc, "unsigned slice \(result.arch ?? "thin") must be ADHOC")
             let alg = try XCTUnwrap(result.type, "an ad-hoc result must carry its hash type (sha256 / sha1)")
 
             let archArgs = result.arch.map { ["--arch", $0] } ?? []
@@ -229,7 +259,18 @@ final class CDHashTests: XCTestCase {
         }
     }
 
-    // MARK: - Helpers
+    /// Run `executable` with its output discarded; true when it exits zero.
+    private static func run(_ executable: String, _ arguments: [String]) throws -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
 
     /**
      Every slice codesign lists for a universal `path` must appear in `results` under the same name, the name
