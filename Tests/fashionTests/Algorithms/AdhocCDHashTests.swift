@@ -8,23 +8,24 @@ import XCTest
  */
 final class AdhocCDHashTests: XCTestCase {
     /**
-     A minimal native-endian thin 64-bit Mach-O with a single `__TEXT` segment covering `[0, fileSize)`.
-     Unsigned, so `CDHash`/`MachOSlice` synthesize its ad-hoc cdhash.
+     A minimal native-endian thin 64-bit Mach-O with a single segment (`__TEXT` unless renamed) covering
+     `[0, fileSize)`, followed by any extra load `commands`. Unsigned, so `CDHash`/`MachOSlice` synthesize its
+     ad-hoc cdhash.
      */
-    private func makeMachO(cpuType: cpu_type_t = CPU_TYPE_ARM64, filetype: UInt32 = UInt32(MH_EXECUTE), fileSize: Int = 256) -> Data {
+    private func makeMachO(cpuType: cpu_type_t = CPU_TYPE_ARM64, filetype: UInt32 = UInt32(MH_EXECUTE), segment: String = "__TEXT", commands: [Data] = [], fileSize: Int = 256) -> Data {
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(cpuType)
         data.appendInt32(0) // cpusubtype
         data.appendUInt32(filetype)
-        data.appendUInt32(1) // ncmds
-        data.appendUInt32(72) // sizeofcmds (segment_command_64)
+        data.appendUInt32(UInt32(1 + commands.count)) // ncmds
+        data.appendUInt32(UInt32(72 + commands.reduce(0) { $0 + $1.count })) // sizeofcmds (segment_command_64 + extras)
         data.appendUInt32(0) // flags
         data.appendUInt32(0) // reserved
         // LC_SEGMENT_64
         data.appendUInt32(UInt32(LC_SEGMENT_64))
         data.appendUInt32(72) // cmdsize
-        data.append(Data("__TEXT".utf8)); data.append(Data(repeating: 0, count: 10)) // segname[16]
+        data.append(Data(segment.utf8)); data.append(Data(repeating: 0, count: 16 - segment.utf8.count)) // segname[16]
         data.appendUInt64(0) // vmaddr
         data.appendUInt64(UInt64(fileSize)) // vmsize
         data.appendUInt64(0) // fileoff
@@ -33,34 +34,54 @@ final class AdhocCDHashTests: XCTestCase {
         data.appendUInt32(5) // initprot
         data.appendUInt32(0) // nsects
         data.appendUInt32(0) // flags
+        commands.forEach { data.append($0) }
         data.append(Data(repeating: 0xab, count: fileSize - data.count)) // segment content
+
         return data
     }
 
+    /// An `LC_BUILD_VERSION` command with no tool entries.
+    private func buildVersion(platform: Int32, minOS: UInt32 = 0x000f_0000) -> Data {
+        var command = Data()
+        command.appendUInt32(UInt32(LC_BUILD_VERSION))
+        command.appendUInt32(24) // cmdsize
+        command.appendUInt32(UInt32(platform))
+        command.appendUInt32(minOS) // minos
+        command.appendUInt32(minOS) // sdk
+        command.appendUInt32(0) // ntools
+
+        return command
+    }
+
+    /// An `LC_VERSION_MIN_*` command.
+    private func versionMin(_ cmd: Int32, minOS: UInt32 = 0x000f_0000) -> Data {
+        var command = Data()
+        command.appendUInt32(UInt32(cmd))
+        command.appendUInt32(16) // cmdsize
+        command.appendUInt32(minOS) // version
+        command.appendUInt32(minOS) // sdk
+
+        return command
+    }
+
+    /// `makeMachO` with a 128-byte `__TEXT` and an `LC_CODE_SIGNATURE` pointing at `signature`, appended at offset 128.
     private func makeSignedMachO(signature: Data, declaredSignatureOffset: UInt32 = 128) -> Data {
-        var data = Data()
-        data.appendUInt32(MH_MAGIC_64)
-        data.appendInt32(CPU_TYPE_ARM64)
-        data.appendInt32(0)
-        data.appendUInt32(UInt32(MH_EXECUTE))
-        data.appendUInt32(2) // ncmds
-        data.appendUInt32(88) // sizeofcmds (72 + 16)
-        data.appendUInt32(0)
-        data.appendUInt32(0)
-        // LC_SEGMENT_64 __TEXT covering [0, 128)
-        data.appendUInt32(UInt32(LC_SEGMENT_64))
-        data.appendUInt32(72)
-        data.append(Data("__TEXT".utf8)); data.append(Data(repeating: 0, count: 10))
-        data.appendUInt64(0); data.appendUInt64(128); data.appendUInt64(0); data.appendUInt64(128)
-        data.appendUInt32(7); data.appendUInt32(5); data.appendUInt32(0); data.appendUInt32(0)
-        // LC_CODE_SIGNATURE → an empty superblob at offset 128, size 12
-        data.appendUInt32(UInt32(LC_CODE_SIGNATURE))
-        data.appendUInt32(16)
-        data.appendUInt32(declaredSignatureOffset) // dataoff
-        data.appendUInt32(UInt32(signature.count)) // datasize
-        data.append(Data(repeating: 0, count: 128 - data.count)) // pad to dataoff
-        data.append(signature)
-        return data
+        var command = Data()
+        [UInt32(LC_CODE_SIGNATURE), 16, declaredSignatureOffset, UInt32(signature.count)].forEach { command.appendUInt32($0) } // cmd, cmdsize, dataoff, datasize
+
+        return self.makeMachO(commands: [command], fileSize: 128) + signature
+    }
+
+    /// A minimal 40-byte CodeDirectory: magic, length, and `hashType` at offset 37.
+    private func codeDirectory(hashType: UInt8) -> Data {
+        var directory = Data()
+        directory.appendUInt32BE(0xfade_0c02)
+        directory.appendUInt32BE(40)
+        directory.append(Data(repeating: 0, count: 29))
+        directory.append(hashType) // offset 37
+        directory.append(Data(repeating: 0, count: 2))
+
+        return directory
     }
 
     /**
@@ -90,21 +111,58 @@ final class AdhocCDHashTests: XCTestCase {
         return self.makeSignedMachO(signature: signature)
     }
 
-    // MARK: - execSegment
+    // MARK: - MachOBase lookups
 
-    func testExecSegmentExecutable() throws {
-        let exec = try XCTUnwrap(MachOSlice(self.makeMachO(fileSize: 256))).execSegment()
-        XCTAssertEqual(exec.base, 0)
-        XCTAssertEqual(exec.limit, 256)
-        XCTAssertEqual(exec.flags, 1) // CS_EXECSEG_MAIN_BINARY
+    func testFindSegment() throws {
+        let slice = try XCTUnwrap(MachOSlice(self.makeMachO()))
+        XCTAssertEqual(slice.findSegment("__TEXT")?.cmd, UInt32(LC_SEGMENT_64))
+        XCTAssertNil(slice.findSegment("__DATA"))
+        XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO(segment: "__TEXX"))).findSegment("__TEXT"))
     }
 
-    func testExecSegmentDylibHasNoMainFlag() throws {
-        let exec = try XCTUnwrap(MachOSlice(self.makeMachO(filetype: UInt32(MH_DYLIB), fileSize: 256))).execSegment()
-        XCTAssertEqual(exec.flags, 0)
+    func testFindCommand() throws {
+        let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS)])))
+        XCTAssertEqual(slice.findCommand(UInt32(LC_BUILD_VERSION))?.data.count, 24)
+        XCTAssertNil(slice.findCommand(UInt32(LC_CODE_SIGNATURE)))
     }
 
-    func testExecSegmentNonMachOReturnsNil() {
+    func testVersionAbsentIsNil() throws {
+        XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO())).version())
+    }
+
+    func testPlatformFromBuildVersion() throws {
+        let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS, minOS: 0x000f_0603)])))
+        XCTAssertEqual(slice.version()?.platform, PLATFORM_IOS)
+        XCTAssertEqual(slice.version()?.minOS, 0x000f_0603) // 15.6.3
+    }
+
+    func testPlatformFromVersionMin() throws {
+        let pairs: [(Int32, Int32)] = [
+            (LC_VERSION_MIN_MACOSX, PLATFORM_MACOS),
+            (LC_VERSION_MIN_IPHONEOS, PLATFORM_IOS),
+            (LC_VERSION_MIN_TVOS, PLATFORM_TVOS),
+            (LC_VERSION_MIN_WATCHOS, PLATFORM_WATCHOS),
+        ]
+        for (cmd, platform) in pairs {
+            let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(cmd, minOS: 0x0008_0100)])))
+            XCTAssertEqual(slice.version()?.platform, platform, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))")
+            XCTAssertEqual(slice.version()?.minOS, 0x0008_0100, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))") // 8.1
+        }
+    }
+
+    func testPlatformPrecedenceFollowsCodesign() throws {
+        // codesign reads the first LC_BUILD_VERSION, even one naming platform 0, ahead of any LC_VERSION_MIN_*.
+        let buildFirst = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS), self.buildVersion(platform: PLATFORM_MACOS)])))
+        XCTAssertEqual(buildFirst.version()?.platform, PLATFORM_IOS)
+
+        let versionMinFirst = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_IPHONEOS), self.buildVersion(platform: PLATFORM_MACOS)])))
+        XCTAssertEqual(versionMinFirst.version()?.platform, PLATFORM_MACOS)
+
+        let platformZero = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_MACOSX), self.buildVersion(platform: 0)])))
+        XCTAssertEqual(platformZero.version()?.platform, 0)
+    }
+
+    func testNonMachOIsNil() {
         XCTAssertNil(try MachOSlice(Data("Hello, World!".utf8)))
     }
 
@@ -138,7 +196,7 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertThrowsError(try slice.codeSignatureRange()) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
-        XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false)) { error in
+        XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
 
@@ -158,7 +216,7 @@ final class AdhocCDHashTests: XCTestCase {
         let slice = try XCTUnwrap(MachOSlice(data))
         let expected = ParserError.invalidCodeDirectoryRange(offset: 20, size: 38, signatureSize: 32)
 
-        XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false)) { error in
+        XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
 
@@ -226,27 +284,19 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testMultipleCodeDirectoriesRankStrongestFirst() throws {
         // Primary slot: SHA-1. Alternate slot 0x1000: SHA-256. Alternate 0x1001: an unknown hash type, dropped.
-        func codeDirectory(hashType: UInt8) -> Data {
-            var directory = Data()
-            directory.appendUInt32BE(0xfade_0c02)
-            directory.appendUInt32BE(40)
-            directory.append(Data(repeating: 0, count: 29))
-            directory.append(hashType) // offset 37
-            directory.append(Data(repeating: 0, count: 2))
-            return directory
-        }
-        let sha1 = codeDirectory(hashType: 1)
-        let sha256 = codeDirectory(hashType: 2)
-        let unknown = codeDirectory(hashType: 9)
+        let sha1 = self.codeDirectory(hashType: 1)
+        let sha256 = self.codeDirectory(hashType: 2)
+        let unknown = self.codeDirectory(hashType: 9)
+
         // 12-byte header, three 8-byte index entries, then the three 40-byte directories.
         var signature = self.superblob([0xfade_0cc0, 156, 3, 0, 36, 0x1000, 76, 0x1001, 116])
         signature.append(sha1)
         signature.append(sha256)
         signature.append(unknown)
-        let data = self.makeSignedMachO(signature: signature)
 
+        let data = self.makeSignedMachO(signature: signature)
         let slice = try XCTUnwrap(MachOSlice(data))
-        let directories = try slice.codeDirectoryHashes(exact: false)
+        let directories = try slice.codeDirectoryHashes(exact: false).hashes
 
         XCTAssertEqual(directories.map(\.type), ["sha256", "sha1"])
         XCTAssertEqual(directories.map(\.hash), [SHA256.hash(data: sha256).hexString, Insecure.SHA1.hash(data: sha1).hexString])
@@ -266,7 +316,7 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testUnsignedSliceSynthesizesAdhoc() throws {
         let slice = try XCTUnwrap(MachOSlice(self.makeMachO()))
-        let directories = try slice.codeDirectoryHashes(exact: false)
+        let directories = try slice.codeDirectoryHashes(exact: false).hashes
 
         // An unsigned slice yields both synthesized ad-hoc cdhashes: SHA-256 first, then SHA-1.
         XCTAssertEqual(directories.count, 2)
@@ -284,20 +334,38 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertTrue(sha1.hash.allSatisfy(\.isHexDigit))
 
         // Deterministic.
-        XCTAssertEqual(directories.map(\.hash), try MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).map(\.hash))
+        XCTAssertEqual(directories.map(\.hash), try MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
     }
 
     func testExactStripsTrailingGarbage() throws {
         let clean = self.makeMachO(fileSize: 256)
-        let cleanHashes = try XCTUnwrap(try MachOSlice(clean)?.codeDirectoryHashes(exact: false).map(\.hash))
+        let cleanHashes = try XCTUnwrap(try MachOSlice(clean)?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
 
         var dirty = clean
         dirty.append(Data(repeating: 0x41, count: 100))
 
-        let dirtyExact = try MachOSlice(dirty)?.codeDirectoryHashes(exact: true).map(\.hash)
-        let dirtyWhole = try MachOSlice(dirty)?.codeDirectoryHashes(exact: false).map(\.hash)
+        let dirtyExact = try MachOSlice(dirty)?.codeDirectoryHashes(exact: true).hashes.map(\.hash)
+        let dirtyWhole = try MachOSlice(dirty)?.codeDirectoryHashes(exact: false).hashes.map(\.hash)
         XCTAssertEqual(dirtyExact, cleanHashes, "Exact must strip appended garbage (both cdhashes)")
         XCTAssertNotEqual(dirtyWhole, cleanHashes, "Whole-slice adhoc must include garbage")
+    }
+
+    func testOnlyCodeFiletypesSynthesizeAdhoc() throws {
+        // codesign signs only these filetypes as Mach-O code. Any other one, an unknown 0x1d included, is a generic
+        // file to it, so an unsigned slice of that filetype has no ad-hoc cdhash.
+        let code: [Int32] = [MH_EXECUTE, MH_PRELOAD, MH_DYLIB, MH_DYLINKER, MH_BUNDLE, MH_KEXT_BUNDLE]
+        for filetype in code + [MH_OBJECT, MH_FVMLIB, MH_CORE, MH_DYLIB_STUB, MH_DSYM, MH_FILESET, MH_GPU_EXECUTE, MH_GPU_DYLIB, 0x1d] {
+            let slice = try XCTUnwrap(MachOSlice(self.makeMachO(filetype: UInt32(filetype))))
+            let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+            XCTAssertEqual(hashes.count, code.contains(filetype) ? 2 : 0, slice.filetypeName)
+            XCTAssertEqual(skipReason == nil, code.contains(filetype), slice.filetypeName)
+        }
+    }
+
+    func testFiletypeNames() throws {
+        XCTAssertEqual(try XCTUnwrap(MachOSlice(self.makeMachO(filetype: UInt32(MH_EXECUTE)))).filetypeName, "MH_EXECUTE")
+        XCTAssertEqual(try XCTUnwrap(MachOSlice(self.makeMachO(filetype: UInt32(MH_GPU_DYLIB)))).filetypeName, "MH_GPU_DYLIB")
+        XCTAssertEqual(try XCTUnwrap(MachOSlice(self.makeMachO(filetype: 0x1d))).filetypeName, "unknown(29)")
     }
 
     // MARK: - CDHash integration
@@ -317,7 +385,7 @@ final class AdhocCDHashTests: XCTestCase {
             XCTAssertNil(result.arch, "thin binary → nil arch")
         }
 
-        XCTAssertEqual(results.map(\.hash), try MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).map(\.hash))
+        XCTAssertEqual(results.map(\.hash), try MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
     }
 
     func testSignedButUnparseableSliceIsNotAdhoc() throws {
@@ -325,6 +393,9 @@ final class AdhocCDHashTests: XCTestCase {
         // no cdhash rather than be relabeled ADHOC (that identity is for unsigned code only).
         let slice = try XCTUnwrap(MachOSlice(self.makeSignedEmptySuperblob()))
         XCTAssertNotNil(try slice.codeSignatureRange(), "fixture must be recognized as signed")
-        XCTAssertTrue(try slice.codeDirectoryHashes(exact: false).isEmpty, "signed-but-unreadable slice → no output, never ADHOC")
+
+        let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+        XCTAssertTrue(hashes.isEmpty, "signed-but-unreadable slice → no output, never ADHOC")
+        XCTAssertNotNil(skipReason)
     }
 }

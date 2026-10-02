@@ -77,6 +77,7 @@ While we print the full hash, we can match any CDHashFull or truncated CDHash.
 
 Unsigned slices are not skipped: `fashion` synthesizes their **ad-hoc CodeDirectory hash** and labels the line `ADHOC`.
 This is the identity `syspolicyd` computes for unsigned code and notarization revocation, byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`.
+Mach-O files that are not code to `codesign` — objects, dSYMs, core dumps, kernel filesets — have no such identity and yield no line.
 
 ### Quiet flag
 

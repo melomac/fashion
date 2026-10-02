@@ -166,10 +166,14 @@ enum MachOParser {
         switch cpuType {
         case CPU_TYPE_ARM64:
             switch masked {
-            case CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_V8: return "arm64"
-            case CPU_SUBTYPE_ARM64E: return "arm64e"
-            case CPU_SUBTYPE_ARM64E_X1: return "arm64e.x1"
-            default: return self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
+            case CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_V8:
+                return "arm64"
+            case CPU_SUBTYPE_ARM64E:
+                return "arm64e"
+            case CPU_SUBTYPE_ARM64E_X1:
+                return "arm64e.x1"
+            default:
+                return self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
             }
         case CPU_TYPE_ARM64_32:
             return "arm64_32"

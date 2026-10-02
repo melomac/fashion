@@ -1,12 +1,16 @@
 import CryptoKit
 import Foundation
 import MachO
+import os
+
+private let logger = Logger(subsystem: "fashion", category: "cdhash")
 
 /**
  Compute CDHash (Code Directory Hash) for each slice of a Mach-O binary.
 
- A signed slice yields its embedded cdhash(es). An unsigned slice yields a synthesized ad-hoc cdhash:
- the identity `syspolicyd` computes for unsigned code and notarization revocation,
+ A signed slice yields its embedded cdhash(es).
+
+ An unsigned slice yields a synthesized ad-hoc cdhash: the identity `syspolicyd` computes for unsigned code,
  byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`.
 
  The per-slice computation lives on `MachOSlice` below; this enum opens the binary and attaches architecture names.
@@ -23,6 +27,7 @@ enum CDHash {
 
     /**
      Compute CDHash for each Mach-O slice in a file.
+
      Thin binaries return a single result with nil arch.
      Fat binaries return one result per slice.
 
@@ -35,15 +40,16 @@ enum CDHash {
         switch try MachOParser.open(data: data) {
         case let .fat(archs):
             return try archs.flatMap { arch -> [SliceResult] in
-                // A universal static library carries `ar` archives, which have no code directory to report.
+                let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
+                // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
                 guard let slice = try MachOSlice(MachOParser.sliceData(fileData: data, arch: arch)) else {
+                    self.logSkip(path: path, arch: name, reason: "slice is not Mach-O")
                     return []
                 }
-                let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
-                return try self.results(for: slice, arch: name, exact: exact)
+                return try self.results(for: slice, arch: name, path: path, exact: exact)
             }
         case let .thin(slice):
-            return try self.results(for: slice, arch: nil, exact: exact)
+            return try self.results(for: slice, arch: nil, path: path, exact: exact)
         case .notMachO:
             return []
         }
@@ -51,10 +57,12 @@ enum CDHash {
 
     /**
      Compute CDHash from raw Mach-O data (single thin slice).
-     Returns the strongest embedded cdhash, or the ad-hoc cdhash when unsigned. Nil for non-Mach-O input.
+
+     Returns the strongest embedded cdhash, or the ad-hoc cdhash when unsigned. Nil for non-Mach-O input,
+     and for a slice with neither (see `MachOSlice.codeDirectoryHashes(exact:)`).
      */
     static func hash(data: Data, exact: Bool = false) throws -> String? {
-        try MachOSlice(data)?.codeDirectoryHashes(exact: exact).first?.hash
+        try MachOSlice(data)?.codeDirectoryHashes(exact: exact).hashes.first?.hash
     }
 
     // MARK: - Private
@@ -62,13 +70,20 @@ enum CDHash {
     /**
      One SliceResult per code directory. The hash type is only set when a slice carries several directories.
      */
-    private static func results(for slice: MachOSlice, arch: String?, exact: Bool) throws -> [SliceResult] {
-        let directories = try slice.codeDirectoryHashes(exact: exact)
+    private static func results(for slice: MachOSlice, arch: String?, path: String, exact: Bool) throws -> [SliceResult] {
+        let (directories, skipReason) = try slice.codeDirectoryHashes(exact: exact)
+        if let skipReason {
+            self.logSkip(path: path, arch: arch, reason: skipReason)
+        }
         let ambiguous = directories.count > 1
 
         return directories.map { cd in
             SliceResult(hash: cd.hash, arch: arch, type: ambiguous ? cd.type : nil, adhoc: cd.adhoc)
         }
+    }
+
+    private static func logSkip(path: String, arch: String?, reason: String) {
+        logger.info("No cdhash for \(path, privacy: .public)\(arch.map { " (\($0))" } ?? "", privacy: .public): \(reason, privacy: .public)")
     }
 }
 
@@ -87,17 +102,30 @@ extension MachOSlice {
     }
 
     /**
-     Digest every code directory of a signed slice, strongest first per hashRank — the head is the kernel-enforced cdhash.
-     An unsigned slice returns its synthesized ad-hoc cdhashes instead (SHA-256 then SHA-1).
+     The slice's cdhashes, or the reason it has none (`skipReason` is set exactly when `hashes` is empty).
+
+     A signed slice yields every embedded code directory, strongest first per hashRank: the head is the
+     kernel-enforced cdhash.
+
+     An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1), unless its filetype is one
+     `codesign` signs as a generic file rather than as code.
+
+     A slice of a universal file is judged on its own, as if extracted: `codesign` instead decides a whole 32-bit
+     universal file from its first slice, and treats a 64-bit one (`lipo -fat64`) as a generic file outright.
      */
-    func codeDirectoryHashes(exact: Bool) throws -> [CodeDirectoryHash] {
+    func codeDirectoryHashes(exact: Bool) throws -> (hashes: [CodeDirectoryHash], skipReason: String?) {
         // Only a slice with no signature at all falls back to the ad-hoc identity: a signed slice with an
         // unreadable signature yields nothing, as the ad-hoc cdhash only describes unsigned code.
         if let sigRange = try self.codeSignatureRange() {
-            return try self.embeddedCodeDirectories(in: sigRange)
+            let hashes = try self.embeddedCodeDirectories(in: sigRange)
+            return (hashes, hashes.isEmpty ? "signature has no code directory with a known hash type" : nil)
         }
 
-        return self.adhocCDHashes(exact: exact)
+        guard Self.codeFiletypes.contains(self.filetype) else {
+            return ([], "\(self.filetypeName) is not code to codesign")
+        }
+
+        return (self.adhocCDHashes(codeLimit: exact ? self.logicalEnd() : self.data.count), nil)
     }
 
     // MARK: - Embedded signature
@@ -245,79 +273,115 @@ extension MachOSlice {
      builds, byte for byte. Each cdhash is that directory digested under its own hash type.
 
      Returns the SHA-256 cdhash first (the kernel-enforced identity, matching `CandidateCDHashFull sha256`)
-     then the SHA-1 cdhash (`CandidateCDHashFull sha1`). While we print the full hash, we can match the
-     truncated 20-byte cdhash too. Code covers the whole slice, or its logical extent when `exact` is set.
+     then the SHA-1 cdhash (`CandidateCDHashFull sha1`).
+
+     While we print the full hash, we can match the truncated 20-byte cdhash too. Code covers `codeLimit` bytes:
+     the whole slice, or its logical extent under `exact`.
      */
-    private func adhocCDHashes(exact: Bool) -> [CodeDirectoryHash] {
-        let codeLimit = exact ? self.logicalEnd() : self.data.count
-
-        // The synthesized CodeDirectory carries the 32-bit codeLimit field; a slice >= 4 GiB would need codeLimit64.
-        guard
-            codeLimit > 0,
-            codeLimit <= UInt32.max
-        else {
-            return []
-        }
-
-        // Code-signing page size follows the target architecture: 16 KiB on arm64, 4 KiB elsewhere.
-        let pageSizeLog: UInt8 = [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(self.cpuType) ? 14 : 12
+    private func adhocCDHashes(codeLimit: Int) -> [CodeDirectoryHash] {
+        // Security's Signer::populate: fill a CodeDirectory::Builder with what MachORep reports.
+        let execSeg = self.execSeg()
+        let builder = CodeDirectoryBuilder(
+            codeLimit: codeLimit,
+            pageSizeLog: self.pageSizeLog(),
+            execSegBase: execSeg.base,
+            execSegLimit: execSeg.limit,
+            execSegFlags: self.filetype == UInt32(MH_EXECUTE) ? 1 : 0, // CS_EXECSEG_MAIN_BINARY
+            specialSlots: [1: self.infoPlist(), 2: Self.emptyRequirementsBlob].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
+        )
 
         return [AdhocHashType.sha256, .sha1].map { hashType in
-            let cd = self.synthesizeCodeDirectory(codeLimit: codeLimit, pageSizeLog: pageSizeLog, hashType: hashType)
+            let cd = builder.build(hashType: hashType, code: self.data)
             return CodeDirectoryHash(hash: hashType.hexDigest(cd), type: hashType.name, adhoc: true)
         }
     }
 
-    private func synthesizeCodeDirectory(codeLimit: Int, pageSizeLog: UInt8, hashType: AdhocHashType) -> Data {
-        let pageSize = 1 << Int(pageSizeLog)
-        let hashSize = hashType.digestSize
-        let nSpecialSlots = 2
-        let nCodeSlots = (codeLimit + pageSize - 1) / pageSize
-
-        let identifier = Data("ADHOC".utf8) + Data([0])
-        let headerSize = 0x58 // CodeDirectory v0x20400 fixed header (through execSegFlags)
-        let identOffset = headerSize
-        let hashOffset = identOffset + identifier.count + nSpecialSlots * hashSize
-        let length = hashOffset + nCodeSlots * hashSize
-
-        let exec = self.execSegment()
-
-        var cd = Data(capacity: length)
-        cd.appendBigEndian(Self.csmagicCodeDirectory) // magic
-        cd.appendBigEndian(UInt32(length)) // length
-        cd.appendBigEndian(Self.cdVersion) // version
-        cd.appendBigEndian(Self.csAdhocFlag) // flags
-        cd.appendBigEndian(UInt32(hashOffset)) // hashOffset
-        cd.appendBigEndian(UInt32(identOffset)) // identOffset
-        cd.appendBigEndian(UInt32(nSpecialSlots)) // nSpecialSlots
-        cd.appendBigEndian(UInt32(nCodeSlots)) // nCodeSlots
-        cd.appendBigEndian(UInt32(codeLimit)) // codeLimit
-        cd.append(contentsOf: [UInt8(hashSize), hashType.csHashType, 0, pageSizeLog]) // hashSize, hashType, platform, pageSize
-        cd.appendBigEndian(UInt32(0)) // spare2
-        cd.appendBigEndian(UInt32(0)) // scatterOffset
-        cd.appendBigEndian(UInt32(0)) // teamOffset
-        cd.appendBigEndian(UInt32(0)) // spare3
-        cd.appendBigEndian(UInt64(0)) // codeLimit64
-        cd.appendBigEndian(exec.base) // execSegBase
-        cd.appendBigEndian(exec.limit) // execSegLimit
-        cd.appendBigEndian(exec.flags) // execSegFlags
-        cd.append(identifier)
-
-        cd.append(hashType.digest(Self.emptyRequirementsBlob)) // special slot -2: requirements
-        cd.append(Data(repeating: 0, count: hashSize)) // special slot -1: Info.plist (absent)
-
-        var offset = 0
-        while offset < codeLimit {
-            let end = min(offset + pageSize, codeLimit)
-            cd.append(hashType.digest(self.data.subdata(in: offset ..< end)))
-            offset += pageSize
+    /**
+     log2 of the page size `codesign` signs with, like `MachORep::pageSize`: 16 KiB for the arm64 family, except
+     4 KiB on tvOS, iOS before 16 and watchOS before 9 (the declared minimum OS, not the SDK); 4 KiB for every other
+     architecture.
+     */
+    private func pageSizeLog() -> UInt8 {
+        guard [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(self.cpuType) else {
+            return 12
         }
 
-        return cd
+        let version = self.version()
+        let minOS = version?.minOS ?? 0
+        return switch version?.platform {
+        case PLATFORM_TVOS: 12
+        case PLATFORM_IOS: minOS < 0x0010_0000 ? 12 : 14
+        case PLATFORM_WATCHOS: minOS < 0x0009_0000 ? 12 : 14
+        default: 14
+        }
     }
 
     /**
-     The empty requirements blob codesign embeds; special slot -2 is its digest under the directory's hash type.
+     The `__TEXT` file range `codesign` records as execSeg base and limit, like `MachORep::execSegBase` /
+     `execSegLimit`: zero unless the slice declares a platform.
+
+     The range is read as the file stores it, without byte-swapping, so a big-endian slice (ppc, ppc64) gets it
+     byte-reversed: a 0x1000-byte ppc `__TEXT` is recorded as 0x100000. The ad-hoc identity carries that quirk too.
+     */
+    private func execSeg() -> (base: UInt64, limit: UInt64) {
+        guard
+            (self.version()?.platform ?? 0) != 0,
+            let text = self.findSegment("__TEXT")
+        else {
+            return (0, 0)
+        }
+
+        if self.is64 {
+            return text.payload(as: segment_command_64.self).map { ($0.fileoff, $0.filesize) } ?? (0, 0)
+        }
+
+        return text.payload(as: segment_command.self).map { (UInt64($0.fileoff), UInt64($0.filesize)) } ?? (0, 0)
+    }
+
+    /**
+     The Info.plist embedded in `__TEXT,__info_plist`, like `MachORep::infoPlist`: the section's bytes, whatever they
+     hold, or nil. On a big-endian slice (ppc, ppc64) `codesign` bounds the section table with the unswapped section
+     count, so it never finds the section.
+     */
+    private func infoPlist() -> Data? {
+        guard
+            !self.swap,
+            let text = self.findSegment("__TEXT")
+        else {
+            return nil
+        }
+
+        let (headerSize, sectionSize, count) = self.is64
+            ? (MemoryLayout<segment_command_64>.size, MemoryLayout<section_64>.size, text.payload(as: segment_command_64.self)?.nsects ?? 0)
+            : (MemoryLayout<segment_command>.size, MemoryLayout<section>.size, text.payload(as: segment_command.self)?.nsects ?? 0)
+
+        for index in 0 ..< min(Int(count), (text.data.count - headerSize) / sectionSize) {
+            let at = headerSize + index * sectionSize
+            guard Self.name(of: text.data.dropFirst(at).prefix(16)) == "__info_plist" else {
+                continue
+            }
+
+            let (offset, size): (UInt64, UInt64) = text.data.withUnsafeBytes { raw in
+                if self.is64 {
+                    let section = raw.loadUnaligned(fromByteOffset: at, as: section_64.self)
+                    return (UInt64(section.offset), section.size)
+                }
+                let section = raw.loadUnaligned(fromByteOffset: at, as: MachO.section.self)
+                return (UInt64(section.offset), UInt64(section.size))
+            }
+            guard
+                offset <= UInt64(self.data.count),
+                size <= UInt64(self.data.count) - offset
+            else {
+                return nil
+            }
+            return self.data.subdata(in: Int(offset) ..< Int(offset + size))
+        }
+        return nil
+    }
+
+    /**
+     The empty requirements blob `codesign` embeds; special slot -2 is its digest under the directory's hash type.
      A constant, independent of the binary: magic, length 12, count 0.
      */
     private static let emptyRequirementsBlob: Data = {
@@ -332,7 +396,7 @@ extension MachOSlice {
     // MARK: - Constants (xnu cs_blobs.h, big-endian on disk)
 
     private static let csmagicEmbeddedSignature: UInt32 = 0xfade_0cc0
-    private static let csmagicCodeDirectory: UInt32 = 0xfade_0c02
+    fileprivate static let csmagicCodeDirectory: UInt32 = 0xfade_0c02
     private static let csmagicRequirements: UInt32 = 0xfade_0c01
 
     private static let csslotCodeDirectory: UInt32 = 0
@@ -344,9 +408,15 @@ extension MachOSlice {
     private static let csHashTypeSHA256Truncated: UInt8 = 3
     private static let csHashTypeSHA384: UInt8 = 4
 
-    // CodeDirectory version codesign emits for a bare ad-hoc binary (includes the execSeg fields), and the CS_ADHOC flag.
-    private static let cdVersion: UInt32 = 0x0002_0400
-    private static let csAdhocFlag: UInt32 = 0x0000_0002
+    // Filetypes codesign signs as Mach-O code; it signs any other one as a generic file (`Format=generic`).
+    private static let codeFiletypes = [
+        MH_EXECUTE,
+        MH_PRELOAD,
+        MH_DYLIB,
+        MH_DYLINKER,
+        MH_BUNDLE,
+        MH_KEXT_BUNDLE,
+    ].map(UInt32.init)
 }
 
 // MARK: -
@@ -357,9 +427,89 @@ private struct EmbeddedCodeDirectory {
 }
 
 /**
+ The ad-hoc CodeDirectory `codesign` builds, like Security's `CodeDirectory::Builder`: the fields decide the
+ version, and the version decides how much of the header is written.
+ */
+private struct CodeDirectoryBuilder {
+    let codeLimit: Int
+    let pageSizeLog: UInt8
+    let execSegBase: UInt64
+    let execSegLimit: UInt64
+    let execSegFlags: UInt64
+    /// Special slot contents by slot number, hashed into slot -n.
+    let specialSlots: [Int: Data]
+
+    /// `Builder::build`'s choice: the oldest version that holds every field in use.
+    var version: UInt32 {
+        if self.execSegLimit != 0 {
+            return 0x20400 // execSeg
+        }
+        if self.codeLimit > UInt32.max {
+            return 0x20300 // codeLimit64
+        }
+        return 0x20100
+    }
+
+    /// `Builder::size`'s fixed header size: each version appends fields to the previous one.
+    static func headerSize(version: UInt32) -> Int {
+        switch version {
+        case 0x20400...: 0x58 // execSegBase, execSegLimit, execSegFlags
+        case 0x20300...: 0x40 // teamOffset (0x20200), spare3, codeLimit64
+        default: 0x30 // through scatterOffset
+        }
+    }
+
+    func build(hashType: AdhocHashType, code: Data) -> Data {
+        let pageSize = 1 << Int(self.pageSizeLog)
+        let hashSize = hashType.digestSize
+        let nSpecialSlots = self.specialSlots.keys.max() ?? 0
+        let nCodeSlots = (self.codeLimit + pageSize - 1) / pageSize
+        let identifier = Data("ADHOC".utf8) + Data([0])
+        let identOffset = Self.headerSize(version: self.version)
+        let hashOffset = identOffset + identifier.count + nSpecialSlots * hashSize
+        let length = hashOffset + nCodeSlots * hashSize
+
+        // Every field up to execSegFlags; the version keeps the prefix its header holds.
+        var header = Data()
+        header.appendBigEndian(MachOSlice.csmagicCodeDirectory) // magic
+        header.appendBigEndian(UInt32(length)) // length
+        header.appendBigEndian(self.version) // version
+        header.appendBigEndian(UInt32(2)) // flags: CS_ADHOC
+        header.appendBigEndian(UInt32(hashOffset)) // hashOffset
+        header.appendBigEndian(UInt32(identOffset)) // identOffset
+        header.appendBigEndian(UInt32(nSpecialSlots)) // nSpecialSlots
+        header.appendBigEndian(UInt32(nCodeSlots)) // nCodeSlots
+        header.appendBigEndian(UInt32(clamping: self.codeLimit)) // codeLimit, 0xffffffff past 4 GiB
+        header.append(contentsOf: [UInt8(hashSize), hashType.csHashType, 0, self.pageSizeLog]) // hashSize, hashType, platform, pageSize
+        header.appendBigEndian(UInt32(0)) // spare2
+        header.appendBigEndian(UInt32(0)) // scatterOffset
+        header.appendBigEndian(UInt32(0)) // teamOffset
+        header.appendBigEndian(UInt32(0)) // spare3
+        header.appendBigEndian(UInt64(self.codeLimit > UInt32.max ? self.codeLimit : 0)) // codeLimit64
+        header.appendBigEndian(self.execSegBase) // execSegBase
+        header.appendBigEndian(self.execSegLimit) // execSegLimit
+        header.appendBigEndian(self.execSegFlags) // execSegFlags
+
+        var cd = header.prefix(identOffset)
+        cd.reserveCapacity(length)
+        cd.append(identifier)
+        for slot in stride(from: nSpecialSlots, through: 1, by: -1) { // slots -nSpecialSlots ... -1
+            cd.append(self.specialSlots[slot].map { hashType.digest($0) } ?? Data(count: hashSize))
+        }
+
+        var offset = 0
+        while offset < self.codeLimit {
+            cd.append(hashType.digest(code.subdata(in: offset ..< min(offset + pageSize, self.codeLimit))))
+            offset += pageSize
+        }
+        return cd
+    }
+}
+
+/**
  A hash algorithm used to synthesize an ad-hoc CodeDirectory.
 
- codesign builds one directory per algorithm; each carries hash slots of that algorithm's width and yields its own
+ `codesign` builds one directory per algorithm; each carries hash slots of that algorithm's width and yields its own
  cdhash, digested under the same algorithm.
  */
 private enum AdhocHashType {

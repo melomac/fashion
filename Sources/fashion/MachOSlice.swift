@@ -19,7 +19,7 @@ struct MachOSlice {
     let cpuType: cpu_type_t
     let cpuSubtype: cpu_subtype_t
 
-    private let filetype: UInt32
+    let filetype: UInt32
     private let headerSize: Int
     private let commandCount: UInt32
     private let sizeofcmds: Int
@@ -93,24 +93,38 @@ struct MachOSlice {
         self.swap ? value.byteSwapped : value
     }
 
-    // MARK: - Executable Segment
+    // MARK: - Commands (Security's MachOBase)
+
+    /// The first load command of type `cmd`, like `MachOBase::findCommand`.
+    func findCommand(_ cmd: UInt32) -> MachOParser.LoadCommand? {
+        self.loadCommands.first { $0.cmd == cmd }
+    }
+
+    /// The first `LC_SEGMENT` or `LC_SEGMENT_64` named `name`, like `MachOBase::findSegment`.
+    func findSegment(_ name: String) -> MachOParser.LoadCommand? {
+        self.loadCommands.first { command in
+            // segname sits at the same offset in both commands.
+            [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(command.cmd) && Self.name(of: command.data.dropFirst(8).prefix(16)) == name
+        }
+    }
 
     /**
-     Executable-segment fields of a CodeDirectory: the `__TEXT` file range, and `CS_EXECSEG_MAIN_BINARY`
-     when the image is a main executable. `base`/`limit` are zero when there is no `__TEXT` segment.
+     The platform and minimum OS version the slice declares, like `MachOBase::version`: the first `LC_BUILD_VERSION`
+     (even one naming platform 0), else the first `LC_VERSION_MIN_*`. Nil when it declares neither.
+     `minOS` is encoded like the load commands: X.Y.Z as `0xXXXXYYZZ`.
      */
-    func execSegment() -> (base: UInt64, limit: UInt64, flags: UInt64) {
-        let flags: UInt64 = self.filetype == UInt32(MH_EXECUTE) ? 1 : 0
+    func version() -> (platform: Int32, minOS: UInt32)? {
+        if let command = self.findCommand(UInt32(LC_BUILD_VERSION)) {
+            return command.payload(as: build_version_command.self).map { (Int32(bitPattern: self.sw($0.platform)), self.sw($0.minos)) }
+        }
 
-        for cmd in self.loadCommands {
-            if self.is64, cmd.cmd == UInt32(LC_SEGMENT_64), let seg = cmd.payload(as: segment_command_64.self), Self.name(of: seg.segname) == "__TEXT" {
-                return (self.sw(seg.fileoff), self.sw(seg.filesize), flags)
-            }
-            if !self.is64, cmd.cmd == UInt32(LC_SEGMENT), let seg = cmd.payload(as: segment_command.self), Self.name(of: seg.segname) == "__TEXT" {
-                return (UInt64(self.sw(seg.fileoff)), UInt64(self.sw(seg.filesize)), flags)
+        let platforms = [LC_VERSION_MIN_MACOSX: PLATFORM_MACOS, LC_VERSION_MIN_IPHONEOS: PLATFORM_IOS, LC_VERSION_MIN_TVOS: PLATFORM_TVOS, LC_VERSION_MIN_WATCHOS: PLATFORM_WATCHOS]
+        for command in self.loadCommands {
+            if let platform = platforms[Int32(bitPattern: command.cmd)] {
+                return command.payload(as: version_min_command.self).map { (platform, self.sw($0.version)) }
             }
         }
-        return (0, 0, flags)
+        return nil
     }
 
     // MARK: - Code Signature
@@ -120,28 +134,28 @@ struct MachOSlice {
      Throws when an `LC_CODE_SIGNATURE` command is present but its range does not fit the slice.
      */
     func codeSignatureRange() throws -> Range<Int>? {
-        for cmd in self.loadCommands where cmd.cmd == UInt32(LC_CODE_SIGNATURE) {
-            // Every strictly parsed command holds its fixed structure; a lenient slice must still not read
-            // a truncated command as "unsigned".
-            guard let linkedit = cmd.payload(as: linkedit_data_command.self) else {
-                throw ParserError.invalidLoadCommandTable(count: self.commandCount, size: UInt32(self.sizeofcmds), fileSize: self.data.count)
-            }
-
-            let offset = self.sw(linkedit.dataoff)
-            let size = self.sw(linkedit.datasize)
-            let start = Int(offset)
-            let length = Int(size)
-            guard
-                start > 0,
-                length > 0,
-                start <= self.data.count,
-                length <= self.data.count - start
-            else {
-                throw ParserError.invalidCodeSignatureRange(offset: offset, size: size, fileSize: self.data.count)
-            }
-            return start ..< (start + length)
+        guard let cmd = self.findCommand(UInt32(LC_CODE_SIGNATURE)) else {
+            return nil
         }
-        return nil
+        // Every strictly parsed command holds its fixed structure; a lenient slice must still not read
+        // a truncated command as "unsigned".
+        guard let linkedit = cmd.payload(as: linkedit_data_command.self) else {
+            throw ParserError.invalidLoadCommandTable(count: self.commandCount, size: UInt32(self.sizeofcmds), fileSize: self.data.count)
+        }
+
+        let offset = self.sw(linkedit.dataoff)
+        let size = self.sw(linkedit.datasize)
+        let start = Int(offset)
+        let length = Int(size)
+        guard
+            start > 0,
+            length > 0,
+            start <= self.data.count,
+            length <= self.data.count - start
+        else {
+            throw ParserError.invalidCodeSignatureRange(offset: offset, size: size, fileSize: self.data.count)
+        }
+        return start ..< (start + length)
     }
 
     // MARK: - Logical Extent
@@ -237,6 +251,15 @@ struct MachOSlice {
         return min(maxEnd, self.data.count)
     }
 
+    // MARK: - Filetype
+
+    /**
+     The `<mach-o/loader.h>` name of the slice's filetype, `unknown(n)` for a value it does not define.
+     */
+    var filetypeName: String {
+        Self.filetypeNames.indices.contains(Int(self.filetype) - 1) ? Self.filetypeNames[Int(self.filetype) - 1] : "unknown(\(self.filetype))"
+    }
+
     // MARK: - Private
 
     /**
@@ -257,10 +280,10 @@ struct MachOSlice {
     }
 
     /**
-     The NUL-padded name in a `segname` / `sectname` field.
+     The NUL-padded name in a 16-byte `segname` / `sectname` field.
      */
-    private static func name(of field: some Any) -> String {
-        withUnsafeBytes(of: field) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
+    static func name(of field: some Collection<UInt8>) -> String {
+        String(decoding: field.prefix { $0 != 0 }, as: UTF8.self)
     }
 
     private static func parseLoadCommands(data: Data, headerSize: Int, sizeofcmds: Int, ncmds: UInt32, swap: Bool) -> [MachOParser.LoadCommand] {
@@ -362,21 +385,61 @@ struct MachOSlice {
     private static let benignCommands: Set<UInt32> = {
         // Plain commands (no LC_REQ_DYLD bit) — imported as Int32.
         let plain: [Int32] = [
-            LC_THREAD, LC_UNIXTHREAD, LC_LOAD_DYLIB, LC_ID_DYLIB, LC_LAZY_LOAD_DYLIB,
-            LC_PREBOUND_DYLIB, LC_LOAD_DYLINKER, LC_ID_DYLINKER, LC_DYLD_ENVIRONMENT,
-            LC_SUB_FRAMEWORK, LC_SUB_UMBRELLA, LC_SUB_CLIENT, LC_SUB_LIBRARY,
-            LC_ROUTINES, LC_ROUTINES_64, LC_PREBIND_CKSUM, LC_LINKER_OPTION,
-            LC_UUID, LC_SOURCE_VERSION, LC_VERSION_MIN_MACOSX, LC_VERSION_MIN_IPHONEOS,
-            LC_VERSION_MIN_TVOS, LC_VERSION_MIN_WATCHOS, LC_BUILD_VERSION,
+            LC_THREAD,
+            LC_UNIXTHREAD,
+            LC_LOAD_DYLIB,
+            LC_ID_DYLIB,
+            LC_LAZY_LOAD_DYLIB,
+            LC_PREBOUND_DYLIB,
+            LC_LOAD_DYLINKER,
+            LC_ID_DYLINKER,
+            LC_DYLD_ENVIRONMENT,
+            LC_SUB_FRAMEWORK,
+            LC_SUB_UMBRELLA,
+            LC_SUB_CLIENT,
+            LC_SUB_LIBRARY,
+            LC_ROUTINES,
+            LC_ROUTINES_64,
+            LC_PREBIND_CKSUM,
+            LC_LINKER_OPTION,
+            LC_UUID,
+            LC_SOURCE_VERSION,
+            LC_VERSION_MIN_MACOSX,
+            LC_VERSION_MIN_IPHONEOS,
+            LC_VERSION_MIN_TVOS,
+            LC_VERSION_MIN_WATCHOS,
+            LC_BUILD_VERSION,
         ]
 
         // Commands carrying the LC_REQ_DYLD bit — imported as UInt32.
         let reqDyld: [UInt32] = [
-            LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB, LC_RPATH, LC_MAIN,
+            LC_LOAD_WEAK_DYLIB,
+            LC_REEXPORT_DYLIB,
+            LC_LOAD_UPWARD_DYLIB,
+            LC_RPATH,
+            LC_MAIN,
         ]
 
         return Set(plain.map { UInt32(bitPattern: $0) } + reqDyld)
     }()
+
+    // `<mach-o/loader.h>` filetypes, numbered from MH_OBJECT (1).
+    private static let filetypeNames = [
+        "MH_OBJECT",
+        "MH_EXECUTE",
+        "MH_FVMLIB",
+        "MH_CORE",
+        "MH_PRELOAD",
+        "MH_DYLIB",
+        "MH_DYLINKER",
+        "MH_BUNDLE",
+        "MH_DYLIB_STUB",
+        "MH_DSYM",
+        "MH_KEXT_BUNDLE",
+        "MH_FILESET",
+        "MH_GPU_EXECUTE",
+        "MH_GPU_DYLIB",
+    ]
 }
 
 // MARK: -
