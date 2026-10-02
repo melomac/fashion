@@ -64,8 +64,7 @@ final class SignalTrapTests: XCTestCase {
      Run the built `fashion` on a small tree with stdout a pipe whose reader is gone, like a `| head` that already exited.
      */
     private func runWithClosedStdout(shell: String? = nil) throws -> (reason: Process.TerminationReason, status: Int32, stderr: String) {
-        let binary = Bundle(for: Self.self).bundleURL.deletingLastPathComponent() / "fashion"
-        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: binary.path), "fashion binary unavailable")
+        let binary = try fashionExecutable()
 
         let directory = FileManager.default.temporaryDirectory / UUID().uuidString
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -92,6 +91,40 @@ final class SignalTrapTests: XCTestCase {
         let output = stderr.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return (process.terminationReason, process.terminationStatus, String(decoding: output, as: UTF8.self))
+    }
+
+    func testSIGTERMEndsTheRunWhileStdoutIsBlocked() throws {
+        // A reader that stops reading blocks the stdout write: SIGTERM must still end the run, as without the trap.
+        let binary = try fashionExecutable()
+        let directory = FileManager.default.temporaryDirectory / UUID().uuidString
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Lines of about 150 bytes: 2000 files overflow a 64 KiB pipe.
+        for index in 0 ..< 2000 {
+            try Data("\(index)".utf8).write(to: directory / "\(index)")
+        }
+
+        let stdout = Pipe() // never read
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = [directory.path]
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        usleep(500_000)
+        process.terminate()
+
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning, Date() < deadline {
+            usleep(10000)
+        }
+        guard !process.isRunning else {
+            kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+            return XCTFail("SIGTERM did not end the run while stdout was blocked")
+        }
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+        XCTAssertEqual(process.terminationStatus, SIGTERM)
     }
 
     func testClosedStdoutDiesOfSIGPIPE() throws {

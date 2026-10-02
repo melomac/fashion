@@ -54,6 +54,17 @@ extension Data {
     }
 }
 
+/**
+ The `fashion` executable built next to the test bundle; skips the calling test when it is missing.
+ */
+func fashionExecutable() throws -> URL {
+    let binary = Bundle(for: BundleMarker.self).bundleURL.deletingLastPathComponent() / "fashion"
+    try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: binary.path), "fashion binary unavailable")
+    return binary
+}
+
+private final class BundleMarker {}
+
 extension URL {
     /**
      Appends a path component using the `/` operator. Test convenience.

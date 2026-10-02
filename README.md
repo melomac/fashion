@@ -150,9 +150,9 @@ Non-Mach-O files are hashed whole, and if a binary carries a load command we don
 The `-j` / `--jobs` flag controls parallel workers.
 Set `-j 0` to use all available CPU cores.
 
-The `--sort` flag trades some throughput for deterministic output order—paths are collected, sorted, and results are emitted sequentially even under concurrent processing.
+The `--sort` flag trades some throughput for deterministic output order: paths are collected, sorted, and results are emitted sequentially even under concurrent processing.
 
-By default (unsorted) enumeration is demand-driven, so the walk never runs far ahead of hashing.
+Enumeration is demand-driven, so the walk never runs far ahead of hashing.
 
 The `-L` / `--follow` flag follows symlinks while walking; by default they are skipped.
 A symlink named directly on the command line is always followed, like `find -H`.

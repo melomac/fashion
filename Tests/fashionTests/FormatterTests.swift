@@ -16,10 +16,6 @@ final class FormatterTests: XCTestCase {
         let expectedLength = OutputFormatter.ssdeepPadWidth + 2 + path.count
         XCTAssertEqual(line.count, expectedLength)
         XCTAssertTrue(line.hasSuffix("  \(path)"))
-
-        // formatQuiet returns the raw digest without padding (machine-consumable)
-        let quiet = OutputFormatter.formatQuiet(digest: digest, algorithm: .ssdeep)
-        XCTAssertEqual(quiet, digest)
     }
 
     func testFormatLineCDHashPadding() {
@@ -35,35 +31,25 @@ final class FormatterTests: XCTestCase {
         // A full-width digest (at the pad width) is left untouched
         let full = String(repeating: "b", count: OutputFormatter.cdhashPadWidth)
         XCTAssertEqual(OutputFormatter.formatLine(digest: full, path: path, algorithm: .cdhash), "\(full)  \(path)")
-
-        // formatQuiet returns the raw digest without padding (machine-consumable)
-        let quiet = OutputFormatter.formatQuiet(digest: digest, algorithm: .cdhash)
-        XCTAssertEqual(quiet, digest)
     }
 
-    func testFormatMatchLineSSDeep() {
-        let line = OutputFormatter.formatMatchLine(digest: "3:abc", score: 95, path: "/tmp/file.txt", algorithm: .ssdeep)
+    func testFormatLineSSDeepScore() {
+        let line = OutputFormatter.formatLine(digest: "3:abc", score: 95, path: "/tmp/file.txt", algorithm: .ssdeep)
         XCTAssertTrue(line.contains(" 95  "))
     }
 
-    func testFormatMatchLineTLSH() {
-        let line = OutputFormatter.formatMatchLine(digest: "T1ABC123", score: 12, path: "/tmp/file.txt", algorithm: .tlsh)
+    func testFormatLineTLSHScore() {
+        let line = OutputFormatter.formatLine(digest: "T1ABC123", score: 12, path: "/tmp/file.txt", algorithm: .tlsh)
         XCTAssertTrue(line.contains("  12  "))
     }
 
-    func testFormatQuiet() {
-        let result = OutputFormatter.formatQuiet(digest: "abc123", algorithm: .sha256)
-        XCTAssertEqual(result, "abc123")
+    func testFormatPathOrdinaryPathNotEscaped() {
+        XCTAssertEqual(OutputFormatter.formatPath("/tmp/file.txt"), "/tmp/file.txt")
     }
 
-    func testFormatQuietMatch() {
-        let result = OutputFormatter.formatQuietMatch(path: "/tmp/file.txt")
-        XCTAssertEqual(result, "/tmp/file.txt")
-    }
-
-    func testFormatMatchLineExactAlgorithmNoScore() {
+    func testFormatLineExactAlgorithmNoScore() {
         // For non-fuzzy algorithms, score string should be empty
-        let line = OutputFormatter.formatMatchLine(digest: "abc123", score: 0, path: "/tmp/file.txt", algorithm: .sha256)
+        let line = OutputFormatter.formatLine(digest: "abc123", score: 0, path: "/tmp/file.txt", algorithm: .sha256)
         XCTAssertTrue(line.hasPrefix("abc123"))
         XCTAssertTrue(line.hasSuffix("/tmp/file.txt"))
     }
@@ -87,8 +73,8 @@ final class FormatterTests: XCTestCase {
         XCTAssertEqual(line, "abc123  /tmp/file.txt")
     }
 
-    func testFormatQuietMatchEscapesNewline() {
-        let line = OutputFormatter.formatQuietMatch(path: "/tmp/a\nb")
+    func testFormatPathEscapesNewline() {
+        let line = OutputFormatter.formatPath("/tmp/a\nb")
         XCTAssertFalse(line.contains("\n"))
         XCTAssertEqual(line, "\\/tmp/a\\nb")
     }

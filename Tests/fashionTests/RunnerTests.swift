@@ -6,25 +6,9 @@ import XCTest
  The exit-code contract: 0 when every path hashed, 2 when any path could not be hashed.
  */
 final class RunnerTests: XCTestCase {
-    private func run(_ url: URL, algorithm: Algorithm = .sha256, slices: Bool = false) async -> Int32 {
-        let runner = Runner(
-            paths: [url.path],
-            algorithm: algorithm,
-            quiet: true,
-            slices: slices,
-            exact: false,
-            sortFiles: true,
-            jobs: 1,
-            follow: false,
-            matchDigests: [],
-            score: 0,
-            symhash: false,
-            separator: ",",
-            sortSymbols: true,
-            xarToc: false,
-            decompress: false,
-        )
-        return await runner.run()
+    private func run(_ url: URL, algorithm: Algorithm = .sha256, slices: Bool = false) throws -> Int32 {
+        let arguments = [url.path, "--algo", algorithm.rawValue, "--quiet", "--sort"] + (slices ? ["--slices"] : [])
+        return try Fashion.parse(arguments).scan()
     }
 
     /**
@@ -73,30 +57,63 @@ final class RunnerTests: XCTestCase {
         return url
     }
 
-    func testWellFormedMachOExitsZero() async throws {
+    func testSortedOutputDoesNotDependOnJobs() throws {
+        // Hash threads finish out of order, the large files last: --sort must still print in path order.
+        let binary = try fashionExecutable()
+        let directory = FileManager.default.temporaryDirectory / "fashion-runner-sort-\(UUID())"
+        try FileManager.default.createDirectory(at: directory / "sub", withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        for index in 0 ..< 300 {
+            let size = index % 25 == 0 ? 4 << 20 : 1
+            let name = index % 3 == 0 ? "sub/\(index)" : "f\(index)"
+            try Data(repeating: UInt8(index % 256), count: size).write(to: directory / name)
+        }
+
+        func run(jobs: Int) throws -> [String] {
+            let process = Process()
+            process.executableURL = binary
+            process.arguments = ["--sort", "-j", "\(jobs)", directory.path]
+            let stdout = Pipe()
+            process.standardOutput = stdout
+            try process.run()
+            let output = stdout.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init)
+        }
+
+        let sequential = try run(jobs: 1)
+        XCTAssertEqual(sequential.count, 300)
+        let paths = sequential.map { String($0.split(separator: "  ", maxSplits: 1)[1]) }
+        XCTAssertEqual(paths, paths.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) })
+        XCTAssertEqual(try run(jobs: 8), sequential)
+    }
+
+    func testWellFormedMachOExitsZero() throws {
         let url = try self.write(self.machO(), name: "ok")
         defer {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let exitCode = await self.run(url, algorithm: .cdhash)
+        let exitCode = try self.run(url, algorithm: .cdhash)
         XCTAssertEqual(exitCode, 0)
     }
 
-    func testMalformedMachOSetsExitCode2() async throws {
+    func testMalformedMachOSetsExitCode2() throws {
         let url = try self.write(self.machO(padding: 8), name: "bad")
         defer {
             try? FileManager.default.removeItem(at: url)
         }
 
         // A mode that parses the Mach-O reports it; plain hashing of the raw bytes does not care.
-        let parsed = await self.run(url, algorithm: .cdhash)
+        let parsed = try self.run(url, algorithm: .cdhash)
         XCTAssertEqual(parsed, 2)
-        let raw = await self.run(url)
+        let raw = try self.run(url)
         XCTAssertEqual(raw, 0)
     }
 
-    func testSlicesRejectsMalformedSliceInsideFat() async throws {
+    func testSlicesRejectsMalformedSliceInsideFat() throws {
         // --slices is a Mach-O-aware mode: a broken slice is reported whether or not --exact is set.
         let bad = try self.write(self.fat(wrapping: self.machO(padding: 8)), name: "fat-bad")
         let good = try self.write(self.fat(wrapping: self.machO()), name: "fat-ok")
@@ -105,9 +122,9 @@ final class RunnerTests: XCTestCase {
             try? FileManager.default.removeItem(at: good)
         }
 
-        let rejected = await self.run(bad, slices: true)
+        let rejected = try self.run(bad, slices: true)
         XCTAssertEqual(rejected, 2)
-        let accepted = await self.run(good, slices: true)
+        let accepted = try self.run(good, slices: true)
         XCTAssertEqual(accepted, 0)
     }
 }

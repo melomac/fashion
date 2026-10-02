@@ -3,7 +3,18 @@ import Foundation
 import XCTest
 
 final class FileEnumeratorTests: XCTestCase {
-    func testCollectSortedSkipsFifo() throws {
+    /**
+     The files under `paths`, walked sorted.
+     */
+    private func sortedWalk(_ paths: [String]) -> [String] {
+        Array(FileWalker(paths: paths, follow: false, sorted: true))
+    }
+
+    private func byteSorted(_ paths: [String]) -> [String] {
+        paths.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+    }
+
+    func testSortedWalkSkipsFifo() throws {
         // A directly-named FIFO must be skipped, not opened (which would block forever).
         let url = FileManager.default.temporaryDirectory / "fashion-fifo-\(UUID())"
         defer {
@@ -13,18 +24,18 @@ final class FileEnumeratorTests: XCTestCase {
             throw XCTSkip("mkfifo failed: errno \(errno)")
         }
 
-        let paths = FileEnumerator.collectSorted(paths: [url.path], follow: false)
+        let paths = self.sortedWalk([url.path])
         XCTAssertFalse(paths.contains(url.path), "FIFO should be skipped")
     }
 
-    func testCollectSortedIncludesRegularFile() throws {
+    func testSortedWalkIncludesRegularFile() throws {
         let url = FileManager.default.temporaryDirectory / "fashion-reg-\(UUID())"
         try Data("hello".utf8).write(to: url)
         defer {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let paths = FileEnumerator.collectSorted(paths: [url.path], follow: false)
+        let paths = self.sortedWalk([url.path])
         XCTAssertEqual(paths, [url.path])
     }
 
@@ -38,16 +49,16 @@ final class FileEnumeratorTests: XCTestCase {
             try? FileManager.default.removeItem(at: dir)
         }
 
-        XCTAssertEqual(FileEnumerator.collectSorted(paths: [(dir / "link").path], follow: false), [(dir / "link" / "f").path])
-        XCTAssertEqual(FileEnumerator.collectSorted(paths: [dir.path], follow: false), [(dir / "sub" / "f").path])
+        XCTAssertEqual(self.sortedWalk([(dir / "link").path]), [(dir / "link" / "f").path])
+        XCTAssertEqual(self.sortedWalk([dir.path]), [(dir / "sub" / "f").path])
     }
 
-    func testCollectSortedMissingPathReturnsEmpty() {
-        let paths = FileEnumerator.collectSorted(paths: ["/tmp/fashion-nonexistent-\(UUID())"], follow: false)
+    func testSortedWalkMissingPathReturnsEmpty() {
+        let paths = self.sortedWalk(["/tmp/fashion-nonexistent-\(UUID())"])
         XCTAssertTrue(paths.isEmpty)
     }
 
-    func testStreamingWalkMatchesCollectSorted() async throws {
+    func testStreamingWalkMatchesSortedWalk() throws {
         // The pull-based streaming walk must enumerate the same files as the sorted collector.
         let dir = FileManager.default.temporaryDirectory / "fashion-walk-\(UUID())"
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -60,18 +71,14 @@ final class FileEnumeratorTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir / "sub", withIntermediateDirectories: true)
         try Data("y".utf8).write(to: dir / "sub" / "d.txt")
 
-        let sorted = FileEnumerator.collectSorted(paths: [dir.path], follow: false)
-
-        var streamed: [String] = []
-        for await path in FileEnumerator.walk(paths: [dir.path], follow: false) {
-            streamed.append(path)
-        }
+        let sorted = self.sortedWalk([dir.path])
+        let streamed = Array(FileWalker(paths: [dir.path], follow: false))
 
         XCTAssertEqual(sorted.count, 4)
-        XCTAssertEqual(streamed.sorted(), sorted)
+        XCTAssertEqual(self.byteSorted(streamed), sorted)
     }
 
-    func testStreamingWalkReportsErrorsAndSkipsFifo() async throws {
+    func testStreamingWalkReportsErrorsAndSkipsFifo() throws {
         let dir = FileManager.default.temporaryDirectory / "fashion-walk-fifo-\(UUID())"
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer {
@@ -82,10 +89,7 @@ final class FileEnumeratorTests: XCTestCase {
             throw XCTSkip("mkfifo failed: errno \(errno)")
         }
 
-        var streamed: [String] = []
-        for await path in FileEnumerator.walk(paths: [dir.path], follow: false) {
-            streamed.append(path)
-        }
+        let streamed = Array(FileWalker(paths: [dir.path], follow: false))
 
         // The FIFO inside a walked directory is skipped by fts; only the regular file is emitted.
         XCTAssertEqual(streamed.map { ($0 as NSString).lastPathComponent }, ["real.txt"])
@@ -101,7 +105,49 @@ final class FileEnumeratorTests: XCTestCase {
         }
 
         for root in [dir.path + "/", dir.path + "//"] {
-            XCTAssertEqual(FileEnumerator.collectSorted(paths: [root], follow: false), [(dir / "f").path])
+            XCTAssertEqual(self.sortedWalk([root]), [(dir / "f").path])
         }
+    }
+
+    /**
+     A tree whose names sort around "/": `a-b`, `a.txt` and `a b` sort before `a/x`, and `sub-1` before `sub/k`. In `n`,
+     a decomposed `é` and a precomposed `éx`, which Swift's `<` cannot order consistently.
+     */
+    private func makeSortTree() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory / "fashion-sorted-\(UUID())"
+        for sub in ["a/sub", "a!", "b", "n", "\u{E9}"] {
+            try FileManager.default.createDirectory(at: dir / sub, withIntermediateDirectories: true)
+        }
+        for name in ["a/x", "a/sub/k", "a/sub-1", "a/sub.txt", "a!/z", "a-b", "a.txt", "a b", "Z", "b/y", "n/e\u{301}", "n/\u{E9}x", "\u{E9}/f", "e\u{301}x"] {
+            try Data("x".utf8).write(to: dir / name)
+        }
+        return dir
+    }
+
+    func testSortedWalkMatchesSortingFullPathBytes() throws {
+        let dir = try self.makeSortTree()
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let walked = Array(FileWalker(paths: [dir.path], follow: false))
+        XCTAssertEqual(walked.count, 14)
+        XCTAssertEqual(self.sortedWalk([dir.path]), self.byteSorted(walked))
+    }
+
+    func testSortedWalkOrdersRoots() throws {
+        let dir = try self.makeSortTree()
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        // Separate roots, in any order, list their files as sorting all of them would.
+        let roots = [(dir / "b").path, (dir / "a-b").path, (dir / "a").path, (dir / "Z").path]
+        let walked = roots.flatMap { Array(FileWalker(paths: [$0], follow: false)) }
+        XCTAssertEqual(walked.count, 1 + 1 + 4 + 1)
+        XCTAssertEqual(self.sortedWalk(roots), self.byteSorted(walked))
+
+        // A root inside another is walked after it, not merged into it.
+        XCTAssertEqual(self.sortedWalk([(dir / "a").path, dir.path]), self.sortedWalk([dir.path]) + self.sortedWalk([(dir / "a").path]))
     }
 }

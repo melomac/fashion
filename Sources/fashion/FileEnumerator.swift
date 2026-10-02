@@ -1,55 +1,32 @@
+import CMachOCompat
 import Darwin
 import Foundation
 import os
 
 /**
- File tree walking using POSIX fts(3).
+ A pull-based file-tree iterator over one or more root paths, using POSIX fts(3).
 
- Enumeration is pull-based (`FileWalker.next()`), so the streaming path buffers only one path at a time
- instead of running the whole walk ahead of the (slower) hashing stage.
+ Enumeration is pull-based (`next()`), so the walk stays a short queue ahead of the (slower) hashing stage instead of
+ running the whole tree ahead of it. Sorted, it lists files in the byte order of their paths as it goes: the roots are
+ ordered once, and each directory as fts reads it (see `fashion_fts_compare`). Roots nested in one another are walked
+ one after the other, not merged.
+
+ Not thread-safe: `next()` must be called serially (the walking thread does exactly this).
  */
-enum FileEnumerator {
-    /**
-     Collect all file paths, sort them, and return as an array.
-     */
-    static func collectSorted(paths: [String], follow: Bool, reporter: Reporter? = nil) -> [String] {
-        let walker = FileWalker(paths: paths, follow: follow, reporter: reporter)
-        var allPaths: [String] = []
-        while let path = walker.next() {
-            allPaths.append(path)
-        }
-        allPaths.sort()
-        return allPaths
-    }
-
-    /**
-     Walk the given paths and produce an AsyncStream of file paths (streaming, unsorted).
-
-     The stream is demand-driven: each `next()` on the consumer side advances the walk by one path, so
-     enumeration cannot run arbitrarily ahead of hashing and pile paths up in memory.
-     */
-    static func walk(paths: [String], follow: Bool, reporter: Reporter? = nil) -> AsyncStream<String> {
-        let walker = FileWalker(paths: paths, follow: follow, reporter: reporter)
-        return AsyncStream(unfolding: { walker.next() })
-    }
-}
-
-/**
- A pull-based file-tree iterator over one or more root paths.
- Not thread-safe: `next()` must be called serially (the `AsyncStream` consumer does exactly this).
- */
-final class FileWalker: @unchecked Sendable {
+final class FileWalker: Sequence, IteratorProtocol {
     private let follow: Bool
     private let reporter: Reporter?
+    private let sorted: Bool
     private var roots: IndexingIterator<[String]>
     private var fts: UnsafeMutablePointer<FTS>?
 
     private static let logger = Logger(subsystem: "fashion", category: "walk")
 
-    init(paths: [String], follow: Bool, reporter: Reporter?) {
+    init(paths: [String], follow: Bool, reporter: Reporter? = nil, sorted: Bool = false) {
         self.follow = follow
         self.reporter = reporter
-        self.roots = paths.makeIterator()
+        self.sorted = sorted
+        self.roots = (sorted ? Self.sortedRoots(paths) : paths).makeIterator()
     }
 
     deinit {
@@ -128,7 +105,7 @@ final class FileWalker: @unchecked Sendable {
         }
 
         var argv: [UnsafeMutablePointer<CChar>?] = [cPath, nil]
-        guard let handle = fts_open(&argv, options, nil) else {
+        guard let handle = fts_open(&argv, options, self.sorted ? fashion_fts_compare : nil) else {
             self.reporter?.report(path: root, message: String(cString: strerror(errno)))
             return
         }
@@ -179,5 +156,19 @@ final class FileWalker: @unchecked Sendable {
             trimmed.removeLast()
         }
         return String(trimmed)
+    }
+
+    /**
+     Roots in the byte order of the paths under them: a directory's, trimmed, followed by "/" as within the walk.
+     */
+    private static func sortedRoots(_ paths: [String]) -> [String] {
+        paths
+            .map { root -> (key: [UInt8], root: String) in
+                var isDirectory: ObjCBool = false
+                let directory = FileManager.default.fileExists(atPath: root, isDirectory: &isDirectory) && isDirectory.boolValue
+                return (Array(self.trimmingTrailingSlashes(root).utf8) + (directory ? [UInt8(ascii: "/")] : []), root)
+            }
+            .sorted { $0.key.lexicographicallyPrecedes($1.key) }
+            .map(\.root)
     }
 }

@@ -43,7 +43,7 @@ enum CDHash {
                 let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
                 // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
                 guard let slice = try MachOSlice(MachOParser.sliceData(fileData: data, arch: arch)) else {
-                    self.logSkip(path: path, arch: name, reason: "slice is not Mach-O")
+                    self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")
                     return []
                 }
                 return try self.results(for: slice, arch: name, path: path, exact: exact)

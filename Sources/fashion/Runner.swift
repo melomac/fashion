@@ -2,44 +2,275 @@ import Foundation
 import os
 import System
 
+/*
+ The scan, end to end. `Fashion.scan()` builds the parts below once per run, then the calling (main) thread walks the
+ paths and hands each file to `jobs` hash threads, which print through `Output` and `Console`.
+
+ fashion [options] <paths>
+   |
+   v
+ Fashion.run() -> scan()        built once per scan:
+                                  Digester    per-file options, read once
+                                  Console     owns stdout and stderr, and the status line
+                                  Reporter    counts, diagnostics, unified log, end of run
+                                  SignalTrap  INT/TERM/PIPE: log the end, die of the signal
+                                              INFO (^T): progress on stderr
+                                  Output      prints each file's lines
+
+ MAIN THREAD: WALKER                HANDOFF           HASH THREADS (x jobs)
+ QoS userInitiated                  64 paths          QoS userInitiated
+ +--------------------------+       +---------+       +--------------------------------+
+ | FileWalker (fts)         |  put  |         |  take | output.started(index, path)    |
+ | unsorted: as found       |------>| (index, |------>| digester.lines(for: path)      |
+ | --sort: roots in byte    |       |  path)  |       |   digests(path), by mode:      |
+ | order, each directory    |       |         |       |     symhash | xar-toc |        |
+ | by fashion_fts_compare   |       +---------+       |     cdhash | slices | file     |
+ | walk errors -> Reporter  |                         |   -> [DigestResult]            |
+ +--------------------------+                         |   -> match / quiet -> lines    |
+                                                      |   hash errors -> Reporter      |
+                                                      | reporter.fileProcessed()       |
+                                                      | output.finished(index, lines)  |
+                                                      +--------------------------------+
+              | handoff.close() when the walk ends                     |
+              v                                                        v
+        hashing.wait()                                +--------------------------------+
+              |                                       | Output (lock)                  |
+              v                                       |  unsorted: print now           |
+        reporter.end("done")                          |  --sort: hold by index until   |
+        exit 0, 1 (no match), 2 (errors)              |  every earlier file printed    |
+                                                      |  write error -> trap / exit 2  |
+                                                      +--------------------------------+
+                                                                       |
+ status timer (foreground terminal only)                               v
+ after 0.5 s, every 100 ms:                           +--------------------------------+
+   output.showStatus() ------------------------------>| Console                        |
+   "N files · M waiting ·                             |  pipe or file: write as is     |
+    hashing …<path>"                                  |  terminal: erase the status    |
+                                                      |  line, controls shown as ?     |
+                                                      +--------------------------------+
+                                                                       |
+                                                                       v
+                                                                stdout / stderr
+
+ Signals (command line only):
+   SIGINT, SIGTERM  -> reporter.end -> console.close() (never waits) -> die of the signal
+   SIGPIPE          -> held back: EPIPE in Console.out -> trap.brokenPipe() -> die of SIGPIPE
+   SIGINFO (^T)     -> reporter.progress() -> "fashion: N file(s) with M error(s) in T"
+ */
+
 private let logger = Logger(subsystem: "fashion", category: "runner")
 
 // MARK: Pipeline Types
 
-struct WorkItem {
-    let index: Int
-    let path: String
-}
-
+/**
+ One digest of a file: of the whole file, or of one of its slices, named by `label` (`arm64`, `x86_64, ADHOC, sha256`).
+ */
 struct DigestResult {
     let digest: String
-    let path: String
-    let filePath: String?
+    var label: String?
+
+    /**
+     The path as printed: `path (label)`, or the bare path for the whole file.
+     */
+    func display(_ path: String) -> String {
+        self.label.map { "\(path) (\($0))" } ?? path
+    }
 }
 
-struct Batch {
-    let index: Int
-    let results: [DigestResult]
-}
-
-// MARK: - OutputWriter
+// MARK: - Console
 
 /**
- Thread-safe stdout writer.
+ The terminal side of a run: lines to stdout and stderr and, when stdout is a terminal, a status line under the output.
+ The status line is erased before any other write and when the run ends, so it never ends up in a pipe, a file or the
+ terminal's scrollback. On a terminal, control characters in a line show as "?" (see `printable(_:)`).
+
+ Off a terminal there is no status line, and lines go straight out: the callers' own locks keep them whole, and nothing
+ here makes a signal handler or a diagnostic wait for a stdout write blocked by a reader that stopped reading.
  */
-actor OutputWriter {
-    private let handle = FileHandle.standardOutput
+final class Console: @unchecked Sendable {
+    /// Whether stdout is a terminal that can show the status line (not Emacs-style `TERM=dumb`).
+    let isLive = isatty(STDOUT_FILENO) == 1 && ProcessInfo.processInfo.environment["TERM"] != "dumb"
+    private let stdoutIsTerminal = isatty(STDOUT_FILENO) == 1
+    private let stderrIsTerminal = isatty(STDERR_FILENO) == 1
+    private let lock = NSLock()
+    private var shown = false
+    private var closed = false
+
+    /**
+     Write a line to stdout; throws on a write error.
+     */
+    func out(_ line: String) throws {
+        try self.write(self.stdoutIsTerminal ? Self.printable(line) : line, to: .standardOutput)
+    }
+
+    /**
+     Write a line to stderr. A write error must not abort the scan; a closed stderr pipe still ends it through the
+     trapped SIGPIPE.
+     */
+    func err(_ line: String) {
+        try? self.write(self.stderrIsTerminal ? Self.printable(line) : line, to: .standardError)
+    }
+
+    /**
+     Show `head` followed by as much of the end of `path` as fits the terminal, until the run is over.
+     */
+    func status(_ head: String, path: String) {
+        // Not from a background job, which would draw over the shell's prompt and what is being typed.
+        guard self.isLive, tcgetpgrp(STDOUT_FILENO) == getpgrp() else {
+            return
+        }
+        self.lock.withLock {
+            guard !self.closed else {
+                return
+            }
+
+            var size = winsize()
+            let width = ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0 ? Int(size.ws_col) : 80
+
+            let path = Self.printable(path)
+            let room = max(width - 1 - head.count, 1)
+            let tail = path.count <= room ? path : "…" + path.suffix(room - 1)
+
+            // Dim, and without auto-wrap so a line too wide for the terminal is clipped: one carriage return erases it.
+            try? FileHandle.standardOutput.write(contentsOf: Data("\r\u{1B}[2m\u{1B}[?7l\(head)\(tail)\u{1B}[?7h\u{1B}[22m\u{1B}[K".utf8))
+            self.shown = true
+        }
+    }
+
+    /**
+     Take the status line off the terminal for good: the run is over. Signal handlers call this, so it never waits: whoever
+     holds the lock is writing a line, which erased the status line first.
+     */
+    func close() {
+        guard self.isLive, self.lock.try() else {
+            return
+        }
+        defer {
+            self.lock.unlock()
+        }
+        self.erase()
+        self.closed = true
+    }
+
+    /**
+     A line as a terminal may show it: a control character from a file name, such as ESC, would move the cursor,
+     restyle the terminal or rewrite earlier output, so it shows as "?", as `ls` does. Pipes and files get every byte.
+     */
+    static func printable(_ line: String) -> String {
+        // C0 controls, DEL and C1 controls: Unicode's general category Cc.
+        let isControl = { (scalar: Unicode.Scalar) in scalar.value < 0x20 || (0x7f ... 0x9f).contains(scalar.value) }
+        guard line.unicodeScalars.contains(where: isControl) else {
+            return line
+        }
+        return String(String.UnicodeScalarView(line.unicodeScalars.map { isControl($0) ? "?" : $0 }))
+    }
+
+    /**
+     On a terminal, erase the status line first, under the lock so it cannot be redrawn in the middle of the line.
+     */
+    private func write(_ line: String, to handle: FileHandle) throws {
+        guard self.isLive else {
+            return try handle.write(contentsOf: Data((line + "\n").utf8))
+        }
+        try self.lock.withLock {
+            self.erase()
+            try handle.write(contentsOf: Data((line + "\n").utf8))
+        }
+    }
+
+    /**
+     Caller holds the lock.
+     */
+    private func erase() {
+        if self.shown {
+            try? FileHandle.standardOutput.write(contentsOf: Data("\r\u{1B}[K".utf8))
+            self.shown = false
+        }
+    }
+}
+
+// MARK: - Output
+
+/**
+ Thread-safe stdout writer: each file's lines print once it is hashed, right away or, with `--sort`, in the sorted
+ order the paths were handed out, holding a file's lines until every file before it has printed. On a terminal, the
+ status line shows the count of hashed files, the files held back and the file hashed for the longest.
+ */
+final class Output: @unchecked Sendable {
+    private let lock = NSLock()
+    private let sorted: Bool
+    private let console: Console
     private let reporter: Reporter
     private let trap: SignalTrap?
+    private var held: [Int: [String]] = [:]
+    private var hashing: [Int: String] = [:]
+    private var next = 0
+    private var printed = false
 
-    init(reporter: Reporter, trap: SignalTrap?) {
+    init(sorted: Bool, console: Console, reporter: Reporter, trap: SignalTrap?) {
+        self.sorted = sorted
+        self.console = console
         self.reporter = reporter
         self.trap = trap
     }
 
-    func write(_ string: String) {
+    /**
+     Whether any line was printed, which in match mode means a file matched.
+     */
+    var printedAny: Bool {
+        self.lock.withLock { self.printed }
+    }
+
+    /**
+     Note the file handed out at `index` as being hashed, for the status line.
+     */
+    func started(_ index: Int, path: String) {
+        // Off a terminal nothing reads it: don't make every hash thread wait for the lock.
+        guard self.console.isLive else {
+            return
+        }
+        self.lock.withLock {
+            self.hashing[index] = path
+        }
+    }
+
+    /**
+     Print the lines of the file handed out at `index`.
+     */
+    func finished(_ index: Int, lines: [String]) {
+        self.lock.withLock {
+            self.hashing[index] = nil
+            // Unsorted, a finished file is simply the next to print.
+            self.held[self.sorted ? index : self.next] = lines
+            while let ready = self.held.removeValue(forKey: self.next) {
+                for line in ready {
+                    self.write(line)
+                }
+                self.next += 1
+            }
+        }
+    }
+
+    /**
+     Redraw the status line: the count of hashed files, the lines held back and the file hashed for the longest.
+     */
+    func showStatus() {
+        self.lock.withLock {
+            guard let path = self.hashing.min(by: { $0.key < $1.key })?.value else {
+                return
+            }
+            let waiting = self.held.count
+            self.console.status("\(self.reporter.fileCount) files · \(waiting > 0 ? "\(waiting) waiting · " : "")hashing ", path: path)
+        }
+    }
+
+    /**
+     Caller holds the lock, so lines from concurrent hash threads never interleave.
+     */
+    private func write(_ line: String) {
+        self.printed = true
         do {
-            try self.handle.write(contentsOf: Data((string + "\n").utf8))
+            try self.console.out(line)
         } catch {
             let error = FileReader.posixError(error)
             if error as? Errno == .brokenPipe {
@@ -52,7 +283,7 @@ actor OutputWriter {
             // and exit like coreutils, rather than crash on the uncaught error.
             let description = OutputFormatter.formatDiagnostic(error.localizedDescription)
             self.reporter.end("stopped by write error: \(description)")
-            try? FileHandle.standardError.write(contentsOf: Data("fashion: write error: \(description)\n".utf8))
+            self.console.err("fashion: write error: \(description)")
 
             exit(2)
         }
@@ -62,23 +293,28 @@ actor OutputWriter {
 // MARK: - Reporter
 
 /**
- Thread-safe bookkeeping for one run, callable from the synchronous worker code as well as the async pipeline:
+ Thread-safe bookkeeping for one run, callable from the walking and hash threads as well as signal handlers:
  - diagnostics go to both stderr (for the user and scripts) and the unified log (for a persistent, queryable record),
    and are counted so the process can exit non-zero when any path could not be enumerated or hashed;
- - files are counted as workers finish them, for the progress report on SIGINFO and the end of the run,
-   which is logged exactly once whether the run completes or is interrupted.
+ - files are counted as hash threads finish them, for the status line, the progress report on SIGINFO and the end of
+   the run, which is logged exactly once whether the run completes or is interrupted.
  */
 final class Reporter: @unchecked Sendable {
     private let lock = NSLock()
-    private let handle = FileHandle.standardError
+    private let console: Console
     private let clock = ContinuousClock()
     private let start: ContinuousClock.Instant
-    private var fileCount = 0
+    private var files = 0
     private var errors = 0
     private var ended = false
 
-    init() {
+    init(console: Console = Console()) {
+        self.console = console
         self.start = self.clock.now
+    }
+
+    var fileCount: Int {
+        self.lock.withLock { self.files }
     }
 
     var errorCount: Int {
@@ -90,38 +326,40 @@ final class Reporter: @unchecked Sendable {
 
         let displayPath = OutputFormatter.formatPath(path)
         let displayMessage = OutputFormatter.formatDiagnostic(message)
+        // Under the lock, so lines from concurrent threads never interleave.
         self.lock.withLock {
             self.errors += 1
-            self.write("fashion: \(displayPath): \(displayMessage)")
+            self.console.err("fashion: \(displayPath): \(displayMessage)")
         }
     }
 
     func fileProcessed() {
-        self.lock.withLock { self.fileCount += 1 }
+        self.lock.withLock { self.files += 1 }
     }
 
     /**
      Report the counts and elapsed time so far to the log and to stderr, like `dd` on `SIGINFO` (⌃T).
      */
     func progress() {
-        let summary = self.summary(self.lock.withLock { (self.fileCount, self.errors) })
+        let summary = self.summary(self.lock.withLock { (self.files, self.errors) })
         logger.info("progress: \(summary, privacy: .public)")
 
         self.lock.withLock {
-            self.write("fashion: \(summary)")
+            self.console.err("fashion: \(summary)")
         }
     }
 
     /**
-     Log the counts and elapsed time; calls after the first are ignored.
+     Take the status line off the terminal and log the counts and elapsed time; calls after the first are ignored.
      */
     func end(_ reason: String) {
+        self.console.close()
         let counts: (files: Int, errors: Int)? = self.lock.withLock {
             guard !self.ended else {
                 return nil
             }
             self.ended = true
-            return (self.fileCount, self.errors)
+            return (self.files, self.errors)
         }
         guard let counts else {
             return
@@ -130,20 +368,12 @@ final class Reporter: @unchecked Sendable {
     }
 
     /**
-     Call without holding the lock: the first format loads ICU, which would stall every worker's `fileProcessed()`.
+     Call without holding the lock: the first format loads ICU, which would stall every hash thread's `fileProcessed()`.
      */
     private func summary(_ counts: (files: Int, errors: Int)) -> String {
         let duration = (self.clock.now - self.start).formatted(.units(allowed: [.hours, .minutes, .seconds, .milliseconds], width: .narrow))
 
         return "\(counts.files) file(s) with \(counts.errors) error(s) in \(duration)"
-    }
-
-    /**
-     Caller holds the lock, so lines from concurrent workers never interleave.
-     */
-    private func write(_ line: String) {
-        // A write error must not abort the scan; a closed stderr pipe still ends it through the trapped SIGPIPE.
-        try? self.handle.write(contentsOf: Data((line + "\n").utf8))
     }
 }
 
@@ -159,7 +389,7 @@ final class Reporter: @unchecked Sendable {
 
  A signal inherited as ignored (a background job in a script, `nohup`) stays ignored, and `restore()` puts back
  the inherited dispositions once the run is over. Dispositions are process-wide, so only the command line installs
- a trap (see `Runner.trapSignals`).
+ a trap (see `Fashion.scan(trapSignals:)`).
  */
 final class SignalTrap: @unchecked Sendable {
     private let reporter: Reporter
@@ -257,54 +487,124 @@ final class SignalTrap: @unchecked Sendable {
     }
 }
 
-// MARK: - Runner
+// MARK: - Handoff
 
 /**
- Concurrent processing pipeline: enumerator → worker pool → printer.
+ Hands the walked paths to the hash threads through a short queue: the walker waits for room before adding a path,
+ so it stays at most `capacity` paths ahead of hashing.
  */
-struct Runner {
-    let paths: [String]
-    let algorithm: Algorithm
-    let quiet: Bool
-    let slices: Bool
-    let exact: Bool
-    let sortFiles: Bool
-    let jobs: Int
-    let follow: Bool
-    let matchDigests: [String]
-    let score: Int
-    let symhash: Bool
-    let separator: String
-    let sortSymbols: Bool
-    let xarToc: Bool
-    let decompress: Bool
-    /// Log the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
-    /// Signal dispositions are process-wide, so only the command line sets this.
-    var trapSignals = false
+final class Handoff: @unchecked Sendable {
+    private let lock = NSLock()
+    private var queue: [(index: Int, path: String)] = []
+    private let available = DispatchSemaphore(value: 0)
+    private let room: DispatchSemaphore
+    private let takers: Int
+
+    init(capacity: Int, takers: Int) {
+        self.room = DispatchSemaphore(value: capacity)
+        self.takers = takers
+    }
 
     /**
-     Run the pipeline and return a process exit code:
+     Wait for room, then queue the path.
+     */
+    func put(index: Int, path: String) {
+        self.room.wait()
+        self.lock.withLock { self.queue.append((index, path)) }
+        self.available.signal()
+    }
+
+    /**
+     Wait for the next path; nil once the walk is over.
+     */
+    func take() -> (index: Int, path: String)? {
+        self.available.wait()
+        let item: (index: Int, path: String)? = self.lock.withLock {
+            self.queue.isEmpty ? nil : self.queue.removeFirst()
+        }
+        if item != nil {
+            self.room.signal()
+        }
+        return item
+    }
+
+    /**
+     End the walk: each hash thread wakes once more to an empty queue and stops.
+     */
+    func close() {
+        for _ in 0 ..< self.takers {
+            self.available.signal()
+        }
+    }
+}
+
+// MARK: - Scan
+
+/**
+ The scan: this thread walks the paths and hands each file to `jobs` hash threads, which print through `Output`.
+ With `--sort`, the walk sorts each directory as it reads it, so files are handed out in order as they are found.
+ */
+extension Fashion {
+    /**
+     Scan the paths and return a process exit code:
      - `0` success,
      - `1` match mode found nothing,
      - `2` one or more paths could not be enumerated or hashed.
-     */
-    func run() async -> Int32 {
-        logger.info("run with \(self.jobs, privacy: .public) job(s) and \(self.algorithm.rawValue, privacy: .public) algorithm in path(s): \(self.paths.joined(separator: ", "), privacy: .public)")
-        if !self.matchDigests.isEmpty {
-            logger.info("match digest(s): \(self.matchDigests.joined(separator: ", "), privacy: .public)")
-        }
-        let reporter = Reporter()
-        let trap = self.trapSignals ? SignalTrap(reporter: reporter) : nil
-        let writer = OutputWriter(reporter: reporter, trap: trap)
 
-        let matchFound: Bool
-        if self.sortFiles {
-            let allPaths = FileEnumerator.collectSorted(paths: self.paths, follow: self.follow, reporter: reporter)
-            matchFound = await self.runSorted(paths: allPaths, reporter: reporter, writer: writer)
-        } else {
-            let pathStream = FileEnumerator.walk(paths: self.paths, follow: self.follow, reporter: reporter)
-            matchFound = await self.runStreaming(pathStream: pathStream, reporter: reporter, writer: writer)
+     `trapSignals` logs the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
+     Signal dispositions are process-wide, so only the command line sets it.
+     */
+    func scan(trapSignals: Bool = false) -> Int32 {
+        let jobs = self.resolvedJobs
+        let digester = Digester(self)
+        logger.info("run with \(jobs, privacy: .public) job(s) and \(digester.algorithm.rawValue, privacy: .public) algorithm in path(s): \(self.paths.joined(separator: ", "), privacy: .public)")
+        if !digester.targets.isEmpty {
+            logger.info("match digest(s): \(digester.targets.joined(separator: ", "), privacy: .public)")
         }
+
+        let console = Console()
+        let reporter = Reporter(console: console)
+        let trap = trapSignals ? SignalTrap(reporter: reporter) : nil
+        let output = Output(sorted: self.sort, console: console, reporter: reporter, trap: trap)
+
+        // The walking thread runs at the hash threads' QoS, so it keeps up with them when every core is busy.
+        _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
+
+        // A few dozen paths of lookahead keep every hash thread busy while the walker reads a large directory.
+        let handoff = Handoff(capacity: 64, takers: jobs)
+        let hashing = DispatchGroup()
+        for _ in 0 ..< jobs {
+            hashing.enter()
+            let thread = Thread {
+                while let (index, path) = handoff.take() {
+                    output.started(index, path: path)
+                    let lines = digester.lines(for: path, reporter: reporter)
+                    reporter.fileProcessed()
+                    output.finished(index, lines: lines)
+                }
+                hashing.leave()
+            }
+            thread.qualityOfService = .userInitiated
+            thread.start()
+        }
+
+        // On a terminal, a scan running for more than half a second shows its status line, redrawn ten times a second.
+        let ticks = DispatchQueue(label: "status")
+        let ticker = console.isLive ? DispatchSource.makeTimerSource(queue: ticks) : nil
+        ticker?.setEventHandler { output.showStatus() }
+        ticker?.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(100))
+        ticker?.resume()
+
+        let files = FileWalker(paths: self.paths, follow: self.follow, reporter: reporter, sorted: self.sort)
+        for (index, path) in files.enumerated() {
+            handoff.put(index: index, path: path)
+        }
+        handoff.close()
+        hashing.wait()
+
+        // Let a redraw in flight finish, so the end of the run erases the status line for good.
+        ticker?.cancel()
+        ticks.sync {}
 
         reporter.end("done")
         trap?.restore()
@@ -312,187 +612,110 @@ struct Runner {
         if reporter.errorCount > 0 {
             return 2
         }
-        if !self.matchDigests.isEmpty, !matchFound {
+        if !digester.targets.isEmpty, !output.printedAny {
             return 1
         }
         return 0
     }
+}
 
-    // MARK: - Sorted Mode
+// MARK: - Digester
 
-    private func runSorted(paths: [String], reporter: Reporter, writer: OutputWriter) async -> Bool {
-        guard !paths.isEmpty else {
-            return false
-        }
+/**
+ The work on one file: its digests in the selected mode and the lines to print for them. Built once per scan from the
+ command line, so hash threads read plain values instead of resolving every option for every file.
+ */
+struct Digester {
+    let algorithm: Algorithm
+    let targets: [String]
+    let score: Int
+    let quiet: Bool
+    let exact: Bool
+    let slices: Bool
+    let symhash: Bool
+    let separator: String
+    let sortSymbols: Bool
+    let xarToc: Bool
+    let decompress: Bool
 
-        var matchFound = false
-        await withTaskGroup(of: Batch.self) { group in
-            var pending = paths.enumerated().makeIterator()
-            var buffer: [Int: Batch] = [:]
-            var nextToEmit = 0
-
-            // Seed initial tasks
-            for _ in 0 ..< self.jobs {
-                guard let (index, path) = pending.next() else {
-                    break
-                }
-                let item = WorkItem(index: index, path: path)
-                group.addTask {
-                    self.processItem(item, reporter: reporter)
-                }
-            }
-
-            // Process results, emit in order, feed more work
-            while let batch = await group.next() {
-                buffer[batch.index] = batch
-
-                // Feed next item
-                if let (index, path) = pending.next() {
-                    let item = WorkItem(index: index, path: path)
-                    group.addTask {
-                        self.processItem(item, reporter: reporter)
-                    }
-                }
-
-                // Flush consecutive completed results from the front
-                while let ready = buffer.removeValue(forKey: nextToEmit) {
-                    for result in ready.results {
-                        if let line = formatResult(result) {
-                            matchFound = true
-                            await writer.write(line)
-                        }
-                    }
-                    nextToEmit += 1
-                }
-            }
-        }
-        return matchFound
+    init(_ command: Fashion) {
+        self.algorithm = command.resolvedAlgorithm
+        self.targets = command.matchOptions.match
+        self.score = command.resolvedScore
+        self.quiet = command.quiet
+        self.exact = command.exact
+        self.slices = command.slices
+        self.symhash = command.symbolOptions.symhash
+        self.separator = command.resolvedSeparator
+        self.sortSymbols = command.symbolOptions.sortSymbols
+        self.xarToc = command.xarOptions.xarToc
+        self.decompress = command.xarOptions.decompress
     }
 
-    // MARK: - Streaming Mode
+    // MARK: - Output Lines
 
-    private func runStreaming(pathStream: AsyncStream<String>, reporter: Reporter, writer: OutputWriter) async -> Bool {
-        var index = 0
-        var matchFound = false
-
-        await withTaskGroup(of: Batch.self) { group in
-            var activeCount = 0
-
-            for await path in pathStream {
-                let item = WorkItem(index: index, path: path)
-                index += 1
-
-                if activeCount < self.jobs {
-                    group.addTask {
-                        self.processItem(item, reporter: reporter)
-                    }
-                    activeCount += 1
-                } else {
-                    // Wait for one to finish before adding more
-                    if let batch = await group.next() {
-                        activeCount -= 1
-                        for result in batch.results {
-                            if let line = formatResult(result) {
-                                matchFound = true
-                                await writer.write(line)
-                            }
-                        }
-                    }
-                    group.addTask {
-                        self.processItem(item, reporter: reporter)
-                    }
-                    activeCount += 1
-                }
-            }
-
-            // Drain remaining
-            while let batch = await group.next() {
-                for result in batch.results {
-                    if let line = formatResult(result) {
-                        matchFound = true
-                        await writer.write(line)
-                    }
-                }
-            }
-        }
-        return matchFound
-    }
-
-    // MARK: - Processing
-
-    private func processItem(_ item: WorkItem, reporter: Reporter) -> Batch {
-        let results: [DigestResult] = if self.symhash {
-            self.processSymHash(item, reporter: reporter)
-        } else if self.xarToc {
-            self.processXarToc(item, reporter: reporter)
-        } else if self.algorithm == .cdhash {
-            self.processCDHash(item, reporter: reporter)
-        } else if self.slices {
-            self.processSlices(item, reporter: reporter)
-        } else {
-            self.processRegular(item, reporter: reporter)
-        }
-
-        reporter.fileProcessed()
-        return Batch(index: item.index, results: results)
-    }
-
-    private func processRegular(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
+    /**
+     The lines to print for one file: every digest or, in match mode, every matching one. A quiet match names the file
+     once, and so does a symhash search, which reports files rather than slices (the slices of one binary usually share
+     a symhash). A file that cannot be hashed is reported and prints nothing.
+     */
+    func lines(for path: String, reporter: Reporter) -> [String] {
+        let results: [DigestResult]
         do {
-            let digest: String?
-            let trimMachO = self.exact ? try MachOParser.isMachO(path: item.path) : false
-            if trimMachO {
-                // Mach-O: hash only the logical content. The map is lazy, so fileEnd faults just the
-                // header; crypto and git algorithms then stream the trimmed extent (no full map, no copy),
-                // failing closed if the file shrank in between.
-                let data = try FileReader.map(path: item.path)
-                let end = try MachOParser.fileEnd(data: data)
-                switch self.algorithm {
-                case .md5, .sha1, .sha256, .sha384, .sha512:
-                    digest = try CryptoDigest.hash(path: item.path, algorithm: self.algorithm, limit: end, exactLength: end)
-                case .git, .git256:
-                    digest = try GitBlobDigest.hash(path: item.path, useSHA256: self.algorithm == .git256, limit: end)
-                default:
-                    digest = try self.hashData(end < data.count ? data.prefix(end) : data)
-                }
-            } else {
-                digest = switch self.algorithm {
-                case .md5, .sha1, .sha256, .sha384, .sha512:
-                    try CryptoDigest.hash(path: item.path, algorithm: self.algorithm)
-                case .git:
-                    try GitBlobDigest.hash(path: item.path, useSHA256: false)
-                case .git256:
-                    try GitBlobDigest.hash(path: item.path, useSHA256: true)
-                case .ssdeep:
-                    try SSDeepBridge.hash(path: item.path)
-                case .tlsh:
-                    try TLSHBridge.hash(path: item.path)
-                case .cdhash:
-                    try CDHash.hash(path: item.path).first?.hash
-                }
-            }
-
-            guard let digest else {
-                return []
-            }
-            return [DigestResult(digest: digest, path: item.path, filePath: item.path)]
+            results = try self.digests(path)
         } catch {
-            reporter.report(path: item.path, message: error.localizedDescription)
-            return []
-        }
-    }
-
-    private func processCDHash(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
-        // --exact trims an unsigned slice to its logical extent before synthesizing its ad-hoc cdhash.
-        let sliceResults: [CDHash.SliceResult]
-        do {
-            sliceResults = try CDHash.hash(path: item.path, exact: self.exact)
-        } catch {
-            reporter.report(path: item.path, message: error.localizedDescription)
+            reporter.report(path: path, message: error.localizedDescription)
             return []
         }
 
-        let results = sliceResults.map { result in
+        guard !self.targets.isEmpty else {
+            return results.map { result in
+                self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: self.algorithm)
+            }
+        }
+
+        var lines: [String] = []
+        for result in results {
+            guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score) else {
+                continue
+            }
+            if self.quiet || self.symhash {
+                return [self.quiet ? OutputFormatter.formatPath(path) : OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm)]
+            }
+            lines.append(OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: self.algorithm))
+        }
+        return lines
+    }
+
+    // MARK: - Digests
+
+    /**
+     The digests of one file in the selected mode.
+     */
+    private func digests(_ path: String) throws -> [DigestResult] {
+        if self.symhash {
+            return try SymHash.compute(path: path, algorithm: self.algorithm, separator: self.separator, sortSymbols: self.sortSymbols)
+                .map { DigestResult(digest: $0.digest, label: $0.arch) }
+        }
+        if self.xarToc {
+            let digest = try XARParser.hashToc(path: path, algorithm: self.algorithm, decompress: self.decompress)
+            return digest.map { [DigestResult(digest: $0)] } ?? []
+        }
+        if self.algorithm == .cdhash {
+            return try self.cdHashDigests(path)
+        }
+        if self.slices {
+            return try self.sliceDigests(path)
+        }
+        return try self.fileDigest(path).map { [DigestResult(digest: $0)] } ?? []
+    }
+
+    /**
+     One digest per code directory of each slice, `--exact` trimming an unsigned slice to its logical extent before
+     synthesizing its ad-hoc cdhash.
+     */
+    private func cdHashDigests(_ path: String) throws -> [DigestResult] {
+        try CDHash.hash(path: path, exact: self.exact).map { result in
             // An unsigned slice is labeled ADHOC; its hash type (sha256 / sha1) is appended to tell the two
             // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous.
             let tag: String? = if result.adhoc {
@@ -500,60 +723,72 @@ struct Runner {
             } else {
                 result.type
             }
-            let suffix = [result.arch, tag].compactMap(\.self).joined(separator: ", ")
-            let displayPath = suffix.isEmpty ? item.path : "\(item.path) (\(suffix))"
-            return DigestResult(digest: result.hash, path: displayPath, filePath: item.path)
+            let label = [result.arch, tag].compactMap(\.self).joined(separator: ", ")
+            return DigestResult(digest: result.hash, label: label.isEmpty ? nil : label)
+        }
+    }
+
+    /**
+     The whole-file digest, then one per architecture of a universal binary, each trimmed when `--exact` is set.
+     */
+    private func sliceDigests(_ path: String) throws -> [DigestResult] {
+        // Read the container first, so a malformed one fails before any hashing.
+        var fatBinary: (data: Data, archs: [MachOParser.FatArch])?
+        if try MachOParser.isMachO(path: path) {
+            let data = try FileReader.map(path: path)
+            if case let .fat(archs) = try MachOParser.open(data: data) {
+                fatBinary = (data, archs)
+            }
         }
 
-        if self.quiet, !self.matchDigests.isEmpty {
-            return self.firstMatch(in: results, for: item)
+        var results = try self.fileDigest(path).map { [DigestResult(digest: $0)] } ?? []
+        if let fatBinary {
+            for arch in fatBinary.archs {
+                let sliceData = MachOParser.sliceData(fileData: fatBinary.data, arch: arch)
+                let archName = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
+                if let digest = try self.hashData(self.validatedSlice(sliceData)) {
+                    results.append(DigestResult(digest: digest, label: archName))
+                }
+            }
         }
         return results
     }
 
     /**
-     The first result whose digest matches, reduced to the bare file path, or nothing.
-     A quiet match listing names each file once, whichever of its slices matched.
+     The digest of the whole file, trimmed to the Mach-O logical end when `--exact` is set.
      */
-    private func firstMatch(in results: [DigestResult], for item: WorkItem) -> [DigestResult] {
-        for result in results where Matching.check(digest: result.digest, against: self.matchDigests, algorithm: self.algorithm, threshold: self.score) != nil {
-            return [DigestResult(digest: result.digest, path: item.path, filePath: item.path)]
+    private func fileDigest(_ path: String) throws -> String? {
+        let algorithm = self.algorithm
+        if self.exact, try MachOParser.isMachO(path: path) {
+            // Mach-O: hash only the logical content. The map is lazy, so fileEnd faults just the
+            // header; crypto and git algorithms then stream the trimmed extent (no full map, no copy),
+            // failing closed if the file shrank in between.
+            let data = try FileReader.map(path: path)
+            let end = try MachOParser.fileEnd(data: data)
+
+            switch algorithm {
+            case .md5, .sha1, .sha256, .sha384, .sha512:
+                return try CryptoDigest.hash(path: path, algorithm: algorithm, limit: end, exactLength: end)
+            case .git, .git256:
+                return try GitBlobDigest.hash(path: path, useSHA256: algorithm == .git256, limit: end)
+            default:
+                return try self.hashData(end < data.count ? data.prefix(end) : data)
+            }
         }
-        return []
-    }
 
-    private func processSlices(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
-        do {
-            // Read the container before hashing anything, so a malformed one yields an error, not a partial listing.
-            var fatBinary: (data: Data, archs: [MachOParser.FatArch])?
-            if try MachOParser.isMachO(path: item.path) {
-                let data = try FileReader.map(path: item.path)
-                if case let .fat(archs) = try MachOParser.open(data: data) {
-                    fatBinary = (data, archs)
-                }
-            }
-
-            // Whole-file hash first (trimmed to the Mach-O logical end when --exact is set).
-            var results = self.processRegular(item, reporter: reporter)
-
-            // If fat Mach-O, hash each architecture slice (each trimmed when --exact is set).
-            if let fatBinary {
-                for arch in fatBinary.archs {
-                    let sliceData = MachOParser.sliceData(fileData: fatBinary.data, arch: arch)
-                    let archName = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
-                    if let digest = try self.hashData(self.validatedSlice(sliceData)) {
-                        results.append(DigestResult(digest: digest, path: "\(item.path) (\(archName))", filePath: item.path))
-                    }
-                }
-            }
-
-            if self.quiet, !self.matchDigests.isEmpty {
-                return self.firstMatch(in: results, for: item)
-            }
-            return results
-        } catch {
-            reporter.report(path: item.path, message: error.localizedDescription)
-            return []
+        return switch algorithm {
+        case .md5, .sha1, .sha256, .sha384, .sha512:
+            try CryptoDigest.hash(path: path, algorithm: algorithm)
+        case .git:
+            try GitBlobDigest.hash(path: path, useSHA256: false)
+        case .git256:
+            try GitBlobDigest.hash(path: path, useSHA256: true)
+        case .ssdeep:
+            try SSDeepBridge.hash(path: path)
+        case .tlsh:
+            try TLSHBridge.hash(path: path)
+        case .cdhash:
+            try CDHash.hash(path: path).first?.hash
         }
     }
 
@@ -562,14 +797,15 @@ struct Runner {
      and trim it to its logical end when --exact is set. A slice that is not Mach-O at all is returned unchanged.
      */
     private func validatedSlice(_ slice: Data) throws -> Data {
-        guard let machO = try MachOSlice(slice), self.exact else {
+        // Parse even without --exact: a malformed slice is an error either way.
+        guard let machO = try MachOSlice(slice) else {
             return slice
         }
-        return slice.prefix(machO.logicalEnd())
+        return self.exact ? slice.prefix(machO.logicalEnd()) : slice
     }
 
     /**
-     Hash raw bytes with the configured algorithm (shared by the regular and slice paths).
+     Hash raw bytes with the configured algorithm (shared by the whole-file and slice paths).
      */
     private func hashData(_ data: Data) throws -> String? {
         switch self.algorithm {
@@ -586,64 +822,5 @@ struct Runner {
         case .cdhash:
             try CDHash.hash(data: data)
         }
-    }
-
-    private func processSymHash(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
-        do {
-            let results = try SymHash.compute(path: item.path, algorithm: self.algorithm, separator: self.separator, sortSymbols: self.sortSymbols)
-
-            let labelled = results.map { result in
-                let displayPath = result.arch.map { "\(item.path) (\($0))" } ?? item.path
-                return DigestResult(digest: result.digest, path: displayPath, filePath: item.path)
-            }
-
-            // Match mode: a symhash search reports files, not slices, so name the file once on its first
-            // matching slice (the slices of one binary usually share a symhash).
-            if !self.matchDigests.isEmpty {
-                return self.firstMatch(in: labelled, for: item)
-            }
-            return labelled
-        } catch {
-            reporter.report(path: item.path, message: error.localizedDescription)
-            return []
-        }
-    }
-
-    private func processXarToc(_ item: WorkItem, reporter: Reporter) -> [DigestResult] {
-        do {
-            if let digest = try XARParser.hashToc(path: item.path, algorithm: algorithm, decompress: decompress) {
-                return [DigestResult(digest: digest, path: item.path, filePath: item.path)]
-            }
-            return []
-        } catch {
-            reporter.report(path: item.path, message: error.localizedDescription)
-            return []
-        }
-    }
-
-    // MARK: - Formatting
-
-    private func formatResult(_ result: DigestResult) -> String? {
-        if !self.matchDigests.isEmpty {
-            guard let matchResult = Matching.check(digest: result.digest, against: matchDigests, algorithm: algorithm, threshold: score) else {
-                return nil
-            }
-
-            if self.quiet {
-                return OutputFormatter.formatQuietMatch(path: result.filePath ?? result.path)
-            }
-
-            if let score = matchResult.score {
-                return OutputFormatter.formatMatchLine(digest: result.digest, score: score, path: result.path, algorithm: self.algorithm)
-            }
-
-            return OutputFormatter.formatLine(digest: result.digest, path: result.path, algorithm: self.algorithm)
-        }
-
-        if self.quiet {
-            return OutputFormatter.formatQuiet(digest: result.digest, algorithm: self.algorithm)
-        }
-
-        return OutputFormatter.formatLine(digest: result.digest, path: result.path, algorithm: self.algorithm)
     }
 }

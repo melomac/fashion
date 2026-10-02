@@ -10,42 +10,20 @@ enum OutputFormatter {
     static let tlshScoreWidth = 4
 
     /**
-     Format a standard result line: "<digest>  <path>"
+     Format a result line: "<digest>  <path>", or "<digest> <score>  <path>" for a match with a similarity score.
      */
-    static func formatLine(digest: String, path: String, algorithm: Algorithm) -> String {
+    static func formatLine(digest: String, score: Int? = nil, path: String, algorithm: Algorithm) -> String {
         let paddedDigest = self.padDigest(digest, algorithm: algorithm)
         let (escaped, prefix) = self.escapePath(path)
-        return "\(prefix)\(paddedDigest)  \(escaped)"
-    }
-
-    /**
-     Format a match result line with score: "<digest> <score>  <path>"
-     */
-    static func formatMatchLine(digest: String, score: Int, path: String, algorithm: Algorithm) -> String {
-        let paddedDigest = self.padDigest(digest, algorithm: algorithm)
-        let scoreStr = if algorithm == .ssdeep {
-            String(format: "%\(self.ssdeepScoreWidth)d", score)
-        } else if algorithm == .tlsh {
-            String(format: "%\(self.tlshScoreWidth)d", score)
-        } else {
-            ""
+        guard let score else {
+            return "\(prefix)\(paddedDigest)  \(escaped)"
         }
-        let (escaped, prefix) = self.escapePath(path)
+        let scoreStr = switch algorithm {
+        case .ssdeep: String(format: "%\(self.ssdeepScoreWidth)d", score)
+        case .tlsh: String(format: "%\(self.tlshScoreWidth)d", score)
+        default: ""
+        }
         return "\(prefix)\(paddedDigest) \(scoreStr)  \(escaped)"
-    }
-
-    /**
-     Format quiet output without matching: digest only (no padding).
-     */
-    static func formatQuiet(digest: String, algorithm _: Algorithm) -> String {
-        digest
-    }
-
-    /**
-     Format quiet match output: path only
-     */
-    static func formatQuietMatch(path: String) -> String {
-        self.formatPath(path)
     }
 
     /**

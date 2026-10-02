@@ -65,7 +65,7 @@ extension Algorithm: ExpressibleByArgument {
 // MARK: -
 
 @main
-struct Fashion: AsyncParsableCommand {
+struct Fashion: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fashion",
         abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
@@ -179,26 +179,8 @@ struct Fashion: AsyncParsableCommand {
 
     // MARK: - Run
 
-    mutating func run() async throws {
-        let runner = Runner(
-            paths: self.paths,
-            algorithm: self.resolvedAlgorithm,
-            quiet: self.quiet,
-            slices: self.slices,
-            exact: self.exact,
-            sortFiles: self.sort,
-            jobs: self.resolvedJobs,
-            follow: self.follow,
-            matchDigests: self.matchOptions.match,
-            score: self.resolvedScore,
-            symhash: self.symbolOptions.symhash,
-            separator: self.resolvedSeparator,
-            sortSymbols: self.symbolOptions.sortSymbols,
-            xarToc: self.xarOptions.xarToc,
-            decompress: self.xarOptions.decompress,
-            trapSignals: true,
-        )
-        let code = await runner.run()
+    mutating func run() throws {
+        let code = self.scan(trapSignals: true)
         if code != 0 {
             throw ExitCode(code)
         }
