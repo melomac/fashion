@@ -487,6 +487,44 @@ final class MachOParserTests: XCTestCase {
         XCTAssertTrue(try MachOParser.isMachO(path: url.path()))
     }
 
+    func testUniversalSliceLimitMatchesDyld() throws {
+        // dyld's mach_o::Universal accepts at most kMaxSliceCount (16) slices: fashion reads a universal file exactly
+        // when libdyld's macho_for_each_slice does.
+        for count in [16, 17] {
+            var data = Data()
+            data.appendUInt32BE(FAT_MAGIC)
+            data.appendUInt32BE(UInt32(count))
+            for index in 0 ..< count { // arm64 slices with distinct subtypes, one page each
+                data.appendInt32BE(CPU_TYPE_ARM64)
+                data.appendInt32BE(Int32(index))
+                data.appendUInt32BE(UInt32(4096 * (index + 1)))
+                data.appendUInt32BE(32)
+                data.appendUInt32BE(12)
+            }
+            data.append(Data(count: 4096 - data.count))
+            for index in 0 ..< count {
+                var slice = Data()
+                [MH_MAGIC_64, UInt32(CPU_TYPE_ARM64), UInt32(index), UInt32(MH_EXECUTE), 0, 0, 0, 0].forEach { slice.appendUInt32($0) }
+                data.append(slice + Data(count: 4096 - slice.count))
+            }
+            let url = FileManager.default.temporaryDirectory / "fashion-fat\(count)-\(UUID())"
+            try data.write(to: url)
+            defer {
+                try? FileManager.default.removeItem(at: url)
+            }
+
+            var dyldSlices = 0
+            let status = macho_for_each_slice(url.path()) { _, _, _, _ in dyldSlices += 1 }
+            if case let .fat(archs) = try MachOParser.open(data: data) {
+                XCTAssertEqual(status, 0, "dyld rejects the \(count)-slice file fashion reads as universal")
+                XCTAssertEqual(archs.count, dyldSlices)
+            } else {
+                XCTAssertNotEqual(status, 0, "dyld reads the \(count)-slice file fashion rejects")
+            }
+            XCTAssertEqual(try MachOParser.isMachO(path: url.path()), count <= 16)
+        }
+    }
+
     func testIsMachOFalseForJavaClass() throws {
         // 0xCAFEBABE shared magic, but the big-endian u32 at offset 4 is a Java major version (52), not an arch count.
         var data = Data([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])

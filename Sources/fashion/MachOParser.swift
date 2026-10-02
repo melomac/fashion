@@ -133,10 +133,8 @@ enum MachOParser {
             case MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64:
                 return true
             case FAT_MAGIC, FAT_CIGAM, FAT_MAGIC_64, FAT_CIGAM_64:
-                // 0xCAFEBABE is shared with compiled Java class data.
-                // Universal binaries have a small, big-endian, architecture count.
                 let nfatArch = UInt32(bigEndian: raw.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
-                return nfatArch >= 1 && nfatArch < 25
+                return 1 ... self.maxSliceCount ~= nfatArch
             default:
                 return false
             }
@@ -331,17 +329,20 @@ enum MachOParser {
         "unknown(\(cpuType),\(cpuSubtype))"
     }
 
+    /**
+     The most slices a universal file holds, dyld's `mach_o::Universal::kMaxSliceCount`.
+
+     Compiled Java class data shares the 0xCAFEBABE magic.
+     Universal binaries have a small, big-endian, architecture count.
+     */
+    static let maxSliceCount: UInt32 = 16
+
     private static func parseFat(data: Data, is64: Bool) throws -> BinaryType {
         let nfatArch: UInt32 = data.withUnsafeBytes { ptr in
             UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
         }
 
-        // 0xCAFEBABE is shared with compiled Java class data.
-        // Universal binaries have a small, big-endian, architecture count.
-        guard
-            nfatArch >= 1,
-            nfatArch < 25
-        else {
+        guard 1 ... self.maxSliceCount ~= nfatArch else {
             return .notMachO
         }
 
