@@ -338,7 +338,7 @@ final class AdhocCDHashTests: XCTestCase {
     }
 
     func testExactStripsTrailingGarbage() throws {
-        let clean = self.makeMachO(fileSize: 256)
+        let clean = self.makeMachO(segment: "__LINKEDIT", fileSize: 256) // the image ends with __LINKEDIT
         let cleanHashes = try XCTUnwrap(try MachOSlice(clean)?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
 
         var dirty = clean

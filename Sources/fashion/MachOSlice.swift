@@ -1,12 +1,11 @@
 import Foundation
 import MachO
-import os
 
 /**
  A single parsed thin Mach-O slice.
 
  The header (endianness, architecture, filetype) and the load commands are parsed once at initialization;
- the executable-segment, code-signature, and logical-extent accessors all reuse that single pass.
+ the command lookups, code-signature, and logical-extent accessors all reuse that single pass.
 
  `init?(_:)` returns nil for anything that is not a thin Mach-O and throws for one whose load-command table is
  damaged; `init?(lenient:)` keeps whatever prefix of such a table parses, for best-effort inspection.
@@ -24,8 +23,6 @@ struct MachOSlice {
     private let commandCount: UInt32
     private let sizeofcmds: Int
     let loadCommands: [MachOParser.LoadCommand]
-
-    private static let logger = Logger(subsystem: "fashion", category: "mach-o")
 
     init?(lenient data: Data) {
         guard
@@ -161,94 +158,32 @@ struct MachOSlice {
     // MARK: - Logical Extent
 
     /**
-     The highest file offset referenced by the header, load commands, segments, and link-edit tables.
+     Where the Mach-O image ends, as Security's `MachO` decides it for strict validation: at the end of the
+     `__LINKEDIT` segment or of the `LC_SYMTAB` string table, whichever command comes first. Bytes past it are
+     appended to the image, which `codesign` rejects.
 
-     Any bytes beyond this are trailing slack — e.g. attacker-appended padding — that is not part of the Mach-O image.
-     Returns `data.count` (no trimming) when an unrecognized load command might reference data we don't model.
+     The whole slice when it declares neither, or an end that lies past the slice.
      */
     func logicalEnd() -> Int {
-        // Trust the declared load-command region only when it fits the file. A hostile, oversized
-        // sizeofcmds must not push maxEnd past the data and silently defeat trimming; real extents are
-        // still recovered from the parsed load commands below.
-        let loadCommandsEnd = self.headerSize + self.sizeofcmds
-        var maxEnd = loadCommandsEnd <= self.data.count ? loadCommandsEnd : self.headerSize
+        for command in self.loadCommands {
+            let isLinkedit = Self.name(of: command.data.dropFirst(8).prefix(16)) == "__LINKEDIT"
+            let range: (offset: UInt64, size: UInt64)? = switch command.cmd {
+            case UInt32(LC_SEGMENT) where isLinkedit:
+                command.payload(as: segment_command.self).map { (UInt64(self.sw($0.fileoff)), UInt64(self.sw($0.filesize))) }
+            case UInt32(LC_SEGMENT_64) where isLinkedit:
+                command.payload(as: segment_command_64.self).map { (self.sw($0.fileoff), self.sw($0.filesize)) }
+            case UInt32(LC_SYMTAB):
+                command.payload(as: symtab_command.self).map { (UInt64(self.sw($0.stroff)), UInt64(self.sw($0.strsize))) }
+            default:
+                nil
+            }
 
-        // Raise maxEnd to cover a referenced region [offset, offset + count * stride), byte-swapping and
-        // widening the raw header fields. Out-of-range or wrapping ends are ignored.
-        func extend(offset: some FixedWidthInteger, count: some FixedWidthInteger, stride: Int = 1) {
-            let end = UInt64(self.sw(offset)) &+ (UInt64(self.sw(count)) &* UInt64(stride))
-            if end <= UInt64(self.data.count), Int(end) > maxEnd {
-                maxEnd = Int(end)
+            if let range {
+                let count = UInt64(self.data.count)
+                return range.size <= count && range.offset <= count - range.size ? Int(range.offset + range.size) : self.data.count
             }
         }
-
-        for cmd in self.loadCommands {
-            switch ExtentCommand(rawValue: cmd.cmd) {
-            case .segment64:
-                guard let seg = cmd.payload(as: segment_command_64.self) else {
-                    continue
-                }
-                extend(offset: seg.fileoff, count: seg.filesize)
-            case .segment:
-                guard let seg = cmd.payload(as: segment_command.self) else {
-                    continue
-                }
-                extend(offset: seg.fileoff, count: seg.filesize)
-            case .symtab:
-                guard let symtab = cmd.payload(as: symtab_command.self) else {
-                    continue
-                }
-                extend(offset: symtab.symoff, count: symtab.nsyms, stride: self.is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size)
-                extend(offset: symtab.stroff, count: symtab.strsize)
-            case .dysymtab:
-                guard let dysym = cmd.payload(as: dysymtab_command.self) else {
-                    continue
-                }
-                let moduleSize = self.is64 ? MemoryLayout<dylib_module_64>.size : MemoryLayout<dylib_module>.size
-                extend(offset: dysym.tocoff, count: dysym.ntoc, stride: MemoryLayout<dylib_table_of_contents>.size)
-                extend(offset: dysym.modtaboff, count: dysym.nmodtab, stride: moduleSize)
-                extend(offset: dysym.extrefsymoff, count: dysym.nextrefsyms, stride: MemoryLayout<dylib_reference>.size)
-                extend(offset: dysym.indirectsymoff, count: dysym.nindirectsyms, stride: MemoryLayout<UInt32>.size)
-                extend(offset: dysym.extreloff, count: dysym.nextrel, stride: MemoryLayout<relocation_info>.size)
-                extend(offset: dysym.locreloff, count: dysym.nlocrel, stride: MemoryLayout<relocation_info>.size)
-            case .dyldInfo, .dyldInfoOnly:
-                guard let info = cmd.payload(as: dyld_info_command.self) else {
-                    continue
-                }
-                extend(offset: info.rebase_off, count: info.rebase_size)
-                extend(offset: info.bind_off, count: info.bind_size)
-                extend(offset: info.weak_bind_off, count: info.weak_bind_size)
-                extend(offset: info.lazy_bind_off, count: info.lazy_bind_size)
-                extend(offset: info.export_off, count: info.export_size)
-            case .codeSignature, .segmentSplitInfo, .functionStarts, .dataInCode,
-                 .dylibCodeSignDrs, .linkerOptimizationHint, .atomInfo, .functionVariants,
-                 .functionVariantFixups, .dyldExportsTrie, .dyldChainedFixups:
-                guard let linkedit = cmd.payload(as: linkedit_data_command.self) else {
-                    continue
-                }
-                extend(offset: linkedit.dataoff, count: linkedit.datasize)
-            case .encryptionInfo, .encryptionInfo64:
-                // Both layouts place cryptoff and cryptsize at the same offsets.
-                guard let enc = cmd.payload(as: encryption_info_command.self) else {
-                    continue
-                }
-                extend(offset: enc.cryptoff, count: enc.cryptsize)
-            case .note:
-                guard let note = cmd.payload(as: note_command.self) else {
-                    continue
-                }
-                extend(offset: note.offset, count: note.size)
-            case .none:
-                // A known command with no on-disk payload is ignored; anything else may reference bytes we
-                // can't account for, so return the whole file rather than risk dropping referenced data.
-                guard Self.benignCommands.contains(cmd.cmd) else {
-                    Self.logger.warning("Unrecognized load command: \(String(format: "0x%x", cmd.cmd), privacy: .public) -> hashing whole file.")
-                    return self.data.count
-                }
-            }
-        }
-
-        return min(maxEnd, self.data.count)
+        return self.data.count
     }
 
     // MARK: - Filetype
@@ -374,54 +309,6 @@ struct MachOSlice {
         case dyldExportsTrie = 0x8000_0033
         case dyldChainedFixups = 0x8000_0034
     }
-
-    /**
-     Load commands known to carry no standalone on-disk data: their payload is inline in the command, or
-     lives inside a segment we already measure. Any command that is neither measured above nor listed
-     here is treated as unknown — `logicalEnd` logs it and declines to trim. Commands that DO reference
-     file data we don't model (`LC_TWOLEVEL_HINTS`, `LC_SYMSEG`, `LC_FILESET_ENTRY`, …) are deliberately
-     omitted so they fall through to that safe path.
-     */
-    private static let benignCommands: Set<UInt32> = {
-        // Plain commands (no LC_REQ_DYLD bit) — imported as Int32.
-        let plain: [Int32] = [
-            LC_THREAD,
-            LC_UNIXTHREAD,
-            LC_LOAD_DYLIB,
-            LC_ID_DYLIB,
-            LC_LAZY_LOAD_DYLIB,
-            LC_PREBOUND_DYLIB,
-            LC_LOAD_DYLINKER,
-            LC_ID_DYLINKER,
-            LC_DYLD_ENVIRONMENT,
-            LC_SUB_FRAMEWORK,
-            LC_SUB_UMBRELLA,
-            LC_SUB_CLIENT,
-            LC_SUB_LIBRARY,
-            LC_ROUTINES,
-            LC_ROUTINES_64,
-            LC_PREBIND_CKSUM,
-            LC_LINKER_OPTION,
-            LC_UUID,
-            LC_SOURCE_VERSION,
-            LC_VERSION_MIN_MACOSX,
-            LC_VERSION_MIN_IPHONEOS,
-            LC_VERSION_MIN_TVOS,
-            LC_VERSION_MIN_WATCHOS,
-            LC_BUILD_VERSION,
-        ]
-
-        // Commands carrying the LC_REQ_DYLD bit — imported as UInt32.
-        let reqDyld: [UInt32] = [
-            LC_LOAD_WEAK_DYLIB,
-            LC_REEXPORT_DYLIB,
-            LC_LOAD_UPWARD_DYLIB,
-            LC_RPATH,
-            LC_MAIN,
-        ]
-
-        return Set(plain.map { UInt32(bitPattern: $0) } + reqDyld)
-    }()
 
     // `<mach-o/loader.h>` filetypes, numbered from MH_OBJECT (1).
     private static let filetypeNames = [

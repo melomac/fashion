@@ -130,7 +130,7 @@ A slice the running OS cannot name yet falls back to a built-in table (`arm64e.x
 ### Exact flag
 
 Some malware families append garbage data after the Mach-O structure to evade hash based detection.
-With the `--exact` flag, we hash only the bytes the Mach-O actually references — its logical end computed from the load commands — so the same payload padded with different trailing junk collapses to one digest:
+With the `--exact` flag, we hash only the Mach-O image — up to the end of its `__LINKEDIT` segment (or symbol table strings), where `codesign` expects the file to end — so the same payload padded with different trailing junk collapses to one digest:
 
 ```console
 $ fashion prostorify.com/*/bin/Pods

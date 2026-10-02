@@ -875,7 +875,7 @@ final class MachOParserTests: XCTestCase {
         XCTAssertNotEqual(cleanHash, dirtyWhole, "whole-file hash must change when garbage is appended")
     }
 
-    func testMachOEndSegment64Trim() {
+    func testMachOEndLinkedit64Trim() {
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -887,7 +887,7 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32(0)
         data.appendUInt32(UInt32(LC_SEGMENT_64))
         data.appendUInt32(72) // cmdsize
-        data.append(Data("__TEXT".utf8)); data.append(Data(repeating: 0, count: 10)) // segname[16]
+        data.append(Data("__LINKEDIT".utf8)); data.append(Data(repeating: 0, count: 6)) // segname[16]
         data.appendUInt64(0) // vmaddr
         data.appendUInt64(256) // vmsize
         data.appendUInt64(0) // fileoff
@@ -903,7 +903,7 @@ final class MachOParserTests: XCTestCase {
         XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
     }
 
-    func testMachOEndSegment32Trim() {
+    func testMachOEndLinkedit32Trim() {
         var data = Data()
         data.appendUInt32(MH_MAGIC)
         data.appendInt32(CPU_TYPE_ARM)
@@ -914,7 +914,7 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32(0)
         data.appendUInt32(UInt32(LC_SEGMENT))
         data.appendUInt32(56) // cmdsize
-        data.append(Data("__TEXT".utf8)); data.append(Data(repeating: 0, count: 10))
+        data.append(Data("__LINKEDIT".utf8)); data.append(Data(repeating: 0, count: 6))
         data.appendUInt32(0) // vmaddr
         data.appendUInt32(200) // vmsize
         data.appendUInt32(0) // fileoff
@@ -930,7 +930,8 @@ final class MachOParserTests: XCTestCase {
         XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
     }
 
-    func testMachOEndDysymtabTrim() {
+    func testMachOEndWithoutLinkeditOrSymtabKeepsWholeSlice() {
+        // Security's MachO ends the image only at __LINKEDIT or the LC_SYMTAB strings: other commands never trim.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -952,26 +953,40 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32(0); data.appendUInt32(0) // extreloff, nextrel
         data.appendUInt32(0); data.appendUInt32(0) // locreloff, nlocrel
         data.append(Data(repeating: 0xab, count: 128 - data.count))
-        let logicalEnd = data.count
         data.append(Data(repeating: 0x41, count: 50))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
+        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
     }
 
-    func testMachOEndIgnoresOversizedSizeofcmds() {
+    func testMachOEndFirstCommandWins() {
+        // LC_SYMTAB comes before __LINKEDIT here, so its string table ends the image even though __LINKEDIT reaches further.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
         data.appendInt32(0)
         data.appendUInt32(2)
-        data.appendUInt32(0) // ncmds = 0
-        data.appendUInt32(0xffff_ffff) // hostile sizeofcmds
+        data.appendUInt32(2) // ncmds
+        data.appendUInt32(96) // sizeofcmds = LC_SYMTAB(24) + LC_SEGMENT_64(72)
         data.appendUInt32(0)
         data.appendUInt32(0)
-        data.append(Data(repeating: 0x41, count: 200)) // appended garbage
+        data.appendUInt32(UInt32(LC_SYMTAB))
+        data.appendUInt32(24)
+        data.appendUInt32(128); data.appendUInt32(0); data.appendUInt32(128); data.appendUInt32(16) // strings end at 144
+        data.appendUInt32(UInt32(LC_SEGMENT_64))
+        data.appendUInt32(72)
+        data.append(Data("__LINKEDIT".utf8)); data.append(Data(repeating: 0, count: 6))
+        data.appendUInt64(0); data.appendUInt64(200); data.appendUInt64(0); data.appendUInt64(200) // vmaddr, vmsize, fileoff, filesize
+        data.appendUInt32(1); data.appendUInt32(1); data.appendUInt32(0); data.appendUInt32(0) // maxprot, initprot, nsects, flags
+        data.append(Data(repeating: 0xab, count: 250 - data.count))
 
-        // Must fall back to the header end, not retain the appended bytes.
-        XCTAssertEqual(MachOParser.machOEnd(data: data), 32)
+        XCTAssertEqual(MachOParser.machOEnd(data: data), 144)
+    }
+
+    func testMachOEndPastSliceKeepsWholeSlice() {
+        var data = self.makeThin64()
+        data.replaceSubrange(52 ..< 56, with: withUnsafeBytes(of: UInt32(1000).littleEndian) { Data($0) }) // strsize past the slice
+
+        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
     }
 
     func testMachOEndFatSliceStripsGarbage() throws {
@@ -998,25 +1013,7 @@ final class MachOParserTests: XCTestCase {
         XCTAssertEqual(MachOParser.machOEnd(data: extracted), cleanEnd, "per-arch slice trim must strip in-slice garbage")
     }
 
-    func testMachOEndUnknownCommandDisablesTrim() {
-        var data = Data()
-        data.appendUInt32(MH_MAGIC_64)
-        data.appendInt32(CPU_TYPE_ARM64)
-        data.appendInt32(0)
-        data.appendUInt32(2)
-        data.appendUInt32(1) // ncmds
-        data.appendUInt32(16) // sizeofcmds
-        data.appendUInt32(0)
-        data.appendUInt32(0)
-        data.appendUInt32(0x0000_00ab) // unknown command id (not handled, not benign)
-        data.appendUInt32(16)
-        data.append(Data(repeating: 0, count: 8))
-        data.append(Data(repeating: 0x41, count: 100)) // trailing bytes that must NOT be trimmed
-
-        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count, "an unrecognized command must disable trimming")
-    }
-
-    func testMachOEndBenignCommandStillTrims() {
+    func testMachOEndSkipsOtherCommands() {
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -1026,7 +1023,7 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32(48) // sizeofcmds = LC_UUID(24) + LC_SYMTAB(24)
         data.appendUInt32(0)
         data.appendUInt32(0)
-        data.appendUInt32(UInt32(bitPattern: LC_UUID)) // benign command
+        data.appendUInt32(UInt32(bitPattern: LC_UUID)) // any other command
         data.appendUInt32(24)
         data.append(Data(repeating: 0xaa, count: 16))
         data.appendUInt32(UInt32(LC_SYMTAB)) // handled command
@@ -1035,7 +1032,7 @@ final class MachOParserTests: XCTestCase {
         let logicalEnd = data.count // 80
         data.append(Data(repeating: 0x41, count: 50))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd, "a benign command must be ignored, not block trimming")
+        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd, "a command before LC_SYMTAB must not block trimming")
     }
 
     // MARK: - fileEnd (whole-file logical end)

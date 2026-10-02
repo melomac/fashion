@@ -347,6 +347,24 @@ final class CDHashTests: XCTestCase {
         try self.assertAdhocMatchesCodesignDetached(ppc)
     }
 
+    func testLogicalEndMatchesCodesignStrictValidation() throws {
+        // Security's MachO ends the image at __LINKEDIT, and codesign's strict validation rejects any byte past it:
+        // the bytes appended to a built binary are exactly the ones logicalEnd trims.
+        let dir = try self.temporaryDirectory()
+        let original = try self.compile("original", in: dir, ["-arch", "arm64"])
+        var padded = try Data(contentsOf: original)
+        let end = padded.count
+        padded.append(Data(repeating: 0x41, count: 777))
+        let paddedURL = dir / "padded"
+        try padded.write(to: paddedURL)
+
+        XCTAssertEqual(try XCTUnwrap(MachOSlice(padded)).logicalEnd(), end)
+        XCTAssertNoThrow(try Self.codesignDetached(original))
+        XCTAssertThrowsError(try Self.codesignDetached(paddedURL)) { error in
+            XCTAssertTrue(String(describing: error).contains("strict validation"), "\(error)")
+        }
+    }
+
     // MARK: - Helpers
 
     /// A fresh directory, removed when the test ends.
