@@ -1108,6 +1108,33 @@ final class MachOParserTests: XCTestCase {
         }
     }
 
+    func testErrorDescriptionsAgreeWithCounts() {
+        XCTAssertEqual(
+            ParserError.invalidLoadCommandTable(count: 1, size: 24, fileSize: 40).localizedDescription,
+            "Invalid Mach-O: ncmds 1 and sizeofcmds 24 do not form a load-command table in the 40-byte slice",
+        )
+        XCTAssertEqual(
+            ParserError.invalidFatArchitectureTable(count: 1, fileSize: 20).localizedDescription,
+            "Invalid Mach-O: nfat_arch 1 does not fit in the 20-byte file",
+        )
+        XCTAssertEqual(
+            ParserError.invalidSymbolTableRange(offset: 32, count: 1, fileSize: 40).localizedDescription,
+            "Invalid Mach-O: symbol table at offset 32 with 1 entry is outside the 40-byte slice",
+        )
+        XCTAssertEqual(
+            ParserError.invalidSymbolTableRange(offset: 32, count: 2, fileSize: 40).localizedDescription,
+            "Invalid Mach-O: symbol table at offset 32 with 2 entries is outside the 40-byte slice",
+        )
+        XCTAssertEqual(
+            ParserError.truncatedCodeSignatureSuperblob(signatureSize: 1).localizedDescription,
+            "Invalid Mach-O: code signature is only 1 byte; an embedded signature header requires 12",
+        )
+        XCTAssertEqual(
+            ParserError.truncatedCodeDirectory(offset: 20, length: 8).localizedDescription,
+            "Invalid Mach-O: CodeDirectory at offset 20 is only 8 bytes",
+        )
+    }
+
     func testFileEndNonMachOReturnsFullLength() throws {
         let data = Data("plain text, not mach-o".utf8)
         XCTAssertEqual(try MachOParser.fileEnd(data: data), data.count)

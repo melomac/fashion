@@ -199,4 +199,15 @@ final class CryptoDigestTests: XCTestCase {
             XCTAssertEqual(streaming, oneshot, "Mismatch for \(algo)")
         }
     }
+
+    func testSizeChangedDescriptionAgreesWithCount() {
+        XCTAssertEqual(
+            CryptoDigestError.sizeChanged(expected: 1, actual: 2).localizedDescription,
+            "File changed size while hashing (expected 1 byte, read 2)",
+        )
+        XCTAssertEqual(
+            CryptoDigestError.sizeChanged(expected: 2, actual: 1).localizedDescription,
+            "File changed size while hashing (expected 2 bytes, read 1)",
+        )
+    }
 }

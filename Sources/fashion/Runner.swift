@@ -55,7 +55,7 @@ import System
  Signals (command line only):
    SIGINT, SIGTERM  -> reporter.end -> console.close() (never waits) -> die of the signal
    SIGPIPE          -> held back: EPIPE in Console.out -> trap.brokenPipe() -> die of SIGPIPE
-   SIGINFO (^T)     -> reporter.progress() -> "fashion: N file(s) with M error(s) in T"
+   SIGINFO (^T)     -> reporter.progress() -> "fashion: N files with M errors in T"
  */
 
 private let logger = Logger(subsystem: "fashion", category: "runner")
@@ -260,7 +260,7 @@ final class Output: @unchecked Sendable {
                 return
             }
             let waiting = self.held.count
-            self.console.status("\(self.reporter.fileCount) files · \(waiting > 0 ? "\(waiting) waiting · " : "")hashing ", path: path)
+            self.console.status("\(String(self.reporter.fileCount, pluralizing: "file")) · \(waiting > 0 ? "\(waiting) waiting · " : "")hashing ", path: path)
         }
     }
 
@@ -282,7 +282,7 @@ final class Output: @unchecked Sendable {
             // Otherwise nothing more can be delivered (SIGPIPE inherited as ignored, or stdout closed): report
             // and exit like coreutils, rather than crash on the uncaught error.
             let description = OutputFormatter.formatDiagnostic(error.localizedDescription)
-            self.reporter.end("stopped by write error: \(description)")
+            self.reporter.end("Stopped by write error: \(description)")
             self.console.err("fashion: write error: \(description)")
 
             exit(2)
@@ -342,7 +342,7 @@ final class Reporter: @unchecked Sendable {
      */
     func progress() {
         let summary = self.summary(self.lock.withLock { (self.files, self.errors) })
-        logger.info("progress: \(summary, privacy: .public)")
+        logger.info("Progress: \(summary, privacy: .public)")
 
         self.lock.withLock {
             self.console.err("fashion: \(summary)")
@@ -373,7 +373,7 @@ final class Reporter: @unchecked Sendable {
     private func summary(_ counts: (files: Int, errors: Int)) -> String {
         let duration = (self.clock.now - self.start).formatted(.units(allowed: [.hours, .minutes, .seconds, .milliseconds], width: .narrow))
 
-        return "\(counts.files) file(s) with \(counts.errors) error(s) in \(duration)"
+        return "\(String(counts.files, pluralizing: "file")) with \(String(counts.errors, pluralizing: "error")) in \(duration)"
     }
 }
 
@@ -401,10 +401,10 @@ final class SignalTrap: @unchecked Sendable {
 
     init(reporter: Reporter) {
         self.reporter = reporter
-        self.watch(SIGINT) { $0.stop("interrupted", dyingOf: SIGINT) }
-        self.watch(SIGTERM) { $0.stop("terminated", dyingOf: SIGTERM) }
+        self.watch(SIGINT) { $0.stop("Interrupted", dyingOf: SIGINT) }
+        self.watch(SIGTERM) { $0.stop("Terminated", dyingOf: SIGTERM) }
         self.watch(SIGINFO) { $0.reporter.progress() }
-        self.holdsBrokenPipe = self.watch(SIGPIPE) { $0.stop("broken pipe", dyingOf: SIGPIPE) }
+        self.holdsBrokenPipe = self.watch(SIGPIPE) { $0.stop("Broken pipe", dyingOf: SIGPIPE) }
     }
 
     /**
@@ -413,7 +413,7 @@ final class SignalTrap: @unchecked Sendable {
      */
     func brokenPipe() {
         if self.holdsBrokenPipe {
-            self.stop("broken pipe", dyingOf: SIGPIPE)
+            self.stop("Broken pipe", dyingOf: SIGPIPE)
         }
     }
 
@@ -557,9 +557,12 @@ extension Fashion {
     func scan(trapSignals: Bool = false) -> Int32 {
         let jobs = self.resolvedJobs
         let digester = Digester(self)
-        logger.info("run with \(jobs, privacy: .public) job(s) and \(digester.algorithm.rawValue, privacy: .public) algorithm in path(s): \(self.paths.joined(separator: ", "), privacy: .public)")
+
+        let algorithm = digester.algorithm.defaultValueDescription
+        logger.info("\(self.sort ? "Run sorted" : "Run", privacy: .public) with \(String(jobs, pluralizing: "job"), privacy: .public) and \(algorithm, privacy: .public) algorithm in \(String(self.paths.count, pluralizing: "path"), privacy: .public): \(self.paths.joined(separator: ", "), privacy: .public)")
+
         if !digester.targets.isEmpty {
-            logger.info("match digest(s): \(digester.targets.joined(separator: ", "), privacy: .public)")
+            logger.info("Match mode with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(digester.targets.joined(separator: ", "), privacy: .public)")
         }
 
         let console = Console()
@@ -606,7 +609,7 @@ extension Fashion {
         ticker?.cancel()
         ticks.sync {}
 
-        reporter.end("done")
+        reporter.end("Done")
         trap?.restore()
 
         if reporter.errorCount > 0 {

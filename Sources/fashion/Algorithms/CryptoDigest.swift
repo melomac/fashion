@@ -10,7 +10,7 @@ enum CryptoDigestError: Error, LocalizedError {
         case let .unsupported(algorithm):
             String(format: NSLocalizedString("CryptoDigest does not support %@", comment: ""), algorithm.rawValue)
         case let .sizeChanged(expected, actual):
-            String(format: NSLocalizedString("File changed size while hashing (expected %d bytes, read %d)", comment: ""), expected, actual)
+            String(format: NSLocalizedString("File changed size while hashing (expected %@, read %d)", comment: ""), String(expected, pluralizing: "byte"), actual)
         }
     }
 }

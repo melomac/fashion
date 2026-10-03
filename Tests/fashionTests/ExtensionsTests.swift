@@ -25,3 +25,19 @@ final class HexStringTests: XCTestCase {
         XCTAssertEqual(bytes.hexString, "00010203")
     }
 }
+
+// MARK: String+Pluralizing
+
+final class PluralizingTests: XCTestCase {
+    func testRegularPlural() {
+        XCTAssertEqual(String(0, pluralizing: "file"), "0 files")
+        XCTAssertEqual(String(1, pluralizing: "file"), "1 file")
+        XCTAssertEqual(String(2, pluralizing: "file"), "2 files")
+    }
+
+    func testIrregularPlural() {
+        XCTAssertEqual(String(1, pluralizing: "hash", plural: "hashes"), "1 hash")
+        XCTAssertEqual(String(2, pluralizing: "hash", plural: "hashes"), "2 hashes")
+        XCTAssertEqual(String(12345, pluralizing: "entry", plural: "entries"), "12345 entries")
+    }
+}

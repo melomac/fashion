@@ -28,13 +28,13 @@ extension ParserError: LocalizedError {
         case let .truncatedMachHeader(expectedSize, fileSize):
             String(format: NSLocalizedString("Invalid Mach-O: expected a %d-byte header in a %d-byte file", comment: "Truncated thin Mach-O header"), expectedSize, fileSize)
         case let .invalidLoadCommandTable(count, size, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: %u load commands do not form the declared %u-byte table in the %d-byte slice", comment: "Malformed Mach-O load-command table"), count, size, fileSize)
+            String(format: NSLocalizedString("Invalid Mach-O: ncmds %u and sizeofcmds %u do not form a load-command table in the %d-byte slice", comment: "Malformed Mach-O load-command table"), count, size, fileSize)
         case let .invalidFatArchitectureTable(count, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: %u fat architecture entries do not fit in the %d-byte file", comment: "Truncated universal Mach-O architecture table"), count, fileSize)
+            String(format: NSLocalizedString("Invalid Mach-O: nfat_arch %u does not fit in the %d-byte file", comment: "Truncated universal Mach-O architecture table"), count, fileSize)
         case let .invalidFatArchitectureRange(offset, size, fileSize):
             String(format: NSLocalizedString("Invalid Mach-O: fat architecture range at offset %llu with size %llu is outside the %d-byte file", comment: "Malformed universal Mach-O architecture range"), offset, size, fileSize)
         case let .invalidSymbolTableRange(offset, count, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: symbol table at offset %u with %u entries is outside the %d-byte slice", comment: "Malformed Mach-O symbol-table range"), offset, count, fileSize)
+            String(format: NSLocalizedString("Invalid Mach-O: symbol table at offset %u with %@ is outside the %d-byte slice", comment: "Malformed Mach-O symbol-table range"), offset, String(Int(count), pluralizing: "entry", plural: "entries"), fileSize)
         case let .invalidStringTableRange(offset, size, fileSize):
             String(format: NSLocalizedString("Invalid Mach-O: string table at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O string-table range"), offset, size, fileSize)
         case let .invalidStringTableIndex(index, tableSize):
@@ -42,7 +42,7 @@ extension ParserError: LocalizedError {
         case let .invalidCodeSignatureRange(offset, size, fileSize):
             String(format: NSLocalizedString("Invalid Mach-O: code signature range at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O code-signature range"), offset, size, fileSize)
         case let .truncatedCodeSignatureSuperblob(signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature is only %d bytes; an embedded signature header requires 12", comment: "Truncated embedded code-signature header"), signatureSize)
+            String(format: NSLocalizedString("Invalid Mach-O: code signature is only %@; an embedded signature header requires 12", comment: "Truncated embedded code-signature header"), String(signatureSize, pluralizing: "byte"))
         case let .invalidCodeSignatureMagic(magic):
             String(format: NSLocalizedString("Invalid Mach-O: code signature has invalid magic 0x%08x", comment: "Malformed embedded code-signature magic"), magic)
         case let .invalidCodeSignatureSuperblobLength(length, signatureSize):
@@ -54,7 +54,7 @@ extension ParserError: LocalizedError {
         case let .invalidCodeDirectoryMagic(offset, magic):
             String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory at offset %u has invalid magic 0x%08x", comment: "Malformed embedded CodeDirectory magic"), offset, magic)
         case let .truncatedCodeDirectory(offset, length):
-            String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory at offset %u is only %u bytes", comment: "Truncated embedded CodeDirectory"), offset, length)
+            String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory at offset %u is only %@", comment: "Truncated embedded CodeDirectory"), offset, String(Int(length), pluralizing: "byte"))
         case let .invalidCodeDirectoryRange(offset, size, signatureSize):
             String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory range at offset %u with size %u is outside the %d-byte code signature", comment: "Malformed embedded CodeDirectory range"), offset, size, signatureSize)
         }

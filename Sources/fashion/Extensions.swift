@@ -1,5 +1,15 @@
 import Foundation
 
+extension String {
+    /**
+     The count followed by `noun`, or by its `plural` unless the count is one: `String(2, pluralizing: "file")` is
+     "2 files". The plural defaults to `noun` + "s"; pass it for any other noun: `String(2, pluralizing: "hash", plural: "hashes")`.
+     */
+    init(_ count: Int, pluralizing noun: String, plural: String? = nil) {
+        self = "\(count) \(count == 1 ? noun : plural ?? noun + "s")"
+    }
+}
+
 extension Sequence<UInt8> {
     /**
      Lowercase hex encoding via a nibble lookup table.
