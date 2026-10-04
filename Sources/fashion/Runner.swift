@@ -55,7 +55,7 @@ import System
  Signals (command line only):
    SIGINT, SIGTERM  -> reporter.end -> console.close() (never waits) -> die of the signal
    SIGPIPE          -> held back: EPIPE in Console.out -> trap.brokenPipe() -> die of SIGPIPE
-   SIGINFO (^T)     -> reporter.progress() -> "fashion: N files with M errors in T"
+   SIGINFO (^T)     -> reporter.progress() -> "fashion: N files with M errors in T, P peak memory"
  */
 
 private let logger = Logger(subsystem: "fashion", category: "runner")
@@ -297,7 +297,8 @@ final class Output: @unchecked Sendable {
  - diagnostics go to both stderr (for the user and scripts) and the unified log (for a persistent, queryable record),
    and are counted so the process can exit non-zero when any path could not be enumerated or hashed;
  - files are counted as hash threads finish them, for the status line, the progress report on SIGINFO and the end of
-   the run, which is logged exactly once whether the run completes or is interrupted.
+   the run, which is logged exactly once whether the run completes or is interrupted;
+ - the progress report and the end of the run carry the peak memory footprint, which the kernel tracks on its own.
  */
 final class Reporter: @unchecked Sendable {
     private let lock = NSLock()
@@ -338,7 +339,7 @@ final class Reporter: @unchecked Sendable {
     }
 
     /**
-     Report the counts and elapsed time so far to the log and to stderr, like `dd` on `SIGINFO` (⌃T).
+     Report the counts, elapsed time and peak memory so far to the log and to stderr, like `dd` on `SIGINFO` (⌃T).
      */
     func progress() {
         let summary = self.summary(self.lock.withLock { (self.files, self.errors) })
@@ -350,7 +351,8 @@ final class Reporter: @unchecked Sendable {
     }
 
     /**
-     Take the status line off the terminal and log the counts and elapsed time; calls after the first are ignored.
+     Take the status line off the terminal and log the counts, elapsed time and peak memory; calls after the first are
+     ignored.
      */
     func end(_ reason: String) {
         self.console.close()
@@ -372,8 +374,24 @@ final class Reporter: @unchecked Sendable {
      */
     private func summary(_ counts: (files: Int, errors: Int)) -> String {
         let duration = (self.clock.now - self.start).formatted(.units(allowed: [.hours, .minutes, .seconds, .milliseconds], width: .narrow))
+        // Not `.byteCount(style:)`: its formatter adds about 1 ms to every run, and its decimal separator follows the locale.
+        let peak = Self.peakFootprint().map { String(format: ", %.1f MB peak memory", Double($0) / 1_048_576) } ?? ""
 
-        return "\(String(counts.files, pluralizing: "file")) with \(String(counts.errors, pluralizing: "error")) in \(duration)"
+        return "\(String(counts.files, pluralizing: "file")) with \(String(counts.errors, pluralizing: "error")) in \(duration)\(peak)"
+    }
+
+    /**
+     The highest physical footprint of the process so far, the "peak memory footprint" of `/usr/bin/time -l`. The kernel
+     keeps this high-water mark, so a spike between two reports counts even after its memory is freed.
+     */
+    static func peakFootprint() -> Int64? {
+        var info = rusage_info_v4()
+        let status = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0)
+            }
+        }
+        return status == 0 ? Int64(info.ri_lifetime_max_phys_footprint) : nil
     }
 }
 
