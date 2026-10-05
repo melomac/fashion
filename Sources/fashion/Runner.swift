@@ -301,7 +301,11 @@ final class Output: @unchecked Sendable {
  - the progress report and the end of the run carry the peak memory footprint, which the kernel tracks on its own.
  */
 final class Reporter: @unchecked Sendable {
+    /// The counts, which ending the run on a signal reads.
     private let lock = NSLock()
+    /// Keeps stderr lines whole; never held with `lock`, so a stderr write blocked by a reader that stopped reading
+    /// cannot keep a signal from ending the run.
+    private let lineLock = NSLock()
     private let console: Console
     private let clock = ContinuousClock()
     private let start: ContinuousClock.Instant
@@ -327,9 +331,10 @@ final class Reporter: @unchecked Sendable {
 
         let displayPath = OutputFormatter.formatPath(path)
         let displayMessage = OutputFormatter.formatDiagnostic(message)
-        // Under the lock, so lines from concurrent threads never interleave.
         self.lock.withLock {
             self.errors += 1
+        }
+        self.lineLock.withLock {
             self.console.err("fashion: \(displayPath): \(displayMessage)")
         }
     }
@@ -345,7 +350,7 @@ final class Reporter: @unchecked Sendable {
         let summary = self.summary(self.lock.withLock { (self.files, self.errors) })
         logger.info("Progress: \(summary, privacy: .public)")
 
-        self.lock.withLock {
+        self.lineLock.withLock {
             self.console.err("fashion: \(summary)")
         }
     }

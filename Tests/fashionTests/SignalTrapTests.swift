@@ -95,7 +95,7 @@ final class SignalTrapTests: XCTestCase {
         return (process.terminationReason, process.terminationStatus, String(decoding: output, as: UTF8.self))
     }
 
-    func testSIGTERMEndsTheRunWhileStdoutIsBlocked() throws {
+    func testSigTermEndsTheRunWhileStdOutIsBlocked() throws {
         // A reader that stops reading blocks the stdout write: SIGTERM must still end the run, as without the trap.
         let binary = try fashionExecutable()
         let directory = FileManager.default.temporaryDirectory / UUID().uuidString
@@ -112,7 +112,33 @@ final class SignalTrapTests: XCTestCase {
         process.arguments = [directory.path]
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
+        try self.assertSigTermEnds(process, blocking: stdout, "stdout")
+    }
+
+    func testSigTermEndsTheRunWhileStdErrIsBlocked() throws {
+        // A reader that stops reading blocks the stderr write of a diagnostic: SIGTERM must still end the run.
+        let binary = try fashionExecutable()
+        // Lines of about 150 bytes: 2000 missing paths overflow a 64 KiB pipe.
+        let missing = (0 ..< 2000).map { "/nonexistent-\(String(repeating: "x", count: 100))/\($0)" }
+
+        let stderr = Pipe() // never read
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = missing
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = stderr
+        try self.assertSigTermEnds(process, blocking: stderr, "stderr")
+    }
+
+    /**
+     Run `process`, send it SIGTERM once its output has had time to fill `pipe`, which nobody reads, and require that it
+     dies of the signal within five seconds.
+     */
+    private func assertSigTermEnds(_ process: Process, blocking pipe: Pipe, _ stream: String) throws {
         try process.run()
+        // Output means the run, and with it the signal trap, is under way: a signal sent before that would only meet the
+        // default action. Then give the writer time to fill the pipe and block.
+        _ = pipe.fileHandleForReading.readData(ofLength: 1)
         usleep(500_000)
         process.terminate()
 
@@ -123,7 +149,7 @@ final class SignalTrapTests: XCTestCase {
         guard !process.isRunning else {
             kill(process.processIdentifier, SIGKILL)
             process.waitUntilExit()
-            return XCTFail("SIGTERM did not end the run while stdout was blocked")
+            return XCTFail("SIGTERM did not end the run while \(stream) was blocked")
         }
         XCTAssertEqual(process.terminationReason, .uncaughtSignal)
         XCTAssertEqual(process.terminationStatus, SIGTERM)
