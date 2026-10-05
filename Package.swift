@@ -2,6 +2,13 @@
 
 import PackageDescription
 
+// TLSH's layout depends on these defines, so its library and the wrapper that includes its headers must share them.
+let tlshSettings: [CXXSetting] = [
+    .headerSearchPath("../../submodules/tlsh/include"),
+    .define("BUCKETS_128"),
+    .define("CHECKSUM_1B"),
+]
+
 let package = Package(
     name: "fashion",
     platforms: [
@@ -11,113 +18,22 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
     ],
     targets: [
+        // CSSDeep and CTLSH compile the submodules' sources through one-line includes, so the headers SwiftPM needs
+        // are tracked here: it runs neither ssdeep's autotools nor TLSH's CMake.
         .target(
             name: "CSSDeep",
-            path: "submodules/ssdeep",
-            exclude: [
-                "AUTHORS",
-                "COPYING",
-                "ChangeLog",
-                "FILEFORMAT",
-                "Makefile.am",
-                "NEWS",
-                "README",
-                "TODO",
-                "configure.ac",
-                "m4",
-                "sample.c",
-                "Doxyfile",
-                "INSTALL",
-                "bootstrap",
-                "normal.sh",
-                "test-against-old.sh",
-                "win.sh",
-                "world.sh",
-                "cycles.cpp",
-                "dig.cpp",
-                "engine.cpp",
-                "filedata.cpp",
-                "find-file-size.c",
-                "helpers.cpp",
-                "main.cpp",
-                "match.cpp",
-                "ui.cpp",
-            ],
-            sources: [
-                "fuzzy.c",
-                "edit_dist.c",
-            ],
-            publicHeadersPath: "include",
-            cSettings: [
-                .headerSearchPath("."),
-            ],
         ),
         .target(
             name: "CTLSH",
-            path: "submodules/tlsh",
-            exclude: [
-                "CMakeLists.txt",
-                "LICENSE",
-                "README.md",
-                "README.mingw",
-                "README.python",
-                "README.windows",
-                "NOTICE.txt",
-                "PUBLIC.txt",
-                "Change_History.md",
-                "Testing",
-                "test",
-                "js_ext",
-                "py_ext",
-                "java",
-                "Windows",
-                "mingw",
-                "docs",
-                "register",
-                "tlshCluster",
-                "tlsh_bh_tool",
-                "utils",
-                "clean.sh",
-                "clean_mingw.bat",
-                "make.sh",
-                "make_mingw.bat",
-                "2015_Euro_DFRWS_Criteria_Sim_Digests.pdf",
-                "Attacking_LSH_and_Sim_Dig.pdf",
-                "DFRWS_Similarity_Digests.pdf",
-                "TLSH_CTC_final.pdf",
-                "TLSH_Introduction.pdf",
-                "src/CMakeLists.txt",
-                "src/gen_arr2.cpp",
-                "src/input_desc.cpp",
-                "src/shared_file_functions.cpp",
-                "public",
-            ],
-            sources: [
-                "src/tlsh.cpp",
-                "src/tlsh_impl.cpp",
-                "src/tlsh_util.cpp",
-            ],
-            publicHeadersPath: "include",
-            cxxSettings: [
-                .headerSearchPath("include"),
-                .define("BUCKETS_128"),
-                .define("CHECKSUM_1B"),
-            ],
+            cxxSettings: tlshSettings,
         ),
         .target(
             name: "CTLSHWrapper",
             dependencies: ["CTLSH"],
-            path: "Sources/CTLSHWrapper",
-            publicHeadersPath: "include",
-            cxxSettings: [
-                .headerSearchPath("../../submodules/tlsh/include"),
-                .define("BUCKETS_128"),
-                .define("CHECKSUM_1B"),
-            ],
+            cxxSettings: tlshSettings,
         ),
         .target(
             name: "CMachOCompat",
-            path: "Sources/CMachOCompat",
         ),
         .executableTarget(
             name: "fashion",
@@ -127,12 +43,10 @@ let package = Package(
                 "CSSDeep",
                 "CTLSHWrapper",
             ],
-            path: "Sources/fashion",
         ),
         .testTarget(
             name: "fashionTests",
             dependencies: ["fashion"],
-            path: "Tests/fashionTests",
         ),
     ],
 )
