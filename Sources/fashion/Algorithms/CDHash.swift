@@ -5,6 +5,40 @@ import os
 
 private let logger = Logger(subsystem: "fashion", category: "cdhash")
 
+enum CDHashError: Error, Equatable {
+    case invalidCodeSignatureRange(offset: UInt32, size: UInt32, fileSize: Int)
+    case truncatedCodeSignatureSuperblob(signatureSize: Int)
+    case invalidCodeSignatureMagic(magic: UInt32)
+    case invalidCodeSignatureSuperblobLength(length: UInt32, signatureSize: Int)
+    case invalidCodeSignatureIndexTable(count: UInt32, length: UInt32)
+    case invalidCodeSignatureBlobOffset(offset: UInt32, signatureSize: Int)
+    case invalidCodeSignatureBlobRange(offset: UInt32, size: UInt32, signatureSize: Int)
+    case codeDirectoryTooLarge(length: Int)
+}
+
+extension CDHashError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case let .invalidCodeSignatureRange(offset, size, fileSize):
+            String(format: NSLocalizedString("Invalid Mach-O: code signature range at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O code-signature range"), offset, size, fileSize)
+        case let .truncatedCodeSignatureSuperblob(signatureSize):
+            String(format: NSLocalizedString("Invalid Mach-O: code signature is only %@; an embedded signature header requires 12", comment: "Truncated embedded code-signature header"), String(signatureSize, pluralizing: "byte"))
+        case let .invalidCodeSignatureMagic(magic):
+            String(format: NSLocalizedString("Invalid Mach-O: code signature has invalid magic 0x%08x", comment: "Malformed embedded code-signature magic"), magic)
+        case let .invalidCodeSignatureSuperblobLength(length, signatureSize):
+            String(format: NSLocalizedString("Invalid Mach-O: code signature declares a %u-byte superblob inside a %d-byte signature", comment: "Malformed embedded code-signature superblob length"), length, signatureSize)
+        case let .invalidCodeSignatureIndexTable(count, length):
+            String(format: NSLocalizedString("Invalid Mach-O: code signature index count %u does not fit in the %u-byte superblob", comment: "Malformed embedded code-signature index table"), count, length)
+        case let .invalidCodeSignatureBlobOffset(offset, signatureSize):
+            String(format: NSLocalizedString("Invalid Mach-O: code signature blob offset %u is outside the %d-byte superblob", comment: "Malformed embedded code-signature blob offset"), offset, signatureSize)
+        case let .invalidCodeSignatureBlobRange(offset, size, signatureSize):
+            String(format: NSLocalizedString("Invalid Mach-O: code signature blob at offset %u with size %u is outside the %d-byte superblob", comment: "Malformed embedded code-signature blob range"), offset, size, signatureSize)
+        case let .codeDirectoryTooLarge(length):
+            String(format: NSLocalizedString("Mach-O too large: its %ld-byte ad-hoc CodeDirectory would overflow the 32-bit length field", comment: "Ad-hoc CodeDirectory too large to synthesize"), length)
+        }
+    }
+}
+
 /**
  Compute CDHash (Code Directory Hash) for each slice of a Mach-O binary.
 
@@ -104,134 +138,134 @@ extension MachOSlice {
     /**
      The slice's cdhashes, or the reason it has none (`skipReason` is set exactly when `hashes` is empty).
 
-     A signed slice yields every embedded code directory, strongest first per hashRank: the head is the
-     kernel-enforced cdhash.
+     A signed slice yields every code directory Security loads from its signature, strongest first per hashRank: the
+     head is the kernel-enforced cdhash.
 
      An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1), unless its filetype is one
-     `codesign` signs as a generic file rather than as code.
+     `codesign` signs as a generic file rather than as code. So does a signed slice whose code directories Security
+     rejects: `codesign` calls it "not signed at all" and signs it up to where its signature starts, the code limit of
+     `MachORep::signingLimit`. A signature Security cannot read at all is an error, as `codesign` cannot sign over it.
 
      A slice of a universal file is judged on its own, as if extracted: `codesign` instead decides a whole 32-bit
      universal file from its first slice, and treats a 64-bit one (`lipo -fat64`) as a generic file outright.
      */
     func codeDirectoryHashes(exact: Bool) throws -> (hashes: [CodeDirectoryHash], skipReason: String?) {
-        // Only a slice with no signature at all falls back to the ad-hoc identity: a signed slice with an
-        // unreadable signature yields nothing, as the ad-hoc cdhash only describes unsigned code.
-        if let sigRange = try self.codeSignatureRange() {
-            let hashes = try self.embeddedCodeDirectories(in: sigRange)
-            return (hashes, hashes.isEmpty ? "signature has no code directory with a known hash type" : nil)
+        let signature = try self.findCodeSignature()
+        if let signature {
+            let hashes = try Self.loadCodeDirectories(self.signingData(signature))
+                .sorted { Self.hashRank($0.hashType) > Self.hashRank($1.hashType) }
+                .compactMap { cd in
+                    Self.digest(codeDirectory: cd.data, hashType: cd.hashType).map { CodeDirectoryHash(hash: $0, type: Self.typeName(cd.hashType), adhoc: false) }
+                }
+            if !hashes.isEmpty {
+                return (hashes, nil)
+            }
         }
 
         guard Self.codeFiletypes.contains(self.filetype) else {
             return ([], "\(self.filetypeName) is not code to codesign")
         }
 
-        return (self.adhocCDHashes(codeLimit: exact ? self.logicalEnd() : self.data.count), nil)
+        return try (self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.data.count)), nil)
     }
 
     // MARK: - Embedded signature
 
-    private func embeddedCodeDirectories(in sigRange: Range<Int>) throws -> [CodeDirectoryHash] {
-        let signature = Data(self.data.bytes(in: sigRange))
+    /**
+     The superblob `LC_CODE_SIGNATURE` points at, read like `MachORep::signingData`: `BlobCore::readBlob` requires its
+     magic and a length that fits the slice and, unless the command's size is zero, that size; then
+     `EmbeddedSignatureBlob::specific` requires every blob it indexes to lie inside it. Throws otherwise.
+     */
+    private func signingData(_ signature: (offset: Int, size: Int)) throws -> Data {
+        let (offset, size) = signature
+        guard offset <= self.data.count - 8 else {
+            throw CDHashError.invalidCodeSignatureRange(offset: UInt32(offset), size: UInt32(size), fileSize: self.data.count)
+        }
 
-        return try Self.parseCodeDirectories(signature: signature)
-            .sorted { Self.hashRank($0.hashType) > Self.hashRank($1.hashType) }
-            .compactMap { cd in
-                guard let digest = Self.digest(codeDirectory: cd.data, hashType: cd.hashType) else {
-                    return nil
-                }
-                return CodeDirectoryHash(hash: digest, type: Self.typeName(cd.hashType), adhoc: false)
+        let header = self.data.bytes(in: offset ..< offset + 8)
+        let (magic, length) = (header.bigEndianUInt32(at: 0), header.bigEndianUInt32(at: 4))
+        guard magic == Self.csmagicEmbeddedSignature else {
+            throw CDHashError.invalidCodeSignatureMagic(magic: magic)
+        }
+        guard length >= 12 else {
+            throw CDHashError.truncatedCodeSignatureSuperblob(signatureSize: Int(length))
+        }
+        guard
+            size == 0 || Int(length) <= size,
+            Int(length) <= self.data.count - offset
+        else {
+            throw CDHashError.invalidCodeSignatureSuperblobLength(length: length, signatureSize: size)
+        }
+
+        let superblob = Data(self.data.bytes(in: offset ..< offset + Int(length)))
+        let count = superblob.bigEndianUInt32(at: 8)
+        let indexEnd = 12 + 8 * Int(count)
+        guard indexEnd <= superblob.count else {
+            throw CDHashError.invalidCodeSignatureIndexTable(count: count, length: length)
+        }
+
+        for entry in 0 ..< Int(count) {
+            let blobOffset = superblob.bigEndianUInt32(at: 12 + 8 * entry + 4)
+            guard blobOffset != 0 else {
+                continue
             }
+            guard
+                Int(blobOffset) >= indexEnd,
+                Int(blobOffset) <= superblob.count - 8
+            else {
+                throw CDHashError.invalidCodeSignatureBlobOffset(offset: blobOffset, signatureSize: superblob.count)
+            }
+
+            let blobLength = superblob.bigEndianUInt32(at: Int(blobOffset) + 4)
+            guard
+                blobLength >= 8,
+                Int(blobLength) <= superblob.count - Int(blobOffset)
+            else {
+                throw CDHashError.invalidCodeSignatureBlobRange(offset: blobOffset, size: blobLength, signatureSize: superblob.count)
+            }
+        }
+
+        return superblob
     }
 
     /**
-     Every code directory in an embedded signature blob (primary slot plus alternates).
+     The code directories Security loads (`SecStaticCode::loadCodeDirectories`): the primary slot's, then the
+     alternates' from 0x1000 up to the first one missing. Empty, so that the slice counts as unsigned, when the primary
+     is missing, when any of them fails the checks of `EmbeddedCodeDirectory`, or when two share a hash type.
      */
-    private static func parseCodeDirectories(signature: Data) throws -> [EmbeddedCodeDirectory] {
-        guard signature.count >= 12 else {
-            throw ParserError.truncatedCodeSignatureSuperblob(signatureSize: signature.count)
+    private static func loadCodeDirectories(_ superblob: Data) -> [EmbeddedCodeDirectory] {
+        var directories: [EmbeddedCodeDirectory] = []
+        for slot in [self.csslotCodeDirectory] + Array(self.csslotAlternateBase ..< self.csslotAlternateLimit) {
+            guard let blob = self.component(slot, of: superblob) else {
+                break
+            }
+            guard
+                let directory = EmbeddedCodeDirectory(blob),
+                !directories.contains(where: { $0.hashType == directory.hashType })
+            else {
+                return []
+            }
+            directories.append(directory)
         }
 
-        let (magic, length, count) = signature.withUnsafeBytes { ptr -> (UInt32, UInt32, UInt32) in
-            (
-                UInt32(bigEndian: ptr.loadUnaligned(as: UInt32.self)),
-                UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt32.self)),
-                UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 8, as: UInt32.self)),
-            )
-        }
-
-        guard magic == self.csmagicEmbeddedSignature else {
-            throw ParserError.invalidCodeSignatureMagic(magic: magic)
-        }
-
-        let superblobLength = Int(length)
-        guard
-            superblobLength >= 12,
-            superblobLength <= signature.count
-        else {
-            throw ParserError.invalidCodeSignatureSuperblobLength(length: length, signatureSize: signature.count)
-        }
-
-        let indexBase = 12
-        guard Int(count) <= (superblobLength - indexBase) / 8 else {
-            throw ParserError.invalidCodeSignatureIndexTable(count: count, length: length)
-        }
-
-        // LC_CODE_SIGNATURE may include padding after the superblob. Every index and nested blob is
-        // relative to, and bounded by, the superblob's own declared length.
-        let superblob = Data(signature.prefix(superblobLength))
-        var results: [EmbeddedCodeDirectory] = []
-
-        for entryIndex in 0 ..< Int(count) {
-            let entryOffset = indexBase + entryIndex * 8
-
-            let (slotType, blobOffset) = superblob.withUnsafeBytes { ptr -> (UInt32, UInt32) in
-                (
-                    UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entryOffset, as: UInt32.self)),
-                    UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entryOffset + 4, as: UInt32.self)),
-                )
-            }
-
-            guard slotType == self.csslotCodeDirectory || (slotType >= self.csslotAlternateBase && slotType < self.csslotAlternateLimit) else {
-                continue
-            }
-
-            let off = Int(blobOffset)
-            guard off <= superblob.count - 12 else {
-                throw ParserError.invalidCodeDirectoryOffset(offset: blobOffset, signatureSize: superblob.count)
-            }
-
-            let (blobMagic, blobLength) = superblob.withUnsafeBytes { ptr -> (UInt32, UInt32) in
-                (
-                    UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: off, as: UInt32.self)),
-                    UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: off + 4, as: UInt32.self)),
-                )
-            }
-
-            guard blobMagic == self.csmagicCodeDirectory else {
-                throw ParserError.invalidCodeDirectoryMagic(offset: blobOffset, magic: blobMagic)
-            }
-
-            guard blobLength >= 38 else {
-                throw ParserError.truncatedCodeDirectory(offset: blobOffset, length: blobLength)
-            }
-            let blobEnd = off + Int(blobLength)
-            guard blobEnd <= superblob.count else {
-                throw ParserError.invalidCodeDirectoryRange(offset: blobOffset, size: blobLength, signatureSize: superblob.count)
-            }
-
-            // hashType is at offset 37 in the CodeDirectory structure; require it to lie within the blob's
-            // own declared length, not merely within the signature, so a short blob cannot borrow a byte
-            // from the next one.
-            let hashType = superblob.withUnsafeBytes { ptr -> UInt8 in
-                ptr.loadUnaligned(fromByteOffset: off + 37, as: UInt8.self)
-            }
-
-            results.append(EmbeddedCodeDirectory(data: Data(superblob[off ..< blobEnd]), hashType: hashType))
-        }
-
-        return results
+        return directories
     }
 
+    /**
+     The blob a superblob holds in `slot`, like `SuperBlob::find`: the first index entry of that type, nil when there is
+     none or its offset is zero. `signingData` has checked that the blob lies inside the superblob.
+     */
+    private static func component(_ slot: UInt32, of superblob: Data) -> Data? {
+        for entry in 0 ..< Int(superblob.bigEndianUInt32(at: 8)) where superblob.bigEndianUInt32(at: 12 + 8 * entry) == slot {
+            let offset = Int(superblob.bigEndianUInt32(at: 12 + 8 * entry + 4))
+            return offset == 0 ? nil : superblob.bytes(in: offset ..< offset + Int(superblob.bigEndianUInt32(at: offset + 4)))
+        }
+        return nil
+    }
+
+    /**
+     The cdhash: the directory digested under its own hash type.
+     */
     private static func digest(codeDirectory blob: Data, hashType: UInt8) -> String? {
         switch hashType {
         case self.csHashTypeSHA1:
@@ -241,9 +275,25 @@ extension MachOSlice {
             SHA256.hash(data: blob).hexString
         case self.csHashTypeSHA384:
             SHA384.hash(data: blob).hexString
+        case self.csHashTypeSHA512:
+            SHA512.hash(data: blob).hexString
         default:
-            // Unknown hash types rank 0 and are filtered before selection.
             nil
+        }
+    }
+
+    /**
+     The width of one hash slot of `hashType`, like the hasher `CodeDirectory::hashFor` makes; nil for a type it does not
+     know.
+     */
+    fileprivate static func slotSize(_ hashType: UInt8) -> Int? {
+        switch hashType {
+        case self.csHashTypeSHA1: Insecure.SHA1.byteCount
+        case self.csHashTypeSHA256: SHA256.byteCount
+        case self.csHashTypeSHA256Truncated: 20
+        case self.csHashTypeSHA384: SHA384.byteCount
+        case self.csHashTypeSHA512: SHA512.byteCount
+        default: nil
         }
     }
 
@@ -253,16 +303,18 @@ extension MachOSlice {
         case self.csHashTypeSHA256: "sha256"
         case self.csHashTypeSHA256Truncated: "sha256t"
         case self.csHashTypeSHA384: "sha384"
+        case self.csHashTypeSHA512: "sha512"
         default: "unknown"
         }
     }
 
     /**
-     Selection order among code directories, mirroring xnu (`bsd/kern/ubc_subr.c`): higher rank wins, 0 => don't use at all.
+     Order among code directories, higher first, as xnu chooses (`bsd/kern/ubc_subr.c`). SHA-512, which Security loads but
+     xnu does not know, comes last.
      */
     private static func hashRank(_ hashType: UInt8) -> Int {
-        [self.csHashTypeSHA1, self.csHashTypeSHA256Truncated, self.csHashTypeSHA256, self.csHashTypeSHA384]
-            .firstIndex(of: hashType).map { $0 + 1 } ?? 0
+        [self.csHashTypeSHA512, self.csHashTypeSHA1, self.csHashTypeSHA256Truncated, self.csHashTypeSHA256, self.csHashTypeSHA384]
+            .firstIndex(of: hashType) ?? -1
     }
 
     // MARK: - Ad-hoc synthesis
@@ -276,12 +328,14 @@ extension MachOSlice {
      then the SHA-1 cdhash (`CandidateCDHashFull sha1`).
 
      While we print the full hash, we can match the truncated 20-byte cdhash too. Code covers `codeLimit` bytes:
-     the whole slice, or its logical extent under `exact`.
+     the whole slice, its logical extent under `exact`, or what precedes a signature Security rejects.
+
+     Throws where Security fails to sign: for a version or segment command it cannot read, or a directory too large.
      */
-    private func adhocCDHashes(codeLimit: Int) -> [CodeDirectoryHash] {
+    private func adhocCDHashes(codeLimit: Int) throws -> [CodeDirectoryHash] {
         // Security's Signer::populate: fill a CodeDirectory::Builder with what MachORep reports.
-        let execSeg = self.execSeg()
-        let builder = CodeDirectoryBuilder(
+        let execSeg = try self.execSeg()
+        let builder = try CodeDirectoryBuilder(
             codeLimit: codeLimit,
             pageSizeLog: self.pageSizeLog(),
             execSegBase: execSeg.base,
@@ -290,8 +344,8 @@ extension MachOSlice {
             specialSlots: [1: self.infoPlist(), 2: Self.emptyRequirementsBlob].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
         )
 
-        return [AdhocHashType.sha256, .sha1].map { hashType in
-            let cd = builder.build(hashType: hashType, code: self.data)
+        return try [AdhocHashType.sha256, .sha1].map { hashType in
+            let cd = try builder.build(hashType: hashType, code: self.data)
             return CodeDirectoryHash(hash: hashType.hexDigest(cd), type: hashType.name, adhoc: true)
         }
     }
@@ -301,12 +355,12 @@ extension MachOSlice {
      4 KiB on tvOS, iOS before 16 and watchOS before 9 (the declared minimum OS, not the SDK); 4 KiB for every other
      architecture.
      */
-    private func pageSizeLog() -> UInt8 {
+    private func pageSizeLog() throws -> UInt8 {
         guard [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(self.cpuType) else {
             return 12
         }
 
-        let version = self.version()
+        let version = try self.version()
         let minOS = version?.minOS ?? 0
         return switch version?.platform {
         case PLATFORM_TVOS: 12
@@ -323,10 +377,10 @@ extension MachOSlice {
      The range is read as the file stores it, without byte-swapping, so a big-endian slice (ppc, ppc64) gets it
      byte-reversed: a 0x1000-byte ppc `__TEXT` is recorded as 0x100000. The ad-hoc identity carries that quirk too.
      */
-    private func execSeg() -> (base: UInt64, limit: UInt64) {
+    private func execSeg() throws -> (base: UInt64, limit: UInt64) {
         guard
-            (self.version()?.platform ?? 0) != 0,
-            let text = self.findSegment("__TEXT")
+            try (self.version()?.platform ?? 0) != 0,
+            let text = try self.findSegment("__TEXT")
         else {
             return (0, 0)
         }
@@ -340,22 +394,27 @@ extension MachOSlice {
 
     /**
      The Info.plist embedded in `__TEXT,__info_plist`, like `MachORep::infoPlist`: the section's bytes, whatever they
-     hold, or nil. On a big-endian slice (ppc, ppc64) `codesign` bounds the section table with the unswapped section
-     count, so it never finds the section.
+     hold, or nil. As in `MachOBase::findSection`, a segment command too short for the section table it declares holds
+     no section; a section past the slice's end, which `MachO::dataAt` fails to read, is no Info.plist to `codesign`
+     either. On a big-endian slice (ppc, ppc64) `codesign` bounds the section table with the unswapped section count, so
+     it never finds the section.
      */
-    private func infoPlist() -> Data? {
+    private func infoPlist() throws -> Data? {
         guard
             !self.swap,
-            let text = self.findSegment("__TEXT")
+            let text = try self.findSegment("__TEXT")
         else {
             return nil
         }
 
-        let (headerSize, sectionSize, count) = self.is64
-            ? (MemoryLayout<segment_command_64>.size, MemoryLayout<section_64>.size, text.payload(as: segment_command_64.self)?.nsects ?? 0)
-            : (MemoryLayout<segment_command>.size, MemoryLayout<section>.size, text.payload(as: segment_command.self)?.nsects ?? 0)
+        let (headerSize, sectionSize, count) = try self.is64
+            ? (MemoryLayout<segment_command_64>.size, MemoryLayout<section_64>.size, text.load(segment_command_64.self).nsects)
+            : (MemoryLayout<segment_command>.size, MemoryLayout<section>.size, text.load(segment_command.self).nsects)
+        guard headerSize + Int(count) * sectionSize <= text.data.count else {
+            return nil
+        }
 
-        for index in 0 ..< min(Int(count), (text.data.count - headerSize) / sectionSize) {
+        for index in 0 ..< Int(count) {
             let at = headerSize + index * sectionSize
             guard Self.name(of: text.data.dropFirst(at).prefix(16)) == "__info_plist" else {
                 continue
@@ -407,6 +466,7 @@ extension MachOSlice {
     private static let csHashTypeSHA256: UInt8 = 2
     private static let csHashTypeSHA256Truncated: UInt8 = 3
     private static let csHashTypeSHA384: UInt8 = 4
+    private static let csHashTypeSHA512: UInt8 = 5
 
     // Filetypes codesign signs as Mach-O code; it signs any other one as a generic file (`Format=generic`).
     private static let codeFiletypes = [
@@ -424,6 +484,104 @@ extension MachOSlice {
 private struct EmbeddedCodeDirectory {
     let data: Data
     let hashType: UInt8
+
+    /**
+     A code directory Security accepts, with the checks `SecStaticCode::loadCodeDirectories` makes: its header holds
+     every field its version declares (`CodeDirectory::validateBlob`), that version is one Security reads, its hash type
+     one it knows with slots of that hash's width, its identifier and team strings end inside it, its hash slots,
+     pre-encryption slots and scatter vector lie inside it, and its code slots cover its code limit page by page. Nil
+     otherwise. Unlike the kernel, Security does not check the magic.
+     */
+    init?(_ blob: Data) {
+        let length = blob.count
+        guard length >= 12 else {
+            return nil
+        }
+
+        let version = blob.bigEndianUInt32(at: 8)
+        guard
+            CodeDirectoryBuilder.headerSize(version: version) <= length,
+            0x20001 ... 0x2f000 ~= version
+        else {
+            return nil
+        }
+
+        let (hashSize, hashType, pageSizeLog) = blob.withUnsafeBytes { raw -> (Int, UInt8, UInt8) in (Int(raw[36]), raw[37], raw[39]) }
+        guard MachOSlice.slotSize(hashType) == hashSize else {
+            return nil
+        }
+
+        func endsInside(_ offset: UInt32) -> Bool {
+            Int(offset) < length && blob.bytes(in: Int(offset) ..< length).contains(0)
+        }
+        guard
+            endsInside(blob.bigEndianUInt32(at: 20)), // identOffset
+            version < 0x20200 || blob.bigEndianUInt32(at: 48) == 0 || endsInside(blob.bigEndianUInt32(at: 48)) // teamOffset
+        else {
+            return nil
+        }
+
+        // Special slots precede hashOffset, code slots follow it; pre-encryption hashes have a code slot each.
+        let hashOffset = Int(blob.bigEndianUInt32(at: 16))
+        let nSpecialSlots = Int(blob.bigEndianUInt32(at: 24))
+        let nCodeSlots = Int(blob.bigEndianUInt32(at: 28))
+        let preEncryptOffset = version >= 0x20500 ? Int(blob.bigEndianUInt32(at: 92)) : 0
+        guard
+            hashOffset - hashSize * nSpecialSlots >= 8,
+            hashOffset + hashSize * nCodeSlots <= length,
+            preEncryptOffset == 0 || (preEncryptOffset >= 8 && preEncryptOffset + hashSize * nCodeSlots <= length)
+        else {
+            return nil
+        }
+
+        // The scatter vector runs to an entry of zero pages, and its last page needs a hash slot. Security computes that
+        // slot's position with a 32-bit product, sign-extended.
+        let scatterOffset = version >= 0x20100 ? Int(blob.bigEndianUInt32(at: 44)) : 0
+        if scatterOffset != 0 {
+            var entry = scatterOffset
+            var pages: UInt32 = 0
+            while true {
+                guard
+                    entry >= 8,
+                    entry + 24 <= length
+                else {
+                    return nil
+                }
+                let count = blob.bigEndianUInt32(at: entry)
+                entry += 24
+                if count == 0 {
+                    break
+                }
+                pages &+= count
+            }
+
+            let lastSlot = Int(Int32(bitPattern: (pages &- 1) &* UInt32(hashSize)))
+            for base in [hashOffset] + (preEncryptOffset != 0 ? [preEncryptOffset] : []) {
+                guard
+                    base + lastSlot >= 8,
+                    base + lastSlot + hashSize <= length
+                else {
+                    return nil
+                }
+            }
+        }
+
+        // One code slot per page of the code limit, or a single slot when the directory is not paged. A shift counts
+        // modulo 64, as on the hardware Security runs on.
+        let codeLimit64 = version >= 0x20300 ? blob.bigEndianUInt64(at: 56) : 0
+        let codeLimit = codeLimit64 != 0 ? codeLimit64 : UInt64(blob.bigEndianUInt32(at: 32))
+        let codeSlots: UInt64? = if pageSizeLog != 0 {
+            codeLimit == 0 ? nil : ((codeLimit - 1) &>> UInt64(pageSizeLog)) + 1
+        } else {
+            codeLimit == 0 ? 0 : 1
+        }
+        guard codeSlots == UInt64(nCodeSlots) else {
+            return nil
+        }
+
+        self.data = blob
+        self.hashType = hashType
+    }
 }
 
 /**
@@ -450,16 +608,20 @@ private struct CodeDirectoryBuilder {
         return 0x20100
     }
 
-    /// `Builder::size`'s fixed header size: each version appends fields to the previous one.
+    /// `Builder::size`'s fixed header size, which `CodeDirectory::validateBlob` requires of an embedded directory too:
+    /// each version appends fields to the previous one.
     static func headerSize(version: UInt32) -> Int {
         switch version {
+        case 0x20500...: 0x60 // runtime, preEncryptOffset
         case 0x20400...: 0x58 // execSegBase, execSegLimit, execSegFlags
-        case 0x20300...: 0x40 // teamOffset (0x20200), spare3, codeLimit64
-        default: 0x30 // through scatterOffset
+        case 0x20300...: 0x40 // spare3, codeLimit64
+        case 0x20200...: 0x34 // teamOffset
+        case 0x20100...: 0x30 // scatterOffset
+        default: 0x2c // through spare2
         }
     }
 
-    func build(hashType: AdhocHashType, code: Data) -> Data {
+    func build(hashType: AdhocHashType, code: Data) throws -> Data {
         let pageSize = 1 << Int(self.pageSizeLog)
         let hashSize = hashType.digestSize
         let nSpecialSlots = self.specialSlots.keys.max() ?? 0
@@ -469,10 +631,16 @@ private struct CodeDirectoryBuilder {
         let hashOffset = identOffset + identifier.count + nSpecialSlots * hashSize
         let length = hashOffset + nCodeSlots * hashSize
 
+        // Builder::build only refuses more than 2^32 code slots and truncates a longer length into its 32-bit field:
+        // refuse any directory that does not fit rather than build a truncated one.
+        guard let length32 = UInt32(exactly: length) else {
+            throw CDHashError.codeDirectoryTooLarge(length: length)
+        }
+
         // Every field up to execSegFlags; the version keeps the prefix its header holds.
         var header = Data()
         header.appendBigEndian(MachOSlice.csmagicCodeDirectory) // magic
-        header.appendBigEndian(UInt32(length)) // length
+        header.appendBigEndian(length32) // length
         header.appendBigEndian(self.version) // version
         header.appendBigEndian(UInt32(2)) // flags: CS_ADHOC
         header.appendBigEndian(UInt32(hashOffset)) // hashOffset
@@ -574,5 +742,15 @@ private extension Data {
 
     mutating func appendBigEndian(_ value: UInt64) {
         Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
+    }
+
+    /// The big-endian integer at `offset`, counted from the first byte.
+    func bigEndianUInt32(at offset: Int) -> UInt32 {
+        self.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self)) }
+    }
+
+    /// The big-endian integer at `offset`, counted from the first byte.
+    func bigEndianUInt64(at offset: Int) -> UInt64 {
+        self.withUnsafeBytes { UInt64(bigEndian: $0.loadUnaligned(fromByteOffset: offset, as: UInt64.self)) }
     }
 }

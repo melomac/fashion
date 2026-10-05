@@ -72,11 +72,13 @@ $ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quie
 #### CDHash
 
 Compute the Code Directory hash of Mach-O binaries, one digest per code directory, strongest first as ranked by [XNU][].
-Dual-signed binaries emit one line per candidate, labeled with the hash type (`sha1`, `sha256`, `sha256t`, `sha384`).
+Dual-signed binaries emit one line per candidate, labeled with the hash type (`sha1`, `sha256`, `sha256t`, `sha384`, `sha512`).
 While we print the full hash, we can match any CDHashFull or truncated CDHash.
 
 Unsigned slices are not skipped: `fashion` synthesizes their **ad-hoc CodeDirectory hash** and labels the line `ADHOC`.
 This is the identity `syspolicyd` computes for unsigned code and notarization revocation, byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`.
+A signature whose code directories Security.framework rejects counts as none, as `codesign` calls it "not signed at all": the ad-hoc identity then covers the code up to the signature.
+
 Mach-O files that are not code to `codesign` — objects, dSYMs, core dumps, kernel filesets — have no such identity and yield no line.
 
 ### Quiet flag
@@ -130,7 +132,7 @@ A slice the running OS cannot name yet falls back to a built-in table (`arm64e.x
 ### Exact flag
 
 Some malware families append garbage data after the Mach-O structure to evade hash based detection.
-With the `--exact` flag, we hash only the Mach-O image — up to the end of its `__LINKEDIT` segment (or symbol table strings), where `codesign` expects the file to end — so the same payload padded with different trailing junk collapses to one digest:
+With the `--exact` flag, we hash only the Mach-O image — up to the end of its `__LINKEDIT` segment or symbol table strings, whichever its load commands declare first, where `codesign` expects the file to end — so the same payload padded with different trailing junk collapses to one digest:
 
 ```console
 $ fashion prostorify.com/*/bin/Pods
@@ -143,7 +145,7 @@ eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com
 ```
 
 `--exact` works with any algorithm and combines with `--slices` to trim each architecture of a universal binary.
-Non-Mach-O files are hashed whole, and if a binary carries a load command we don't account for, `fashion` hashes the entire file rather than risk dropping referenced bytes.
+Non-Mach-O files are hashed whole.
 
 ### Concurrency
 

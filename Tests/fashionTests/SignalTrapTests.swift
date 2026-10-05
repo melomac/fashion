@@ -84,6 +84,8 @@ final class SignalTrapTests: XCTestCase {
             process.executableURL = binary
             process.arguments = [directory.path]
         }
+        // Xcode's test runner sets OS_ACTIVITY_DT_MODE, which copies the child's os_log lines to the stderr read here.
+        process.environment = ProcessInfo.processInfo.environment.filter { $0.key != "OS_ACTIVITY_DT_MODE" }
         process.standardOutput = stdout
         process.standardError = stderr
 

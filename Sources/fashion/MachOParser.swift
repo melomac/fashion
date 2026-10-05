@@ -5,21 +5,13 @@ import MachO.dyld.utils // macho_arch_name_for_cpu_type
 
 enum ParserError: Error, Equatable {
     case truncatedMachHeader(expectedSize: Int, fileSize: Int)
-    case invalidLoadCommandTable(count: UInt32, size: UInt32, fileSize: Int)
+    case invalidLoadCommandTable(size: UInt32, fileSize: Int)
+    case truncatedLoadCommand(cmd: UInt32, size: Int, expectedSize: Int)
     case invalidFatArchitectureTable(count: UInt32, fileSize: Int)
     case invalidFatArchitectureRange(offset: UInt64, size: UInt64, fileSize: Int)
     case invalidSymbolTableRange(offset: UInt32, count: UInt32, fileSize: Int)
     case invalidStringTableRange(offset: UInt32, size: UInt32, fileSize: Int)
     case invalidStringTableIndex(index: UInt32, tableSize: UInt32)
-    case invalidCodeSignatureRange(offset: UInt32, size: UInt32, fileSize: Int)
-    case truncatedCodeSignatureSuperblob(signatureSize: Int)
-    case invalidCodeSignatureMagic(magic: UInt32)
-    case invalidCodeSignatureSuperblobLength(length: UInt32, signatureSize: Int)
-    case invalidCodeSignatureIndexTable(count: UInt32, length: UInt32)
-    case invalidCodeDirectoryOffset(offset: UInt32, signatureSize: Int)
-    case invalidCodeDirectoryMagic(offset: UInt32, magic: UInt32)
-    case truncatedCodeDirectory(offset: UInt32, length: UInt32)
-    case invalidCodeDirectoryRange(offset: UInt32, size: UInt32, signatureSize: Int)
 }
 
 extension ParserError: LocalizedError {
@@ -27,8 +19,10 @@ extension ParserError: LocalizedError {
         switch self {
         case let .truncatedMachHeader(expectedSize, fileSize):
             String(format: NSLocalizedString("Invalid Mach-O: expected a %d-byte header in a %d-byte file", comment: "Truncated thin Mach-O header"), expectedSize, fileSize)
-        case let .invalidLoadCommandTable(count, size, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: ncmds %u and sizeofcmds %u do not form a load-command table in the %d-byte slice", comment: "Malformed Mach-O load-command table"), count, size, fileSize)
+        case let .invalidLoadCommandTable(size, fileSize):
+            String(format: NSLocalizedString("Invalid Mach-O: sizeofcmds %u does not hold a load-command table in the %d-byte slice", comment: "Malformed Mach-O load-command table"), size, fileSize)
+        case let .truncatedLoadCommand(cmd, size, expectedSize):
+            String(format: NSLocalizedString("Invalid Mach-O: load command 0x%x is only %@; its structure requires %ld", comment: "Truncated Mach-O load command"), cmd, String(size, pluralizing: "byte"), expectedSize)
         case let .invalidFatArchitectureTable(count, fileSize):
             String(format: NSLocalizedString("Invalid Mach-O: nfat_arch %u does not fit in the %d-byte file", comment: "Truncated universal Mach-O architecture table"), count, fileSize)
         case let .invalidFatArchitectureRange(offset, size, fileSize):
@@ -39,24 +33,6 @@ extension ParserError: LocalizedError {
             String(format: NSLocalizedString("Invalid Mach-O: string table at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O string-table range"), offset, size, fileSize)
         case let .invalidStringTableIndex(index, tableSize):
             String(format: NSLocalizedString("Invalid Mach-O: string table index %u is outside the %u-byte table", comment: "Malformed Mach-O string-table index"), index, tableSize)
-        case let .invalidCodeSignatureRange(offset, size, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature range at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O code-signature range"), offset, size, fileSize)
-        case let .truncatedCodeSignatureSuperblob(signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature is only %@; an embedded signature header requires 12", comment: "Truncated embedded code-signature header"), String(signatureSize, pluralizing: "byte"))
-        case let .invalidCodeSignatureMagic(magic):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature has invalid magic 0x%08x", comment: "Malformed embedded code-signature magic"), magic)
-        case let .invalidCodeSignatureSuperblobLength(length, signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature declares a %u-byte superblob inside a %d-byte signature", comment: "Malformed embedded code-signature superblob length"), length, signatureSize)
-        case let .invalidCodeSignatureIndexTable(count, length):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature index count %u does not fit in the %u-byte superblob", comment: "Malformed embedded code-signature index table"), count, length)
-        case let .invalidCodeDirectoryOffset(offset, signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory offset %u is outside the %d-byte code signature", comment: "Malformed embedded CodeDirectory offset"), offset, signatureSize)
-        case let .invalidCodeDirectoryMagic(offset, magic):
-            String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory at offset %u has invalid magic 0x%08x", comment: "Malformed embedded CodeDirectory magic"), offset, magic)
-        case let .truncatedCodeDirectory(offset, length):
-            String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory at offset %u is only %@", comment: "Truncated embedded CodeDirectory"), offset, String(Int(length), pluralizing: "byte"))
-        case let .invalidCodeDirectoryRange(offset, size, signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: CodeDirectory range at offset %u with size %u is outside the %d-byte code signature", comment: "Malformed embedded CodeDirectory range"), offset, size, signatureSize)
         }
     }
 }
@@ -95,9 +71,9 @@ enum MachOParser {
      since a universal static library carries `ar` archives rather than Mach-O slices.
      */
     static func open(data: Data) throws -> BinaryType {
-        // Mirror isMachO(path:): fewer than 8 bytes cannot carry a magic plus a count, so a magic-only stub
-        // (a truncated Java class, say) is an ordinary file rather than a broken Mach-O.
-        guard data.count >= 8 else {
+        // Mirror isMachO(path:): a file shorter than a 32-bit mach_header is not Mach-O code to Security
+        // (MachORep::candidate), so a magic-only stub (a truncated Java class, say) is an ordinary file.
+        guard data.count >= self.minimumSize else {
             return .notMachO
         }
 
@@ -123,8 +99,8 @@ enum MachOParser {
      a file that reads successfully but is not Mach-O (or is too small) simply returns false.
      */
     static func isMachO(path: String) throws -> Bool {
-        let head = try FileReader.head(path: path, count: 8)
-        guard head.count >= 8 else {
+        let head = try FileReader.head(path: path, count: self.minimumSize)
+        guard head.count >= self.minimumSize else {
             return false
         }
 
@@ -192,13 +168,16 @@ enum MachOParser {
 
     // MARK: - Load Commands
 
-    static func parseSymtab(command: LoadCommand, swap: Bool = false) -> symtab_command? {
-        guard
-            command.cmd == UInt32(LC_SYMTAB),
-            let raw = command.payload(as: symtab_command.self)
-        else {
+    /**
+     The `symtab_command` of an `LC_SYMTAB`, nil for any other command. Throws for one too short to hold it: Security
+     checks a symbol table command only before `__LINKEDIT`, so a slice can parse with a later one cut short.
+     */
+    static func parseSymtab(command: LoadCommand, swap: Bool = false) throws -> symtab_command? {
+        guard command.cmd == UInt32(LC_SYMTAB) else {
             return nil
         }
+
+        let raw = try command.load(symtab_command.self)
 
         guard swap else {
             return raw
@@ -335,6 +314,12 @@ enum MachOParser {
     private static func unknownArchName(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t) -> String {
         "unknown(\(cpuType),\(cpuSubtype))"
     }
+
+    /**
+     The fewest bytes a Mach-O file holds: `MachORep::candidate` reads a 32-bit `mach_header` before it considers a file
+     Mach-O code at all, and `codesign` signs any shorter one as a generic file.
+     */
+    private static let minimumSize = MemoryLayout<mach_header>.size
 
     /**
      The most slices a universal file holds, dyld's `mach_o::Universal::kMaxSliceCount`.

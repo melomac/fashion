@@ -136,9 +136,12 @@ final class MachOParserTests: XCTestCase {
         data.appendInt32(cpuType)
         data.appendInt32(cpuSubtype)
         data.appendUInt32(2) // filetype
-        data.appendUInt32(0) // ncmds
-        data.appendUInt32(0) // sizeofcmds
+        data.appendUInt32(1) // ncmds
+        data.appendUInt32(16) // sizeofcmds: Security refuses a table too short for a command
         data.appendUInt32(0) // flags
+        data.appendUInt32(UInt32(LC_SOURCE_VERSION))
+        data.appendUInt32(16) // cmdsize
+        data.appendUInt64(0) // version
         return data
     }
 
@@ -148,9 +151,12 @@ final class MachOParserTests: XCTestCase {
         data.appendInt32(cpuType.byteSwapped)
         data.appendInt32(cpuSubtype.byteSwapped)
         data.appendUInt32(UInt32(2).byteSwapped)
-        data.appendUInt32(0)
-        data.appendUInt32(0)
-        data.appendUInt32(0)
+        data.appendUInt32(UInt32(1).byteSwapped) // ncmds
+        data.appendUInt32(UInt32(16).byteSwapped) // sizeofcmds
+        data.appendUInt32(0) // flags
+        data.appendUInt32(UInt32(LC_SOURCE_VERSION).byteSwapped)
+        data.appendUInt32(UInt32(16).byteSwapped) // cmdsize
+        data.appendUInt64(0) // version
         return data
     }
 
@@ -369,7 +375,7 @@ final class MachOParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let expected = ParserError.invalidLoadCommandTable(count: 1, size: 16, fileSize: slice.count)
+        let expected = ParserError.invalidLoadCommandTable(size: 16, fileSize: slice.count)
         XCTAssertThrowsError(try CDHash.hash(path: url.path())) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
@@ -413,9 +419,10 @@ final class MachOParserTests: XCTestCase {
     }
 
     func testOpenShortMagicIsNotMachO() throws {
-        // isMachO(path:) needs 8 bytes; open(data:) must agree, so no mode reports a magic-only stub as a broken Mach-O.
+        // Security (MachORep::candidate) reads a 28-byte mach_header before it calls a file Mach-O, and isMachO(path:)
+        // does too; open(data:) must agree, so no mode reports a shorter stub as a broken Mach-O.
         for magic in [MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64, FAT_MAGIC, FAT_CIGAM, FAT_MAGIC_64, FAT_CIGAM_64] {
-            for count in 4 ... 7 {
+            for count in [4, 7, 8, 20, 27] {
                 var data = Data()
                 data.appendUInt32(magic)
                 data.append(Data(repeating: 0, count: count - 4))
@@ -600,7 +607,7 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32(16)
 
         XCTAssertThrowsError(try MachOSlice(data)) { error in
-            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(count: 1, size: 16, fileSize: 40))
+            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(size: 16, fileSize: 40))
         }
     }
 
@@ -620,11 +627,11 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32(12)
 
         XCTAssertThrowsError(try MachOSlice(data)) { error in
-            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(count: 1, size: 8, fileSize: 48))
+            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(size: 8, fileSize: 48))
         }
     }
 
-    // MARK: - Strict load-command rules
+    // MARK: - Load-command rules (Security's MachO)
 
     /**
      A thin header with the declared counts under test control, followed by `commands`.
@@ -673,30 +680,46 @@ final class MachOParserTests: XCTestCase {
         let data = self.thinHeader(ncmds: 1, sizeofcmds: 32, commands: self.command(LC_UUID, size: 24) + Data(repeating: 0, count: 8))
 
         XCTAssertThrowsError(try MachOSlice(data)) { error in
-            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(count: 1, size: 32, fileSize: data.count))
+            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(size: 32, fileSize: data.count))
         }
     }
 
-    func testSliceRejectsMisalignedCommand() {
-        // 64-bit commands are 8-byte aligned, 32-bit ones 4-byte aligned.
+    func testSliceAcceptsUnalignedCommand() {
+        // Security requires no alignment of cmdsize (codesign signs such a binary, and Rosetta runs it).
         for (is64, size) in [(true, UInt32(28)), (false, UInt32(26))] {
-            let data = self.thinHeader(is64: is64, ncmds: 1, sizeofcmds: size, commands: self.command(LC_UUID, size: size))
-
-            XCTAssertThrowsError(try MachOSlice(data), "is64 \(is64)") { error in
-                XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(count: 1, size: size, fileSize: data.count))
-            }
+            XCTAssertNotNil(try MachOSlice(self.thinHeader(is64: is64, ncmds: 1, sizeofcmds: size, commands: self.command(LC_UUID, size: size))), "is64 \(is64)")
         }
+    }
 
-        // The 32-bit rule really is 4 bytes: a 28-byte command is fine there.
-        XCTAssertNotNil(try MachOSlice(self.thinHeader(is64: false, ncmds: 1, sizeofcmds: 28, commands: self.command(LC_UUID, size: 28))))
+    func testSliceIgnoresNcmds() throws {
+        // MachOBase::nextCommand walks sizeofcmds alone: a wrong ncmds neither hides nor invents a command.
+        let commands = self.command(LC_UUID, size: 24) + self.command(LC_SOURCE_VERSION, size: 16)
+        for ncmds: UInt32 in [0, 1, 3] {
+            let slice = try XCTUnwrap(MachOSlice(self.thinHeader(ncmds: ncmds, sizeofcmds: 40, commands: commands)))
+            XCTAssertEqual(slice.loadCommands.map(\.cmd), [UInt32(LC_UUID), UInt32(LC_SOURCE_VERSION)], "ncmds \(ncmds)")
+        }
     }
 
     func testSliceRejectsCommandBelowMinimumSize() {
-        // An LC_SEGMENT_64 must hold a whole segment_command_64, not just the 8-byte command header.
+        // MachO::validateStructure: an LC_SEGMENT_64 must hold a whole segment_command_64, not just the 8-byte header.
         let data = self.thinHeader(ncmds: 1, sizeofcmds: 16, commands: self.command(LC_SEGMENT_64, size: 16))
 
         XCTAssertThrowsError(try MachOSlice(data)) { error in
-            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(count: 1, size: 16, fileSize: data.count))
+            XCTAssertEqual(error as? ParserError, .truncatedLoadCommand(cmd: UInt32(LC_SEGMENT_64), size: 16, expectedSize: 72))
+        }
+    }
+
+    func testSliceChecksSizesOnlyUpToTheImageEnd() throws {
+        // validateStructure stops at the first __LINKEDIT segment or LC_SYMTAB, and checks no other command: a short
+        // command after it parses (a short LC_SYMTAB is then an error to symhash alone).
+        var linkedit = self.command(LC_SEGMENT_64, size: 72)
+        linkedit.replaceSubrange(8 ..< 18, with: Data("__LINKEDIT".utf8))
+        let commands = linkedit + self.command(LC_SYMTAB, size: 16) + self.command(LC_DYSYMTAB, size: 16)
+        let slice = try XCTUnwrap(MachOSlice(self.thinHeader(ncmds: 3, sizeofcmds: UInt32(commands.count), commands: commands)))
+        XCTAssertEqual(slice.loadCommands.count, 3)
+
+        XCTAssertThrowsError(try MachOParser.parseSymtab(command: slice.loadCommands[1])) { error in
+            XCTAssertEqual(error as? ParserError, .truncatedLoadCommand(cmd: UInt32(LC_SYMTAB), size: 16, expectedSize: 24))
         }
     }
 
@@ -708,16 +731,16 @@ final class MachOParserTests: XCTestCase {
         let data = self.thinHeader(ncmds: 1, sizeofcmds: 8, commands: zeroSized)
 
         XCTAssertThrowsError(try MachOSlice(data)) { error in
-            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(count: 1, size: 8, fileSize: data.count))
+            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(size: 8, fileSize: data.count))
         }
     }
 
     // MARK: - parseSymtab
 
-    func testParseSymtab() {
+    func testParseSymtab() throws {
         let data = self.makeThin64()
         let cmds = MachOParser.loadCommands(data: data)
-        let symtab = MachOParser.parseSymtab(command: cmds[0])
+        let symtab = try MachOParser.parseSymtab(command: cmds[0])
 
         XCTAssertNotNil(symtab)
         XCTAssertEqual(symtab?.symoff, 56)
@@ -727,13 +750,15 @@ final class MachOParserTests: XCTestCase {
     func testParseSymtabWrongCommand() {
         let cmd = MachOParser.LoadCommand(cmd: UInt32(LC_SEGMENT_64), data: Data(repeating: 0, count: 24))
 
-        XCTAssertNil(MachOParser.parseSymtab(command: cmd))
+        XCTAssertNil(try MachOParser.parseSymtab(command: cmd))
     }
 
     func testParseSymtabTooShort() {
         let cmd = MachOParser.LoadCommand(cmd: UInt32(LC_SYMTAB), data: Data(repeating: 0, count: 8))
 
-        XCTAssertNil(MachOParser.parseSymtab(command: cmd))
+        XCTAssertThrowsError(try MachOParser.parseSymtab(command: cmd)) { error in
+            XCTAssertEqual(error as? ParserError, .truncatedLoadCommand(cmd: UInt32(LC_SYMTAB), size: 8, expectedSize: 24))
+        }
     }
 
     // MARK: - externalSymbolNames / symbolName
@@ -1110,8 +1135,8 @@ final class MachOParserTests: XCTestCase {
 
     func testErrorDescriptionsAgreeWithCounts() {
         XCTAssertEqual(
-            ParserError.invalidLoadCommandTable(count: 1, size: 24, fileSize: 40).localizedDescription,
-            "Invalid Mach-O: ncmds 1 and sizeofcmds 24 do not form a load-command table in the 40-byte slice",
+            ParserError.invalidLoadCommandTable(size: 24, fileSize: 40).localizedDescription,
+            "Invalid Mach-O: sizeofcmds 24 does not hold a load-command table in the 40-byte slice",
         )
         XCTAssertEqual(
             ParserError.invalidFatArchitectureTable(count: 1, fileSize: 20).localizedDescription,
@@ -1126,12 +1151,12 @@ final class MachOParserTests: XCTestCase {
             "Invalid Mach-O: symbol table at offset 32 with 2 entries is outside the 40-byte slice",
         )
         XCTAssertEqual(
-            ParserError.truncatedCodeSignatureSuperblob(signatureSize: 1).localizedDescription,
+            CDHashError.truncatedCodeSignatureSuperblob(signatureSize: 1).localizedDescription,
             "Invalid Mach-O: code signature is only 1 byte; an embedded signature header requires 12",
         )
         XCTAssertEqual(
-            ParserError.truncatedCodeDirectory(offset: 20, length: 8).localizedDescription,
-            "Invalid Mach-O: CodeDirectory at offset 20 is only 8 bytes",
+            ParserError.truncatedLoadCommand(cmd: 0x19, size: 1, expectedSize: 72).localizedDescription,
+            "Invalid Mach-O: load command 0x19 is only 1 byte; its structure requires 72",
         )
     }
 

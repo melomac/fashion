@@ -72,16 +72,35 @@ final class AdhocCDHashTests: XCTestCase {
         return self.makeMachO(commands: [command], fileSize: 128) + signature
     }
 
-    /// A minimal 40-byte CodeDirectory: magic, length, and `hashType` at offset 37.
-    private func codeDirectory(hashType: UInt8) -> Data {
+    /**
+     A minimal 50-byte CodeDirectory Security accepts: version 0x20100, the identifier "x", no code slots, and slots as wide
+     as `hashType`'s hash unless `hashSize` says otherwise.
+     */
+    private func codeDirectory(hashType: UInt8, hashSize: UInt8? = nil) -> Data {
         var directory = Data()
-        directory.appendUInt32BE(0xfade_0c02)
-        directory.appendUInt32BE(40)
-        directory.append(Data(repeating: 0, count: 29))
-        directory.append(hashType) // offset 37
-        directory.append(Data(repeating: 0, count: 2))
+        // magic, length, version, flags, hashOffset, identOffset, nSpecialSlots, nCodeSlots, codeLimit
+        [0xfade_0c02, 50, 0x20100, 0, 50, 48, 0, 0, 0].forEach { directory.appendUInt32BE($0) }
+        directory.append(contentsOf: [hashSize ?? [1: 20, 2: 32, 3: 20, 4: 48, 5: 64][hashType] ?? 32, hashType, 0, 0]) // hashSize, hashType, platform, pageSize
+        directory.appendUInt32BE(0) // spare2
+        directory.appendUInt32BE(0) // scatterOffset
+        directory.append(contentsOf: Array("x\0".utf8)) // identifier
 
         return directory
+    }
+
+    /// A superblob indexing `blobs` in the order given, each under its slot.
+    private func superblob(slots: [(slot: UInt32, blob: Data)]) -> Data {
+        var offset = 12 + 8 * slots.count
+        var index = Data()
+        for (slot, blob) in slots {
+            index.appendUInt32BE(slot)
+            index.appendUInt32BE(UInt32(offset))
+            offset += blob.count
+        }
+
+        var signature = Data()
+        [0xfade_0cc0, UInt32(offset), UInt32(slots.count)].forEach { signature.appendUInt32BE($0) }
+        return signature + index + slots.reduce(Data()) { $0 + $1.blob }
     }
 
     /**
@@ -115,8 +134,8 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testFindSegment() throws {
         let slice = try XCTUnwrap(MachOSlice(self.makeMachO()))
-        XCTAssertEqual(slice.findSegment("__TEXT")?.cmd, UInt32(LC_SEGMENT_64))
-        XCTAssertNil(slice.findSegment("__DATA"))
+        XCTAssertEqual(try slice.findSegment("__TEXT")?.cmd, UInt32(LC_SEGMENT_64))
+        XCTAssertNil(try slice.findSegment("__DATA"))
         XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO(segment: "__TEXX"))).findSegment("__TEXT"))
     }
 
@@ -132,8 +151,8 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testPlatformFromBuildVersion() throws {
         let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS, minOS: 0x000f_0603)])))
-        XCTAssertEqual(slice.version()?.platform, PLATFORM_IOS)
-        XCTAssertEqual(slice.version()?.minOS, 0x000f_0603) // 15.6.3
+        XCTAssertEqual(try slice.version()?.platform, PLATFORM_IOS)
+        XCTAssertEqual(try slice.version()?.minOS, 0x000f_0603) // 15.6.3
     }
 
     func testPlatformFromVersionMin() throws {
@@ -145,21 +164,38 @@ final class AdhocCDHashTests: XCTestCase {
         ]
         for (cmd, platform) in pairs {
             let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(cmd, minOS: 0x0008_0100)])))
-            XCTAssertEqual(slice.version()?.platform, platform, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))")
-            XCTAssertEqual(slice.version()?.minOS, 0x0008_0100, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))") // 8.1
+            XCTAssertEqual(try slice.version()?.platform, platform, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))")
+            XCTAssertEqual(try slice.version()?.minOS, 0x0008_0100, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))") // 8.1
         }
     }
 
     func testPlatformPrecedenceFollowsCodesign() throws {
         // codesign reads the first LC_BUILD_VERSION, even one naming platform 0, ahead of any LC_VERSION_MIN_*.
         let buildFirst = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS), self.buildVersion(platform: PLATFORM_MACOS)])))
-        XCTAssertEqual(buildFirst.version()?.platform, PLATFORM_IOS)
+        XCTAssertEqual(try buildFirst.version()?.platform, PLATFORM_IOS)
 
         let versionMinFirst = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_IPHONEOS), self.buildVersion(platform: PLATFORM_MACOS)])))
-        XCTAssertEqual(versionMinFirst.version()?.platform, PLATFORM_MACOS)
+        XCTAssertEqual(try versionMinFirst.version()?.platform, PLATFORM_MACOS)
 
         let platformZero = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_MACOSX), self.buildVersion(platform: 0)])))
-        XCTAssertEqual(platformZero.version()?.platform, 0)
+        XCTAssertEqual(try platformZero.version()?.platform, 0)
+    }
+
+    func testShortVersionCommandsThrowLikeSecurity() throws {
+        // MachOBase::version refuses an LC_BUILD_VERSION under 24 bytes and an LC_VERSION_MIN_* under 16, so codesign
+        // cannot sign the slice: neither can fashion synthesize its ad-hoc identity.
+        var shortBuild = Data()
+        [UInt32(LC_BUILD_VERSION), 16, UInt32(PLATFORM_MACOS), 0x000f_0000].forEach { shortBuild.appendUInt32($0) }
+        var shortMin = Data()
+        [UInt32(LC_VERSION_MIN_MACOSX), 8].forEach { shortMin.appendUInt32($0) }
+
+        for (command, expectedSize) in [(shortBuild, 24), (shortMin, 16)] {
+            let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [command])))
+            let cmd = command.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+            let expected = ParserError.truncatedLoadCommand(cmd: cmd, size: command.count, expectedSize: expectedSize)
+            XCTAssertThrowsError(try slice.version()) { XCTAssertEqual($0 as? ParserError, expected) }
+            XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false)) { XCTAssertEqual($0 as? ParserError, expected) }
+        }
     }
 
     func testNonMachOIsNil() {
@@ -168,11 +204,11 @@ final class AdhocCDHashTests: XCTestCase {
 
     // MARK: - code signature detection
 
-    func testCodeSignatureRangeUnsignedIsNil() throws {
-        XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO())).codeSignatureRange())
+    func testFindCodeSignatureUnsignedIsNil() throws {
+        XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO())).findCodeSignature())
     }
 
-    func testCodeSignatureRangeSignedIsBeforeEnd() throws {
+    func testFindCodeSignatureSignedIsBeforeEnd() throws {
         guard let data = try? FileReader.map(path: "/bin/ls") else {
             throw XCTSkip("/bin/ls not readable")
         }
@@ -183,21 +219,18 @@ final class AdhocCDHashTests: XCTestCase {
         }
         let slice = try XCTUnwrap(MachOSlice(sliceData))
         // A signed slice's signature starts after the code and ends within the slice.
-        let range = try XCTUnwrap(try slice.codeSignatureRange())
-        XCTAssertGreaterThan(range.lowerBound, 0)
-        XCTAssertLessThanOrEqual(range.upperBound, slice.data.count)
+        let signature = try XCTUnwrap(try slice.findCodeSignature())
+        XCTAssertGreaterThan(signature.offset, 0)
+        XCTAssertLessThanOrEqual(signature.offset + signature.size, slice.data.count)
     }
 
     func testInvalidCodeSignatureRangeThrows() throws {
         let data = self.makeSignedEmptySuperblob(declaredSignatureOffset: 4096)
         let slice = try XCTUnwrap(MachOSlice(data))
-        let expected = ParserError.invalidCodeSignatureRange(offset: 4096, size: 12, fileSize: data.count)
+        let expected = CDHashError.invalidCodeSignatureRange(offset: 4096, size: 12, fileSize: data.count)
 
-        XCTAssertThrowsError(try slice.codeSignatureRange()) { error in
-            XCTAssertEqual(error as? ParserError, expected)
-        }
         XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
-            XCTAssertEqual(error as? ParserError, expected)
+            XCTAssertEqual(error as? CDHashError, expected)
         }
 
         let url = FileManager.default.temporaryDirectory / "fashion-invalid-code-signature-\(UUID())"
@@ -207,17 +240,17 @@ final class AdhocCDHashTests: XCTestCase {
         }
 
         XCTAssertThrowsError(try CDHash.hash(path: url.path())) { error in
-            XCTAssertEqual(error as? ParserError, expected)
+            XCTAssertEqual(error as? CDHashError, expected)
         }
     }
 
     func testCodeDirectoryOutsideDeclaredSuperblobThrows() throws {
         let data = self.makeCodeDirectoryOutsideDeclaredSuperblob()
         let slice = try XCTUnwrap(MachOSlice(data))
-        let expected = ParserError.invalidCodeDirectoryRange(offset: 20, size: 38, signatureSize: 32)
+        let expected = CDHashError.invalidCodeSignatureBlobRange(offset: 20, size: 38, signatureSize: 32)
 
         XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
-            XCTAssertEqual(error as? ParserError, expected)
+            XCTAssertEqual(error as? CDHashError, expected)
         }
 
         let url = FileManager.default.temporaryDirectory / "fashion-invalid-superblob-\(UUID())"
@@ -227,15 +260,17 @@ final class AdhocCDHashTests: XCTestCase {
         }
 
         XCTAssertThrowsError(try CDHash.hash(path: url.path())) { error in
-            XCTAssertEqual(error as? ParserError, expected)
+            XCTAssertEqual(error as? CDHashError, expected)
         }
     }
 
     func testTruncatedEmbeddedSignatureThrows() throws {
-        let data = self.makeSignedMachO(signature: Data(repeating: 0, count: 8))
+        var signature = Data()
+        [0xfade_0cc0, 8].forEach { signature.appendUInt32BE($0) } // a superblob too short for its own header
+        let data = self.makeSignedMachO(signature: signature)
 
         XCTAssertThrowsError(try CDHash.hash(data: data)) { error in
-            XCTAssertEqual(error as? ParserError, .truncatedCodeSignatureSuperblob(signatureSize: 8))
+            XCTAssertEqual(error as? CDHashError, .truncatedCodeSignatureSuperblob(signatureSize: 8))
         }
     }
 
@@ -247,7 +282,7 @@ final class AdhocCDHashTests: XCTestCase {
         let data = self.makeSignedMachO(signature: signature)
 
         XCTAssertThrowsError(try CDHash.hash(data: data)) { error in
-            XCTAssertEqual(error as? ParserError, .invalidCodeSignatureMagic(magic: 0x1234_5678))
+            XCTAssertEqual(error as? CDHashError, .invalidCodeSignatureMagic(magic: 0x1234_5678))
         }
     }
 
@@ -264,42 +299,35 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testEmbeddedSignatureBoundsAreEnforced() throws {
         let magic: UInt32 = 0xfade_0cc0
-        let directoryMagic: UInt32 = 0xfade_0c02
         let padding = Data(repeating: 0, count: 4)
-        let cases: [(name: String, signature: Data, expected: ParserError)] = [
+        let cases: [(name: String, signature: Data, expected: CDHashError)] = [
             ("superblob longer than the signature", self.superblob([magic, 64, 0]), .invalidCodeSignatureSuperblobLength(length: 64, signatureSize: 12)),
-            ("superblob shorter than its header", self.superblob([magic, 8, 0]), .invalidCodeSignatureSuperblobLength(length: 8, signatureSize: 12)),
+            ("superblob shorter than its header", self.superblob([magic, 8, 0]), .truncatedCodeSignatureSuperblob(signatureSize: 8)),
             ("index table past the superblob", self.superblob([magic, 12, 1]), .invalidCodeSignatureIndexTable(count: 1, length: 12)),
-            ("CodeDirectory offset past the superblob", self.superblob([magic, 20, 1, 0, 16]), .invalidCodeDirectoryOffset(offset: 16, signatureSize: 20)),
-            ("wrong CodeDirectory magic", self.superblob([magic, 32, 1, 0, 20, 0x1234_5678, 12], tail: padding), .invalidCodeDirectoryMagic(offset: 20, magic: 0x1234_5678)),
-            ("CodeDirectory shorter than its fixed header", self.superblob([magic, 32, 1, 0, 20, directoryMagic, 12], tail: padding), .truncatedCodeDirectory(offset: 20, length: 12)),
+            ("blob inside the index table", self.superblob([magic, 20, 1, 0, 16]), .invalidCodeSignatureBlobOffset(offset: 16, signatureSize: 20)),
+            ("blob header past the superblob", self.superblob([magic, 32, 1, 0, 28], tail: padding + padding + padding), .invalidCodeSignatureBlobOffset(offset: 28, signatureSize: 32)),
+            ("blob shorter than its header", self.superblob([magic, 32, 1, 0x10000, 20, 0xfade_0b01, 4], tail: padding), .invalidCodeSignatureBlobRange(offset: 20, size: 4, signatureSize: 32)),
+            ("blob past the superblob", self.superblob([magic, 32, 1, 0x10000, 20, 0xfade_0b01, 16], tail: padding), .invalidCodeSignatureBlobRange(offset: 20, size: 16, signatureSize: 32)),
         ]
 
         for (name, signature, expected) in cases {
             XCTAssertThrowsError(try CDHash.hash(data: self.makeSignedMachO(signature: signature)), name) { error in
-                XCTAssertEqual(error as? ParserError, expected, name)
+                XCTAssertEqual(error as? CDHashError, expected, name)
             }
         }
     }
 
     func testMultipleCodeDirectoriesRankStrongestFirst() throws {
-        // Primary slot: SHA-1. Alternate slot 0x1000: SHA-256. Alternate 0x1001: an unknown hash type, dropped.
+        // Primary slot: SHA-1. Alternates 0x1000 and 0x1001: SHA-256 and SHA-384, which xnu prefers in that order.
         let sha1 = self.codeDirectory(hashType: 1)
         let sha256 = self.codeDirectory(hashType: 2)
-        let unknown = self.codeDirectory(hashType: 9)
-
-        // 12-byte header, three 8-byte index entries, then the three 40-byte directories.
-        var signature = self.superblob([0xfade_0cc0, 156, 3, 0, 36, 0x1000, 76, 0x1001, 116])
-        signature.append(sha1)
-        signature.append(sha256)
-        signature.append(unknown)
-
-        let data = self.makeSignedMachO(signature: signature)
+        let sha384 = self.codeDirectory(hashType: 4)
+        let data = self.makeSignedMachO(signature: self.superblob(slots: [(0, sha1), (0x1000, sha256), (0x1001, sha384)]))
         let slice = try XCTUnwrap(MachOSlice(data))
         let directories = try slice.codeDirectoryHashes(exact: false).hashes
 
-        XCTAssertEqual(directories.map(\.type), ["sha256", "sha1"])
-        XCTAssertEqual(directories.map(\.hash), [SHA256.hash(data: sha256).hexString, Insecure.SHA1.hash(data: sha1).hexString])
+        XCTAssertEqual(directories.map(\.type), ["sha384", "sha256", "sha1"])
+        XCTAssertEqual(directories.map(\.hash), [SHA384.hash(data: sha384).hexString, SHA256.hash(data: sha256).hexString, Insecure.SHA1.hash(data: sha1).hexString])
         XCTAssertFalse(directories.contains { $0.adhoc })
 
         // With several directories the hash type is part of each reported line.
@@ -309,7 +337,66 @@ final class AdhocCDHashTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertEqual(try CDHash.hash(path: url.path()).map(\.type), ["sha256", "sha1"])
+        XCTAssertEqual(try CDHash.hash(path: url.path()).map(\.type), ["sha384", "sha256", "sha1"])
+    }
+
+    func testCodeDirectoriesLoadLikeSecurity() throws {
+        // SecStaticCode::loadCodeDirectories reads the primary slot, then alternates from 0x1000 up to the first one
+        // missing, and the magic is never checked. SHA-512, which xnu does not know, ranks last.
+        let sha1 = self.codeDirectory(hashType: 1)
+        let sha256 = self.codeDirectory(hashType: 2)
+        var badMagic = self.codeDirectory(hashType: 2)
+        badMagic.replaceSubrange(0 ..< 4, with: [0x12, 0x34, 0x56, 0x78])
+        let cases: [(name: String, slots: [(UInt32, Data)], expected: [String])] = [
+            ("alternate after a gap", [(0, sha1), (0x1001, sha256)], [Insecure.SHA1.hash(data: sha1).hexString]),
+            ("wrong magic", [(0, badMagic)], [SHA256.hash(data: badMagic).hexString]),
+            ("SHA-512 alternate", [(0, sha1), (0x1000, self.codeDirectory(hashType: 5))], [Insecure.SHA1.hash(data: sha1).hexString, SHA512.hash(data: self.codeDirectory(hashType: 5)).hexString]),
+        ]
+
+        for (name, slots, expected) in cases {
+            let slice = try XCTUnwrap(MachOSlice(self.makeSignedMachO(signature: self.superblob(slots: slots))))
+            XCTAssertEqual(try slice.codeDirectoryHashes(exact: false).hashes.map(\.hash), expected, name)
+        }
+    }
+
+    func testRejectedCodeDirectoriesMakeTheSliceUnsigned() throws {
+        // Security calls a slice whose code directories it cannot load "not signed at all", and codesign signs it ad
+        // hoc up to where the signature starts (MachORep::signingLimit).
+        func field(_ directory: Data, at offset: Int, _ value: UInt32) -> Data {
+            var directory = directory
+            var bigEndian = value.bigEndian
+            directory.replaceSubrange(offset ..< offset + 4, with: Data(bytes: &bigEndian, count: 4))
+            return directory
+        }
+        let sha256 = self.codeDirectory(hashType: 2)
+        var truncated = field(sha256, at: 4, 47) // length: one byte short of the 0x20100 header
+        truncated.removeLast(3)
+        var unterminated = sha256
+        unterminated[unterminated.endIndex - 1] = 0x79 // identifier without its NUL
+        let cases: [(name: String, slots: [(UInt32, Data)])] = [
+            ("no code directory", []),
+            ("no primary slot", [(0x1000, sha256)]),
+            ("header shorter than its version's", [(0, truncated)]),
+            ("version below 0x20001", [(0, field(sha256, at: 8, 0x20000))]),
+            ("version above 0x2f000", [(0, field(sha256, at: 8, 0x2f001))]),
+            ("unknown hash type", [(0, self.codeDirectory(hashType: 9))]),
+            ("hash size of another type", [(0, self.codeDirectory(hashType: 2, hashSize: 20))]),
+            ("identifier past the end", [(0, field(sha256, at: 20, 50))]),
+            ("identifier unterminated", [(0, unterminated)]),
+            ("special slots before the header", [(0, field(field(sha256, at: 24, 2), at: 16, 50))]),
+            ("code slots past the end", [(0, field(sha256, at: 28, 1))]),
+            ("unpaged code limit without a slot", [(0, field(sha256, at: 32, 1))]),
+            ("scatter vector past the end", [(0, field(sha256, at: 44, 40))]),
+            ("two directories of one hash type", [(0, sha256), (0x1000, sha256)]),
+            ("one bad alternate", [(0, self.codeDirectory(hashType: 1)), (0x1000, self.codeDirectory(hashType: 9))]),
+        ]
+
+        for (name, slots) in cases {
+            let slice = try XCTUnwrap(MachOSlice(self.makeSignedMachO(signature: self.superblob(slots: slots))))
+            let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+            XCTAssertNil(skipReason, name)
+            XCTAssertEqual(hashes.map(\.adhoc), [true, true], name)
+        }
     }
 
     // MARK: - Ad-hoc synthesis (unsigned slice)
@@ -388,14 +475,21 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertEqual(results.map(\.hash), try MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
     }
 
-    func testSignedButUnparseableSliceIsNotAdhoc() throws {
-        // A slice that carries a signature but no parseable code directory is still signed: it must yield
-        // no cdhash rather than be relabeled ADHOC (that identity is for unsigned code only).
-        let slice = try XCTUnwrap(MachOSlice(self.makeSignedEmptySuperblob()))
-        XCTAssertNotNil(try slice.codeSignatureRange(), "fixture must be recognized as signed")
-
+    func testSignatureWithoutCodeDirectoryIsAdhocUpToTheSignature() throws {
+        // codesign calls a slice whose superblob holds no code directory unsigned, and signs it up to the signature.
+        let data = self.makeSignedEmptySuperblob()
+        let slice = try XCTUnwrap(MachOSlice(data))
         let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
-        XCTAssertTrue(hashes.isEmpty, "signed-but-unreadable slice → no output, never ADHOC")
-        XCTAssertNotNil(skipReason)
+        XCTAssertNil(skipReason)
+        XCTAssertEqual(hashes.map(\.adhoc), [true, true])
+
+        // Whatever follows the signature's offset is not code; what precedes it is.
+        var afterSignature = data
+        afterSignature.append(Data(repeating: 0xee, count: 64))
+        XCTAssertEqual(try XCTUnwrap(MachOSlice(afterSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
+
+        var beforeSignature = data
+        beforeSignature[127] ^= 0xff
+        XCTAssertNotEqual(try XCTUnwrap(MachOSlice(beforeSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
     }
 }

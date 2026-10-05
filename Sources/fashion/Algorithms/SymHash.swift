@@ -39,7 +39,10 @@ enum SymHash {
      The symhash of one slice, or nil when it carries no symbol table.
      */
     private static func hash(_ slice: MachOSlice, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> String? {
-        guard let symtab = slice.findCommand(UInt32(LC_SYMTAB)).flatMap({ MachOParser.parseSymtab(command: $0, swap: slice.swap) }) else {
+        guard
+            let command = slice.findCommand(UInt32(LC_SYMTAB)),
+            let symtab = try MachOParser.parseSymtab(command: command, swap: slice.swap)
+        else {
             return nil
         }
 
