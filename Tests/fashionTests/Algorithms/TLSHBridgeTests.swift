@@ -45,6 +45,19 @@ final class TLSHBridgeTests: XCTestCase {
         XCTAssertEqual(distance, -1)
     }
 
+    func testDiffRequiresWholeDigests() throws {
+        // libtlsh reads the 70 digits it needs and accepts whatever follows them: only whole digests may be compared.
+        let hash = try XCTUnwrap(TLSHBridge.hash(data: self.data))
+        let digits = String(hash.dropFirst(2))
+        XCTAssertEqual(TLSHBridge.diff(hash, digits), 0, "the T1 prefix is optional")
+        XCTAssertEqual(TLSHBridge.diff(hash, "t1" + digits.lowercased()), 0, "digests compare regardless of case")
+
+        for target in [hash + ":garbage", hash + "ZZZZ", hash + "0", "T2" + digits, String(hash.dropLast()), "T1" + digits.dropLast() + "G", " " + hash] {
+            XCTAssertEqual(TLSHBridge.diff(hash, target), -1, target)
+            XCTAssertNil(Matching.check(digest: hash, against: [target], algorithm: .tlsh, threshold: 40), target)
+        }
+    }
+
     func testHashDeterministic() {
         let first = TLSHBridge.hash(data: self.data)
 

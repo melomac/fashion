@@ -105,11 +105,16 @@ enum TLSHBridge {
     }
 
     /**
-     Compute distance between two TLSH hashes. Lower = more similar. Returns -1 on error.
+     Compute distance between two TLSH hashes. Lower = more similar. Returns -1 on error, including for a string that is
+     not a whole digest.
      */
     static func diff(_ hash1: String, _ hash2: String) -> Int {
-        let h1 = self.stripPrefix(hash1)
-        let h2 = self.stripPrefix(hash2)
+        guard
+            let h1 = self.digits(of: hash1),
+            let h2 = self.digits(of: hash2)
+        else {
+            return -1
+        }
 
         let t1 = tlsh_new()
         let t2 = tlsh_new()
@@ -142,11 +147,20 @@ enum TLSHBridge {
         return hash.isEmpty ? nil : hash.uppercased()
     }
 
-    private static func stripPrefix(_ hash: String) -> String {
-        let upper = hash.uppercased()
-        if upper.hasPrefix(self.digestPrefix) {
-            return String(hash.dropFirst(self.digestPrefix.count))
+    /**
+     The 70 hex digits of a digest as this build makes them (128 buckets, a 1-byte checksum), after an optional `T1`
+     prefix; nil for any other string. `tlsh_from_str` reads the digits it needs and refuses only a 71st one, so it would
+     take a digest followed by anything else.
+     */
+    private static func digits(of hash: String) -> String? {
+        let digits = hash.uppercased().hasPrefix(self.digestPrefix) ? hash.dropFirst(self.digestPrefix.count) : hash[...]
+        let isHexDigit = { (byte: UInt8) in (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte) || (UInt8(ascii: "a") ... UInt8(ascii: "f")).contains(byte | 0x20) }
+        guard
+            digits.utf8.count == 70,
+            digits.utf8.allSatisfy(isHexDigit)
+        else {
+            return nil
         }
-        return hash
+        return String(digits)
     }
 }
