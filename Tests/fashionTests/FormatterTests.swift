@@ -63,6 +63,18 @@ final class FormatterTests: XCTestCase {
         XCTAssertEqual(line, "\\abc123  /tmp/a\\nb")
     }
 
+    func testFormatLineEscapesCarriageReturnLineFeedInPath() {
+        // "\r\n" is a single Character, which contains neither "\r" nor "\n": the line break must still be escaped.
+        for line in [
+            OutputFormatter.formatLine(digest: "abc123", path: "/tmp/a\r\nfake", algorithm: .sha256),
+            OutputFormatter.formatPath("/tmp/a\r\nfake"),
+        ] {
+            XCTAssertFalse(line.utf8.contains { $0 == UInt8(ascii: "\n") || $0 == UInt8(ascii: "\r") }, "Line breaks must be escaped, not emitted literally")
+        }
+        XCTAssertEqual(OutputFormatter.formatLine(digest: "abc123", path: "/tmp/a\r\nfake", algorithm: .sha256), "\\abc123  /tmp/a\\r\\nfake")
+        XCTAssertEqual(OutputFormatter.formatPath("/tmp/a\r\nfake"), "\\/tmp/a\\r\\nfake")
+    }
+
     func testFormatLineEscapesBackslashInPath() {
         let line = OutputFormatter.formatLine(digest: "abc123", path: "/tmp/a\\b", algorithm: .sha256)
         XCTAssertEqual(line, "\\abc123  /tmp/a\\\\b")

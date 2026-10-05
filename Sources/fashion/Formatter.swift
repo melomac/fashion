@@ -62,7 +62,8 @@ enum OutputFormatter {
      characters and prefix the line with a single backslash so consumers can detect and reverse it.
      */
     private static func escapePath(_ path: String) -> (escaped: String, prefix: String) {
-        guard path.contains("\\") || path.contains("\n") || path.contains("\r") else {
+        // A byte test: "\r\n" is a single Character, which String.contains finds neither "\r" nor "\n" in.
+        guard path.utf8.contains(where: { $0 == UInt8(ascii: "\\") || $0 == UInt8(ascii: "\n") || $0 == UInt8(ascii: "\r") }) else {
             return (path, "")
         }
         let escaped = path
