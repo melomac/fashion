@@ -12,6 +12,7 @@ import MachO
  For a fat binary, open the container with `MachOParser` and wrap each architecture slice in its own `MachOSlice`.
  */
 struct MachOSlice {
+    /// The slice's bytes; a slice of a universal file is a view that keeps the file's indices (`Data.bytes(in:)`).
     let data: Data
     let is64: Bool
     let swap: Bool
@@ -249,7 +250,7 @@ struct MachOSlice {
                 break
             }
 
-            commands.append(MachOParser.LoadCommand(cmd: cmd, data: data[offset ..< (offset + size)]))
+            commands.append(MachOParser.LoadCommand(cmd: cmd, data: data.bytes(in: offset ..< offset + size)))
             offset += size
         }
 

@@ -15,21 +15,35 @@ enum FileReader {
     static let chunkSize = 1 << 20
 
     /**
-     Stream a file through `consume` in uncached chunks, stopping after `limit` bytes when set.
+     Stream a file through `consume` in uncached chunks, from `offset` and stopping after `limit` bytes when set: one
+     architecture of a universal file is read like Security's `CodeDirectory::Builder` reads its code, from the
+     descriptor at the slice's offset.
 
-     Throws on an open or read failure.
+     Throws on an open, seek or read failure.
      */
-    static func read(path: String, limit: Int? = nil, _ consume: (UnsafeRawBufferPointer) -> Void) throws {
+    static func read(path: String, offset: Int = 0, limit: Int? = nil, _ consume: (UnsafeRawBufferPointer) -> Void) throws {
         let fd = try FileDescriptor.open(path, .readOnly)
         defer {
             try? fd.close()
         }
         _ = fcntl(fd.rawValue, F_NOCACHE, 1)
-
-        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: self.chunkSize, alignment: 1)
-        defer {
-            buffer.deallocate()
+        if offset > 0 {
+            try fd.seek(offset: Int64(offset), from: .start)
         }
+
+        // The buffer is mapped from the kernel rather than taken from malloc: hash threads freeing a 1 MiB block per
+        // file left about 100 MiB of emptied malloc regions resident, while unmapping returns the pages at once, and a
+        // short file only touches the pages it fills.
+        guard
+            let base = mmap(nil, self.chunkSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0),
+            base != MAP_FAILED
+        else {
+            throw Errno(rawValue: errno)
+        }
+        defer {
+            munmap(base, self.chunkSize)
+        }
+        let buffer = UnsafeMutableRawBufferPointer(start: base, count: self.chunkSize)
 
         var remaining = limit ?? Int.max
         while remaining > 0 {

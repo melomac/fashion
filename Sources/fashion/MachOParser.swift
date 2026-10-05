@@ -284,6 +284,13 @@ enum MachOParser {
 
     // MARK: - Slice Data
 
+    /**
+     One architecture of a universal file, for parsing, as a view into `fileData` rather than a copy: like Security's
+     `MachO` at an offset in its universal file, it reads only the headers and tables it is asked for. A copy took the
+     whole slice into the heap, each hash thread holding one at once.
+
+     The view keeps the file's indices, so its `startIndex` is the slice's offset: read it with `Data.bytes(in:)`.
+     */
     static func sliceData(fileData: Data, arch: FatArch) -> Data {
         // arch.offset/size come from an attacker-controllable fat header; convert through Int(exactly:)
         // and check the sum in wide arithmetic so a crafted 64-bit fat cannot trap on conversion/overflow.
@@ -296,7 +303,7 @@ enum MachOParser {
             return Data()
         }
 
-        return Data(fileData[start ..< start + size])
+        return fileData.bytes(in: start ..< start + size)
     }
 
     // MARK: - Logical Extent

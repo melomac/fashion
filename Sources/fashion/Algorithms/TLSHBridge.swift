@@ -45,20 +45,21 @@ enum TLSHBridge {
     static let digestPrefix = "T1"
 
     /**
-     Compute TLSH hash for a file. Streams in chunks to avoid loading the entire file into memory.
+     Compute TLSH hash for a file, or for `limit` bytes at `offset` (an architecture of a universal binary, or a
+     trimmed Mach-O). Streams in chunks to avoid loading the entire file into memory.
      Data beyond maximumDataSize (~3.93 GiB) is ignored per the TLSH specification (issue #99).
      Returns nil if file is too small or hashing fails.
      */
-    static func hash(path: String) throws -> String? {
+    static func hash(path: String, offset: Int = 0, limit: Int? = nil) throws -> String? {
         let context = tlsh_new()
         defer {
             tlsh_free(context)
         }
 
         // Cap the data fed to libtlsh at maximumDataSize (~3.93 GiB) per issue #99 (fail-closed).
-        let limit = Int(clamping: self.maximumDataSize)
+        let limit = min(limit ?? .max, Int(clamping: self.maximumDataSize))
         var total = 0
-        try FileReader.read(path: path, limit: limit) { chunk in
+        try FileReader.read(path: path, offset: offset, limit: limit) { chunk in
             guard let base = chunk.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return
             }

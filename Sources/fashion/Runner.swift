@@ -754,94 +754,75 @@ struct Digester {
      */
     private func sliceDigests(_ path: String) throws -> [DigestResult] {
         // Read the container first, so a malformed one fails before any hashing.
-        var fatBinary: (data: Data, archs: [MachOParser.FatArch])?
-        if try MachOParser.isMachO(path: path) {
-            let data = try FileReader.map(path: path)
-            if case let .fat(archs) = try MachOParser.open(data: data) {
-                fatBinary = (data, archs)
-            }
-        }
+        let slices = try self.sliceRanges(path)
 
         var results = try self.fileDigest(path).map { [DigestResult(digest: $0)] } ?? []
-        if let fatBinary {
-            for arch in fatBinary.archs {
-                let sliceData = MachOParser.sliceData(fileData: fatBinary.data, arch: arch)
-                let archName = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
-                if let digest = try self.hashData(self.validatedSlice(sliceData)) {
-                    results.append(DigestResult(digest: digest, label: archName))
-                }
+        for slice in slices {
+            if let digest = try self.digest(path, range: slice.range) {
+                results.append(DigestResult(digest: digest, label: slice.arch))
             }
         }
         return results
     }
 
     /**
-     The digest of the whole file, trimmed to the Mach-O logical end when `--exact` is set.
+     Where each architecture of a universal binary lies in the file, as Security's `Universal` places a `MachO` at its
+     offset; none for any other file. Each slice is validated as a thin Mach-O, so a malformed slice is rejected like a
+     malformed thin file, and trimmed to its logical end when `--exact` is set. Only the headers are read, from a map
+     released before the slices are hashed.
+     */
+    private func sliceRanges(_ path: String) throws -> [(range: Range<Int>, arch: String)] {
+        guard try MachOParser.isMachO(path: path) else {
+            return []
+        }
+        let data = try FileReader.map(path: path)
+        guard case let .fat(archs) = try MachOParser.open(data: data) else {
+            return []
+        }
+
+        return try archs.map { arch in
+            let slice = MachOParser.sliceData(fileData: data, arch: arch)
+            // Parse even without --exact: a malformed slice is an error either way. A slice that is not Mach-O at
+            // all is hashed whole.
+            let length = try MachOSlice(slice).map { self.exact ? $0.logicalEnd() : slice.count } ?? slice.count
+            // The view keeps the file's indices: it starts at the slice's offset.
+            return (slice.startIndex ..< slice.startIndex + length, MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
+        }
+    }
+
+    /**
+     The digest of the whole file or, with `--exact`, of a Mach-O's logical content only: the map is lazy, so `fileEnd`
+     faults just the header.
      */
     private func fileDigest(_ path: String) throws -> String? {
-        let algorithm = self.algorithm
-        if self.exact, try MachOParser.isMachO(path: path) {
-            // Mach-O: hash only the logical content. The map is lazy, so fileEnd faults just the
-            // header; crypto and git algorithms then stream the trimmed extent (no full map, no copy),
-            // failing closed if the file shrank in between.
-            let data = try FileReader.map(path: path)
-            let end = try MachOParser.fileEnd(data: data)
-
-            switch algorithm {
-            case .md5, .sha1, .sha256, .sha384, .sha512:
-                return try CryptoDigest.hash(path: path, algorithm: algorithm, limit: end, exactLength: end)
-            case .git, .git256:
-                return try GitBlobDigest.hash(path: path, useSHA256: algorithm == .git256, limit: end)
-            default:
-                return try self.hashData(end < data.count ? data.prefix(end) : data)
-            }
+        guard self.exact, try MachOParser.isMachO(path: path) else {
+            return try self.digest(path)
         }
+        return try self.digest(path, range: 0 ..< MachOParser.fileEnd(data: FileReader.map(path: path)))
+    }
 
-        return switch algorithm {
+    /**
+     The digest of a file, or of `range` of it: streamed uncached from the descriptor at the range's offset, the way
+     Security's `CodeDirectory::Builder` reads a slice's code, so hashing neither maps nor copies a slice. Crypto, git
+     and ssdeep digests of a range fail closed when the file no longer holds it.
+     */
+    private func digest(_ path: String, range: Range<Int>? = nil) throws -> String? {
+        let offset = range?.lowerBound ?? 0
+        let limit = range?.count
+
+        return switch self.algorithm {
         case .md5, .sha1, .sha256, .sha384, .sha512:
-            try CryptoDigest.hash(path: path, algorithm: algorithm)
+            try CryptoDigest.hash(path: path, algorithm: self.algorithm, offset: offset, limit: limit, exactLength: limit)
         case .git:
-            try GitBlobDigest.hash(path: path, useSHA256: false)
+            try GitBlobDigest.hash(path: path, useSHA256: false, offset: offset, limit: limit)
         case .git256:
-            try GitBlobDigest.hash(path: path, useSHA256: true)
+            try GitBlobDigest.hash(path: path, useSHA256: true, offset: offset, limit: limit)
         case .ssdeep:
-            try SSDeepBridge.hash(path: path)
+            try SSDeepBridge.hash(path: path, offset: offset, limit: limit)
         case .tlsh:
-            try TLSHBridge.hash(path: path)
+            try TLSHBridge.hash(path: path, offset: offset, limit: limit)
         case .cdhash:
             try CDHash.hash(path: path).first?.hash
-        }
-    }
-
-    /**
-     Validate a fat slice as a thin Mach-O, so a malformed slice is rejected like a malformed thin file,
-     and trim it to its logical end when --exact is set. A slice that is not Mach-O at all is returned unchanged.
-     */
-    private func validatedSlice(_ slice: Data) throws -> Data {
-        // Parse even without --exact: a malformed slice is an error either way.
-        guard let machO = try MachOSlice(slice) else {
-            return slice
-        }
-        return self.exact ? slice.prefix(machO.logicalEnd()) : slice
-    }
-
-    /**
-     Hash raw bytes with the configured algorithm (shared by the whole-file and slice paths).
-     */
-    private func hashData(_ data: Data) throws -> String? {
-        switch self.algorithm {
-        case .md5, .sha1, .sha256, .sha384, .sha512:
-            try CryptoDigest.hash(data: data, algorithm: self.algorithm)
-        case .git:
-            try GitBlobDigest.hashData(data, useSHA256: false)
-        case .git256:
-            try GitBlobDigest.hashData(data, useSHA256: true)
-        case .ssdeep:
-            SSDeepBridge.hash(data: data)
-        case .tlsh:
-            TLSHBridge.hash(data: data)
-        case .cdhash:
-            try CDHash.hash(data: data)
         }
     }
 }

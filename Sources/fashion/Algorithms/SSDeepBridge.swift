@@ -23,21 +23,35 @@ enum SSDeepBridge {
     private static let resultSize = 2 * 64 + 20
 
     /**
-     Compute ssdeep hash for a file.
-     */
-    static func hash(path: String) throws -> String {
-        var result = [CChar](repeating: 0, count: self.resultSize)
+     Compute ssdeep hash for a file, or for `limit` bytes at `offset` (an architecture of a universal binary, or a
+     trimmed Mach-O), streamed uncached through `FileReader` like every other algorithm.
 
-        errno = 0
-        let status = fuzzy_hash_filename(path, &result)
-        guard status == 0 else {
-            // libfuzzy folds every failure into one status; the errno its open or read left names the cause.
-            guard errno == 0 else {
-                throw Errno(rawValue: errno)
-            }
-            throw SSDeepError.fileHashFailed(status: Int(status))
+     The length is declared up front, as `fuzzy_hash_file` does: libfuzzy then skips the block sizes it cannot use,
+     and fails the digest when the file no longer holds that many bytes.
+     */
+    static func hash(path: String, offset: Int = 0, limit: Int? = nil) throws -> String {
+        let length = try limit ?? FileReader.size(path: path) - offset
+        guard let state = fuzzy_new() else {
+            throw Errno(rawValue: errno)
+        }
+        defer {
+            fuzzy_free(state)
+        }
+        guard fuzzy_set_total_input_length(state, UInt64(length)) == 0 else {
+            throw Errno(rawValue: errno)
         }
 
+        try FileReader.read(path: path, offset: offset, limit: length) { chunk in
+            if let base = chunk.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                _ = fuzzy_update(state, base, chunk.count) // only counts and steps: never fails
+            }
+        }
+
+        var result = [CChar](repeating: 0, count: self.resultSize)
+        let status = fuzzy_digest(state, &result, 0)
+        guard status == 0 else {
+            throw SSDeepError.fileHashFailed(status: Int(status))
+        }
         return self.decode(result)
     }
 

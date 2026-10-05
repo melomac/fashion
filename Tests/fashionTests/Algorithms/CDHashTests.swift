@@ -333,6 +333,8 @@ final class CDHashTests: XCTestCase {
 
         let variants: [(name: String, arguments: [String])] = [
             ("x86_64", ["-arch", "x86_64", sectcreate("__TEXT", "plist")]),
+            // Each slice of a universal file reads its section at offsets counted from the slice, not the file.
+            ("universal", ["-arch", "x86_64", "-arch", "arm64", sectcreate("__TEXT", "plist")]),
             ("dylib", ["-arch", "arm64", "-dynamiclib", sectcreate("__TEXT", "plist")]),
             ("garbage", ["-arch", "arm64", sectcreate("__TEXT", "garbage")]),
             ("empty", ["-arch", "arm64", sectcreate("__TEXT", "empty")]),

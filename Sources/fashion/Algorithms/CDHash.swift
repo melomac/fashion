@@ -131,7 +131,7 @@ extension MachOSlice {
     // MARK: - Embedded signature
 
     private func embeddedCodeDirectories(in sigRange: Range<Int>) throws -> [CodeDirectoryHash] {
-        let signature = Data(self.data[sigRange])
+        let signature = Data(self.data.bytes(in: sigRange))
 
         return try Self.parseCodeDirectories(signature: signature)
             .sorted { Self.hashRank($0.hashType) > Self.hashRank($1.hashType) }
@@ -375,7 +375,7 @@ extension MachOSlice {
             else {
                 return nil
             }
-            return self.data.subdata(in: Int(offset) ..< Int(offset + size))
+            return self.data.bytes(in: Int(offset) ..< Int(offset + size))
         }
         return nil
     }
@@ -499,7 +499,7 @@ private struct CodeDirectoryBuilder {
 
         var offset = 0
         while offset < self.codeLimit {
-            cd.append(hashType.digest(code.subdata(in: offset ..< min(offset + pageSize, self.codeLimit))))
+            cd.append(hashType.digest(code.bytes(in: offset ..< min(offset + pageSize, self.codeLimit))))
             offset += pageSize
         }
         return cd

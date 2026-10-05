@@ -8,14 +8,15 @@ import Foundation
  */
 enum GitBlobDigest {
     /**
-     Compute git blob hash for a file, or for its first `limit` bytes (the trimmed extent of a Mach-O under --exact).
+     Compute git blob hash for a file, or for `limit` bytes at `offset` (an architecture of a universal binary, or the
+     trimmed extent of a Mach-O under --exact).
      */
-    static func hash(path: String, useSHA256: Bool, limit: Int? = nil) throws -> String {
+    static func hash(path: String, useSHA256: Bool, offset: Int = 0, limit: Int? = nil) throws -> String {
         // Stream "blob <size>\0" + content rather than reading the whole file into memory and copying it.
-        let size = try limit ?? FileReader.size(path: path)
+        let size = try limit ?? FileReader.size(path: path) - offset
         let prefix = Data("blob \(size)\0".utf8)
 
-        return try CryptoDigest.hash(path: path, algorithm: useSHA256 ? .sha256 : .sha1, prefix: prefix, limit: size, exactLength: size)
+        return try CryptoDigest.hash(path: path, algorithm: useSHA256 ? .sha256 : .sha1, prefix: prefix, offset: offset, limit: size, exactLength: size)
     }
 
     /**

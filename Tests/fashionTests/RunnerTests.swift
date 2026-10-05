@@ -35,16 +35,17 @@ final class RunnerTests: XCTestCase {
     }
 
     /**
-     A one-architecture universal binary wrapping `slice` at offset 64.
+     A one-architecture universal binary wrapping `slice` at offset 64, declared `size` bytes long when the file is
+     extended past `slice` afterwards.
      */
-    private func fat(wrapping slice: Data) -> Data {
+    private func fat(wrapping slice: Data, size: Int? = nil) -> Data {
         var data = Data()
         data.appendUInt32BE(FAT_MAGIC)
         data.appendUInt32BE(1)
         data.appendInt32BE(CPU_TYPE_ARM64)
         data.appendInt32BE(0)
         data.appendUInt32BE(64)
-        data.appendUInt32BE(UInt32(slice.count))
+        data.appendUInt32BE(UInt32(size ?? slice.count))
         data.appendUInt32BE(0)
         data.append(Data(repeating: 0, count: 64 - data.count))
         data.append(slice)
@@ -126,5 +127,22 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(rejected, 2)
         let accepted = try self.run(good, slices: true)
         XCTAssertEqual(accepted, 0)
+    }
+
+    func testSlicesHashInPlace() throws {
+        // A slice is read from the file at its offset, never copied: a copy made every slice a hash thread held
+        // resident at once, gigabytes over /Applications. One larger than any earlier peak of the process shows it.
+        let before = try XCTUnwrap(Reporter.peakFootprint())
+        let size = Int(before) + 64 << 20
+        let url = try self.write(self.fat(wrapping: self.machO(), size: size), name: "fat-big")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        // Sparse: the slice past its Mach-O header reads back as zeros, without taking memory or disk here.
+        XCTAssertEqual(truncate(url.path, off_t(64 + size)), 0)
+
+        XCTAssertEqual(try self.run(url, slices: true), 0)
+        // A copy alone would reach `size`; hashing in place adds far less than the 64 MiB above `before`.
+        XCTAssertLessThan(try XCTUnwrap(Reporter.peakFootprint()), Int64(size))
     }
 }
