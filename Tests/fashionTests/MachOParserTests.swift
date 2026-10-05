@@ -775,6 +775,13 @@ final class MachOParserTests: XCTestCase {
         return entry
     }
 
+    /**
+     `externalSymbolNames` decoded for comparison: it returns byte ranges.
+     */
+    private func externalSymbolNames(_ data: Data, _ symtab: symtab_command, is64: Bool = true, swap: Bool = false) throws -> [String] {
+        try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: is64, swap: swap).map { String(decoding: data.bytes(in: $0), as: UTF8.self) }
+    }
+
     func testExternalSymbolNamesKeepsUndefinedExternalsOnly() throws {
         // Only N_UNDF | N_EXT entries count: a defined external (N_SECT), a local, and a stab are skipped.
         let strTable = Data("_puts\u{0}_main\u{0}_local\u{0}".utf8)
@@ -786,10 +793,10 @@ final class MachOParserTests: XCTestCase {
         data.append(self.nlist(strx: 0, type: 0x21)) // stab entry carrying N_EXT
 
         let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: symoff, nsyms: 4, stroff: 0, strsize: UInt32(strTable.count))
-        XCTAssertEqual(try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: true, swap: false), ["_puts"])
+        XCTAssertEqual(try self.externalSymbolNames(data, symtab), ["_puts"])
 
         let name = try MachOParser.symbolName(data: data, stroff: 0, strsize: UInt32(strTable.count), strx: 6)
-        XCTAssertEqual(name, "_main")
+        XCTAssertEqual(name, 6 ..< 11) // "_main"
     }
 
     func testExternalSymbolNamesSwapsStringIndex() throws {
@@ -800,7 +807,7 @@ final class MachOParserTests: XCTestCase {
         data.append(self.nlist(strx: UInt32(3).byteSwapped, type: 0x01))
 
         let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: symoff, nsyms: 1, stroff: 0, strsize: UInt32(strTable.count))
-        XCTAssertEqual(try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: true, swap: true), ["_b"])
+        XCTAssertEqual(try self.externalSymbolNames(data, symtab, swap: true), ["_b"])
     }
 
     func testSymbolNameUnterminatedTableIsBounded() throws {
@@ -808,7 +815,7 @@ final class MachOParserTests: XCTestCase {
         let strTable = Data("_main".utf8)
         let symbolName = try MachOParser.symbolName(data: strTable, stroff: 0, strsize: UInt32(strTable.count), strx: 0)
 
-        XCTAssertEqual(symbolName, "_main")
+        XCTAssertEqual(symbolName, 0 ..< 5) // "_main"
     }
 
     func testSymbolNameStrxBeyondStrsizeThrows() {
@@ -830,7 +837,25 @@ final class MachOParserTests: XCTestCase {
         data.append(self.nlist(strx: 3, type: 0x01, is64: false)) // "_b"
 
         let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: symoff, nsyms: 2, stroff: 0, strsize: UInt32(strTable.count))
-        XCTAssertEqual(try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: false, swap: false), ["_a", "_b"])
+        XCTAssertEqual(try self.externalSymbolNames(data, symtab, is64: false), ["_a", "_b"])
+    }
+
+    func testExternalSymbolNamesAreBounded() throws {
+        // Names may overlap: symbols all pointing at one long name add up to far more than the file holds.
+        let name = Data(repeating: 0x41, count: 1 << 20)
+        let count = MachOParser.maxSymbolNamesLength / name.count + 1
+        var data = name
+        for _ in 0 ..< count {
+            data.append(self.nlist(strx: 0, type: 0x01))
+        }
+        let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: UInt32(name.count), nsyms: UInt32(count), stroff: 0, strsize: UInt32(name.count))
+
+        XCTAssertThrowsError(try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: true, swap: false)) { error in
+            XCTAssertEqual(error as? ParserError, .symbolNamesTooLong(limit: MachOParser.maxSymbolNamesLength))
+        }
+        // Up to the limit, overlapping names are names like any other.
+        let atLimit = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: UInt32(name.count), nsyms: UInt32(count - 1), stroff: 0, strsize: UInt32(name.count))
+        XCTAssertEqual(try MachOParser.externalSymbolNames(data: data, symtab: atLimit, is64: true, swap: false).count, count - 1)
     }
 
     func testExternalSymbolNamesOutOfBounds() {

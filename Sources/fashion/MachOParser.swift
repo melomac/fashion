@@ -12,6 +12,7 @@ enum ParserError: Error, Equatable {
     case invalidSymbolTableRange(offset: UInt32, count: UInt32, fileSize: Int)
     case invalidStringTableRange(offset: UInt32, size: UInt32, fileSize: Int)
     case invalidStringTableIndex(index: UInt32, tableSize: UInt32)
+    case symbolNamesTooLong(limit: Int)
 }
 
 extension ParserError: LocalizedError {
@@ -31,6 +32,8 @@ extension ParserError: LocalizedError {
             String(format: NSLocalizedString("Invalid Mach-O: symbol table at offset %u with %@ is outside the %d-byte slice", comment: "Malformed Mach-O symbol-table range"), offset, String(Int(count), pluralizing: "entry", plural: "entries"), fileSize)
         case let .invalidStringTableRange(offset, size, fileSize):
             String(format: NSLocalizedString("Invalid Mach-O: string table at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O string-table range"), offset, size, fileSize)
+        case let .symbolNamesTooLong(limit):
+            String(format: NSLocalizedString("Mach-O too large: its external symbol names add up to more than %ld bytes", comment: "External symbol names beyond the symhash limit"), limit)
         case let .invalidStringTableIndex(index, tableSize):
             String(format: NSLocalizedString("Invalid Mach-O: string table index %u is outside the %u-byte table", comment: "Malformed Mach-O string-table index"), index, tableSize)
         }
@@ -194,13 +197,14 @@ enum MachOParser {
     }
 
     /**
-     Names of the external undefined symbols in a symbol table, in table order: entries whose type is
-     exactly `N_EXT`, with no `N_STAB` bits and the `N_UNDF` section type.
+     The names of the external undefined symbols in a symbol table, in table order, as byte ranges of `data` (read them
+     with `Data.bytes(in:)`): entries whose type is exactly `N_EXT`, with no `N_STAB` bits and the `N_UNDF` section type.
 
      One pass over the mapped bytes, so memory grows with the names that qualify rather than with `nsyms`,
-     which a hostile table sizes freely.
+     which a hostile table sizes freely. Names may overlap in a string table, so their total length is bounded by
+     `maxSymbolNamesLength` rather than by the file: a table whose names go beyond it throws as soon as they do.
      */
-    static func externalSymbolNames(data: Data, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [String] {
+    static func externalSymbolNames(data: Data, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [Range<Int>] {
         // 32-bit slices use the 12-byte `nlist`, 64-bit the 16-byte `nlist_64`; n_strx and n_type sit at the
         // same offsets in both.
         let entrySize = is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size
@@ -214,7 +218,8 @@ enum MachOParser {
         try self.validateStringTable(data: data, stroff: symtab.stroff, strsize: symtab.strsize)
 
         let mask = UInt8(N_STAB | N_EXT | N_TYPE)
-        var names: [String] = []
+        var names: [Range<Int>] = []
+        var length = 0
         try data.withUnsafeBytes { ptr in
             for symbolIndex in 0 ..< Int(symtab.nsyms) {
                 let base = symbolOffset + symbolIndex * entrySize
@@ -222,7 +227,12 @@ enum MachOParser {
                     continue
                 }
                 let strx = ptr.loadUnaligned(fromByteOffset: base, as: UInt32.self)
-                try names.append(self.symbolName(data: data, stroff: symtab.stroff, strsize: symtab.strsize, strx: swap ? strx.byteSwapped : strx))
+                let name = try self.symbolName(data: data, stroff: symtab.stroff, strsize: symtab.strsize, strx: swap ? strx.byteSwapped : strx)
+                length += name.count
+                guard length <= self.maxSymbolNamesLength else {
+                    throw ParserError.symbolNamesTooLong(limit: self.maxSymbolNamesLength)
+                }
+                names.append(name)
             }
         }
         return names
@@ -238,7 +248,10 @@ enum MachOParser {
         }
     }
 
-    static func symbolName(data: Data, stroff: UInt32, strsize: UInt32, strx: UInt32) throws -> String {
+    /**
+     The byte range of the name at `strx` in a string table, up to its NUL or the end of the table.
+     */
+    static func symbolName(data: Data, stroff: UInt32, strsize: UInt32, strx: UInt32) throws -> Range<Int> {
         try self.validateStringTable(data: data, stroff: stroff, strsize: strsize)
 
         guard strx < strsize else {
@@ -251,13 +264,13 @@ enum MachOParser {
         // bound the scan to the already-validated string table extent.
         let tableEnd = Int(stroff) + Int(strsize)
 
-        return data.withUnsafeBytes { raw -> String in
+        return data.withUnsafeBytes { raw -> Range<Int> in
             let bytes = raw.bindMemory(to: UInt8.self)
             var end = start
             while end < tableEnd, bytes[end] != 0 {
                 end += 1
             }
-            return String(decoding: bytes[start ..< end], as: UTF8.self)
+            return start ..< end
         }
     }
 
@@ -328,6 +341,12 @@ enum MachOParser {
      Universal binaries have a small, big-endian, architecture count.
      */
     static let maxSliceCount: UInt32 = 16
+
+    /**
+     The most bytes of external symbol names a symbol table may add up to (64 MiB). Overlapping names let a small crafted
+     table reach gigabytes; the largest of 4,806 large slices of real applications held 2.2 MiB.
+     */
+    static let maxSymbolNamesLength = 64 << 20
 
     private static func parseFat(data: Data, is64: Bool) throws -> BinaryType {
         let nfatArch: UInt32 = data.withUnsafeBytes { ptr in

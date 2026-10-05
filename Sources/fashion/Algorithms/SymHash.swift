@@ -51,12 +51,19 @@ enum SymHash {
             return nil
         }
 
+        // The names stay bytes, sorted in byte order: text would replace invalid UTF-8 and order names as Unicode does.
         var names = try MachOParser.externalSymbolNames(data: slice.data, symtab: symtab, is64: slice.is64, swap: slice.swap)
         if sortSymbols {
-            names.sort()
+            names.sort { slice.data.bytes(in: $0).lexicographicallyPrecedes(slice.data.bytes(in: $1)) }
         }
 
-        let joinedData = Data(names.joined(separator: separator).utf8)
+        var joinedData = Data()
+        for (index, name) in names.enumerated() {
+            if index > 0 {
+                joinedData.append(contentsOf: separator.utf8)
+            }
+            joinedData.append(slice.data.bytes(in: name))
+        }
 
         switch algorithm {
         case .ssdeep:
