@@ -12,12 +12,12 @@ The project natively supports:
 * [CDHash][] of Mach-O binaries — embedded when signed, AD-HOC synthesized when not
 * multithreading
 
-With optimizations, `fashion` is very fast yet has a minimal real memory footprint < 150MB:
+Multithreaded with `--jobs 0`, `fashion` is very fast and stays under 150 MB of memory:
 
-| Machine             | App count | File count    | SHA256 time | TLSH time        |
-|:--------------------|:---------:|:-------------:|:-----------:|:----------------:|
-| Mac Studio M2 Ultra | 292 apps  | 910,000 files |  1 minute   |    2 minutes     |
-| MacBook Air M4      | 231 apps  | 720,000 files | 42 seconds  | 1 minute 30 secs |
+| Machine             | Jobs | App count |   File count    | SHA-256 duration | TLSH duration |
+|:--------------------|:----:|:---------:|:---------------:|:----------------:|:-------------:|
+| Mac Studio M2 Ultra |  24  | 274 apps  | 1,268,656 files |  1 min 18 secs   | 1 min 46 secs |
+| MacBook Air M4      |  10  | 213 apps  |   812,343 files |        50 secs   | 1 min 40 secs |
 
 ## Install
 
@@ -161,11 +161,11 @@ A symlink named directly on the command line is always followed, like `find -H`.
 
 `fashion` follows the grep/codesign convention so it can be scripted:
 
-| Code | Description                                                               |
-|:----:|:--------------------------------------------------------------------------|
-|  0   | success — in match mode, at least one match was found                     |
-|  1   | match mode — no file matched                                              |
-|  2   | one or more paths could not be enumerated or hashed                       |
+| Code | Description                                           |
+|:----:|:------------------------------------------------------|
+|  0   | success — in match mode, at least one match was found |
+|  1   | match mode — no file matched                          |
+|  2   | one or more paths could not be enumerated or hashed   |
 
 Per-path failures (a missing path, a permission-denied directory, an unreadable file, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`; they never abort the rest of the scan.
 
