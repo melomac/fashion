@@ -7,6 +7,7 @@ all: release
 
 PRODUCT_NAME = fashion
 INSTALL_PATH ?= /usr/local/bin/
+ARCHIVE_PATH = /tmp/fashion.zip
 
 .PHONY: debug
 debug:
@@ -28,6 +29,10 @@ clean:
 install: release
 	cp /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) $(INSTALL_PATH)
 
+.PHONY: zip
+zip: release
+	rm $(ARCHIVE_PATH)
+	zip -j $(ARCHIVE_PATH) /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) LICENSE
 
 # ----------------------------------------------------------------------------
 # Xcode
