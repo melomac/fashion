@@ -20,16 +20,25 @@ enum XARParser {
         let checksumAlgorithm: UInt32
     }
 
-    enum XARError: Error, LocalizedError {
+    enum XARError: Error, Equatable, LocalizedError {
         case invalidMagic
         case headerTooShort
-        case readError
+        case tocOutsideFile(offset: UInt64, length: UInt64, fileSize: Int)
+        case tocTooLarge(size: UInt64)
+        case tocDoesNotDecompress(size: UInt64)
 
         var errorDescription: String? {
             switch self {
-            case .invalidMagic: NSLocalizedString("Not a XAR archive", comment: "")
-            case .headerTooShort: NSLocalizedString("XAR header too short", comment: "")
-            case .readError: NSLocalizedString("Failed to read XAR data", comment: "")
+            case .invalidMagic:
+                NSLocalizedString("Not a XAR archive", comment: "File without the XAR magic")
+            case .headerTooShort:
+                NSLocalizedString("XAR header too short", comment: "Truncated XAR header")
+            case let .tocOutsideFile(offset, length, fileSize):
+                String(format: NSLocalizedString("Invalid XAR: table of contents at offset %llu with length %llu is outside the %ld-byte file", comment: "XAR table of contents past the end of the file"), offset, length, fileSize)
+            case let .tocTooLarge(size):
+                String(format: NSLocalizedString("Invalid XAR: table of contents declares %llu bytes uncompressed, beyond the %ld-byte limit", comment: "XAR table of contents larger than the decompression limit"), size, XARParser.maxUncompressedTocSize)
+            case let .tocDoesNotDecompress(size):
+                String(format: NSLocalizedString("Invalid XAR: table of contents does not decompress to its declared %llu bytes", comment: "XAR table of contents that zlib cannot decompress to its declared size"), size)
             }
         }
     }
@@ -69,16 +78,18 @@ enum XARParser {
 
     /**
      Extract and optionally decompress the TOC, then hash it.
+
+     Nil for a file that is not a XAR archive, which its first four bytes tell before the file is mapped (mapping reads a
+     whole file on a volume Foundation deems unsafe, such as a mounted disk image). Throws for one that is, but whose
+     header or table of contents is malformed, rather than report nothing for it.
      */
     static func hashToc(path: String, algorithm: Algorithm, decompress: Bool) throws -> String? {
-        let data = try FileReader.map(path: path)
-
-        let header: XARHeader
-        do {
-            header = try self.parseHeader(data: data)
-        } catch is XARError {
+        guard try FileReader.head(path: path, count: 4) == Array("xar!".utf8) else {
             return nil
         }
+
+        let data = try FileReader.map(path: path)
+        let header = try self.parseHeader(data: data)
 
         // Every length below is attacker-controlled; validate in wide (UInt64) arithmetic and only
         // convert to Int once a value is known to be in range, so a crafted header cannot trap.
@@ -88,37 +99,34 @@ enum XARParser {
             compressedLength <= UInt64(data.count),
             tocStart <= UInt64(data.count) - compressedLength
         else {
-            return nil
+            throw XARError.tocOutsideFile(offset: tocStart, length: compressedLength, fileSize: data.count)
         }
 
+        // A view of the mapped file, hashed in place.
         let start = Int(tocStart)
         let compressed = data[start ..< start + Int(compressedLength)]
 
         let tocData: Data
-        let expectedSize: Int
         if decompress {
             // Defend against a decompression bomb: reject a declared uncompressed size beyond a generous
             // ceiling before allocating the output buffer. Real XAR tables of contents are a few MB at most.
             guard header.uncompressedTocLength <= UInt64(self.maxUncompressedTocSize) else {
-                return nil
+                throw XARError.tocTooLarge(size: header.uncompressedTocLength)
             }
             let size = Int(header.uncompressedTocLength)
-            guard let decompressed = decompressZlib(compressed, size: size) else {
-                return nil
+            guard
+                let decompressed = decompressZlib(compressed, size: size),
+                decompressed.count == size
+            else {
+                throw XARError.tocDoesNotDecompress(size: header.uncompressedTocLength)
             }
             tocData = decompressed
-            expectedSize = size
 
             if let xml = String(data: tocData, encoding: .utf8) {
                 self.logger.debug("XAR TOC:\n\(xml, privacy: .public)")
             }
         } else {
-            tocData = Data(compressed)
-            expectedSize = Int(compressedLength)
-        }
-
-        guard tocData.count == expectedSize else {
-            return nil
+            tocData = compressed
         }
 
         // Hash the TOC data

@@ -9,6 +9,11 @@ enum SymHash {
     }
 
     static func compute(path: String, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> [SymHashResult] {
+        // Peek at the magic first: mapping reads a whole file on a volume Foundation deems unsafe (a mounted disk image).
+        guard try MachOParser.isMachO(path: path) else {
+            return []
+        }
+
         let data = try FileReader.map(path: path)
 
         switch try MachOParser.open(data: data) {

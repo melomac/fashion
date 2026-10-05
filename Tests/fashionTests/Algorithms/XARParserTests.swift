@@ -41,7 +41,18 @@ final class XARParserTests: XCTestCase {
     func testErrorDescriptions() {
         XCTAssertNotNil(XARParser.XARError.invalidMagic.errorDescription)
         XCTAssertNotNil(XARParser.XARError.headerTooShort.errorDescription)
-        XCTAssertNotNil(XARParser.XARError.readError.errorDescription)
+        XCTAssertEqual(
+            XARParser.XARError.tocOutsideFile(offset: 28, length: 1000, fileSize: 28).errorDescription,
+            "Invalid XAR: table of contents at offset 28 with length 1000 is outside the 28-byte file",
+        )
+        XCTAssertEqual(
+            XARParser.XARError.tocTooLarge(size: 1 << 30).errorDescription,
+            "Invalid XAR: table of contents declares 1073741824 bytes uncompressed, beyond the 134217728-byte limit",
+        )
+        XCTAssertEqual(
+            XARParser.XARError.tocDoesNotDecompress(size: 2000).errorDescription,
+            "Invalid XAR: table of contents does not decompress to its declared 2000 bytes",
+        )
     }
 
     // MARK: - hashToc
@@ -57,7 +68,20 @@ final class XARParserTests: XCTestCase {
         XCTAssertNil(result)
     }
 
-    func testHashTocCompressedTocTruncated() throws {
+    func testHashTocShortArchiveThrows() throws {
+        // The magic makes it a XAR archive: a header cut short is an error, not a file to skip.
+        let url = FileManager.default.temporaryDirectory / "fashion-xar-short-\(UUID())"
+        try Data("xar!\u{0}\u{1c}".utf8).write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)) { error in
+            XCTAssertEqual(error as? XARParser.XARError, .headerTooShort)
+        }
+    }
+
+    func testHashTocCompressedTocTruncatedThrows() throws {
         // Valid header but TOC extends past end of data
         var data = Data()
         data.append(contentsOf: [0x78, 0x61, 0x72, 0x21]) // magic
@@ -73,8 +97,9 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)
-        XCTAssertNil(result)
+        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)) { error in
+            XCTAssertEqual(error as? XARParser.XARError, .tocOutsideFile(offset: 28, length: 1000, fileSize: 28))
+        }
     }
 
     func testHashTocUncompressedMode() throws {
@@ -114,8 +139,8 @@ final class XARParserTests: XCTestCase {
         XCTAssertThrowsError(try XARParser.parseHeader(data: data))
     }
 
-    func testHashTocHugeCompressedLengthReturnsNil() throws {
-        // compressedTocLength = UInt64.max would trap on Int(...) before the range check; must return nil.
+    func testHashTocHugeCompressedLengthThrows() throws {
+        // compressedTocLength = UInt64.max would trap on Int(...) before the range check; must throw instead.
         var data = Data()
         data.append(contentsOf: [0x78, 0x61, 0x72, 0x21]) // magic
         data.append(contentsOf: [0x00, 0x1c]) // header size: 28
@@ -130,10 +155,12 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false))
+        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)) { error in
+            XCTAssertEqual(error as? XARParser.XARError, .tocOutsideFile(offset: 28, length: .max, fileSize: 28))
+        }
     }
 
-    func testHashTocDecompressionBombReturnsNil() throws {
+    func testHashTocDecompressionBombThrows() throws {
         // A tiny compressed TOC claiming a huge uncompressed size must be rejected before allocation.
         let toc = Data("<xar><toc></toc></xar>".utf8)
         var compressedLen = uLong(compressBound(uLong(toc.count)))
@@ -167,7 +194,11 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true))
+        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true)) { error in
+            XCTAssertEqual(error as? XARParser.XARError, .tocTooLarge(size: UInt64(XARParser.maxUncompressedTocSize + 1)))
+        }
+        // The compressed TOC itself is still hashed without --decompress.
+        XCTAssertNotNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false))
     }
 
     func testHashTocMissingFileThrows() {
@@ -218,7 +249,7 @@ final class XARParserTests: XCTestCase {
         XCTAssertEqual(result, try CryptoDigest.hash(data: toc, algorithm: .sha256))
     }
 
-    func testHashTocDecompressSizeMismatchReturnsNil() throws {
+    func testHashTocDecompressSizeMismatchThrows() throws {
         let toc = Data("<xar><toc></toc></xar>".utf8)
 
         var compressedLen = uLong(compressBound(uLong(toc.count)))
@@ -255,8 +286,8 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true)
-
-        XCTAssertNil(result, "Should reject when decompressed size doesn't match header")
+        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true), "decompressed size must match the header") { error in
+            XCTAssertEqual(error as? XARParser.XARError, .tocDoesNotDecompress(size: UInt64(toc.count + 999)))
+        }
     }
 }

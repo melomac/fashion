@@ -69,6 +69,11 @@ enum CDHash {
      so appended trailing garbage does not change its ad-hoc cdhash.
      */
     static func hash(path: String, exact: Bool = false) throws -> [SliceResult] {
+        // Peek at the magic first: mapping reads a whole file on a volume Foundation deems unsafe (a mounted disk image).
+        guard try MachOParser.isMachO(path: path) else {
+            return []
+        }
+
         let data = try FileReader.map(path: path)
 
         switch try MachOParser.open(data: data) {
