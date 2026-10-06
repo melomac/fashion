@@ -30,7 +30,7 @@ enum Matching {
 
         for target in targets {
             if lower == target.lowercased() {
-                return MatchResult(matched: true, score: nil)
+                return MatchResult(score: nil)
             }
         }
 
@@ -52,7 +52,7 @@ enum Matching {
                 continue
             }
             if lower.hasPrefix(lowerTarget) {
-                return MatchResult(matched: true, score: nil)
+                return MatchResult(score: nil)
             }
         }
 
@@ -72,7 +72,7 @@ enum Matching {
             }
         }
 
-        return matched ? MatchResult(matched: true, score: bestScore) : nil
+        return matched ? MatchResult(score: bestScore) : nil
     }
 
     private static func checkTLSH(digest: String, targets: [String], threshold: Int) -> MatchResult? {
@@ -88,13 +88,16 @@ enum Matching {
             }
         }
 
-        return matched ? MatchResult(matched: true, score: bestScore) : nil
+        return matched ? MatchResult(score: bestScore) : nil
     }
 }
 
 // MARK: -
 
+/**
+ A match, which `Matching.check` returns only when there is one.
+ */
 struct MatchResult {
-    let matched: Bool
+    /// The ssdeep similarity or TLSH distance; nil for an exact or prefix match.
     let score: Int?
 }

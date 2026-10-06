@@ -28,12 +28,4 @@ final class AlgorithmTests: XCTestCase {
         XCTAssertNil(Algorithm.parse("bogus"))
         XCTAssertNil(Algorithm.parse(""))
     }
-
-    func testIsFuzzy() {
-        XCTAssertTrue(Algorithm.ssdeep.isFuzzy)
-        XCTAssertTrue(Algorithm.tlsh.isFuzzy)
-        XCTAssertFalse(Algorithm.sha256.isFuzzy)
-        XCTAssertFalse(Algorithm.md5.isFuzzy)
-        XCTAssertFalse(Algorithm.git.isFuzzy)
-    }
 }

@@ -129,7 +129,6 @@ final class CDHashTests: XCTestCase {
 
         let match = Matching.check(digest: first.hash, against: [first.hash], algorithm: .cdhash, threshold: 0)
         XCTAssertNotNil(match)
-        XCTAssertTrue(try XCTUnwrap(match?.matched))
     }
 
     func testExactMatchCaseInsensitive() throws {

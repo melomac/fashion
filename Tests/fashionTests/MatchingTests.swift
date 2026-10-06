@@ -4,10 +4,9 @@ import XCTest
 final class MatchingTests: XCTestCase {
     // MARK: - Exact matching
 
-    func testExactMatchFound() throws {
+    func testExactMatchFound() {
         let result = Matching.check(digest: "abc123", against: ["abc123"], algorithm: .sha256, threshold: 0)
         XCTAssertNotNil(result)
-        XCTAssertTrue(try XCTUnwrap(result?.matched))
         XCTAssertNil(result?.score)
     }
 

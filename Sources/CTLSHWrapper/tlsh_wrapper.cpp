@@ -31,12 +31,4 @@ int tlsh_from_str(tlsh_t t, const char* str) {
     return static_cast<Tlsh*>(t)->fromTlshStr(str);
 }
 
-void tlsh_reset(tlsh_t t) {
-    static_cast<Tlsh*>(t)->reset();
-}
-
-const char* tlsh_version(void) {
-    return Tlsh::version();
-}
-
 }

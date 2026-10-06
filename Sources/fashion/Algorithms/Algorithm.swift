@@ -11,10 +11,6 @@ enum Algorithm: String, CaseIterable {
     case tlsh
     case cdhash
 
-    var isFuzzy: Bool {
-        [.ssdeep, .tlsh].contains(self)
-    }
-
     /**
      Parse an algorithm name with alias support.
      */
