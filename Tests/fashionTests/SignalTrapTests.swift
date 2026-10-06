@@ -61,6 +61,13 @@ final class SignalTrapTests: XCTestCase {
     // MARK: - Command Line
 
     /**
+     The environment of a `fashion` child. Xcode's test runner sets OS_ACTIVITY_DT_MODE, which copies the child's os_log
+     lines to its stderr: into what a test reads there, or into a pipe nobody reads, where logging the end of the run on
+     SIGTERM would block.
+     */
+    private let childEnvironment = ProcessInfo.processInfo.environment.filter { $0.key != "OS_ACTIVITY_DT_MODE" }
+
+    /**
      Run the built `fashion` on a small tree with stdout a pipe whose reader is gone, like a `| head` that already exited.
      */
     private func runWithClosedStdout(shell: String? = nil) throws -> (reason: Process.TerminationReason, status: Int32, stderr: String) {
@@ -84,8 +91,7 @@ final class SignalTrapTests: XCTestCase {
             process.executableURL = binary
             process.arguments = [directory.path]
         }
-        // Xcode's test runner sets OS_ACTIVITY_DT_MODE, which copies the child's os_log lines to the stderr read here.
-        process.environment = ProcessInfo.processInfo.environment.filter { $0.key != "OS_ACTIVITY_DT_MODE" }
+        process.environment = self.childEnvironment
         process.standardOutput = stdout
         process.standardError = stderr
 
@@ -135,6 +141,7 @@ final class SignalTrapTests: XCTestCase {
      dies of the signal within five seconds.
      */
     private func assertSigTermEnds(_ process: Process, blocking pipe: Pipe, _ stream: String) throws {
+        process.environment = self.childEnvironment
         try process.run()
         // Output means the run, and with it the signal trap, is under way: a signal sent before that would only meet the
         // default action. Then give the writer time to fill the pipe and block.
