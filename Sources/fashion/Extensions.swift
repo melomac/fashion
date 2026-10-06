@@ -13,7 +13,7 @@ extension String {
 extension Data {
     /**
      The bytes at `range`, counted from the first byte like a Mach-O offset, as a view rather than a copy. A slice of a
-     universal file keeps the file's indices, so its offsets never index it directly.
+     buffer, such as a blob inside a superblob, keeps the buffer's indices, so its offsets never index it directly.
      */
     func bytes(in range: Range<Int>) -> Data {
         self[self.startIndex + range.lowerBound ..< self.startIndex + range.upperBound]

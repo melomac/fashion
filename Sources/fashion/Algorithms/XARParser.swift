@@ -77,56 +77,44 @@ enum XARParser {
     }
 
     /**
-     Extract and optionally decompress the TOC, then hash it.
+     Hash the table of contents, compressed as stored or inflated.
 
-     Nil for a file that is not a XAR archive, which its first four bytes tell before the file is mapped (mapping reads a
-     whole file on a volume Foundation deems unsafe, such as a mounted disk image). Throws for one that is, but whose
-     header or table of contents is malformed, rather than report nothing for it.
+     Nil for a file that is not a XAR archive, which its first four bytes tell. Throws for one that is, but whose header
+     or table of contents is malformed, rather than report nothing for it. The compressed table streams from the file;
+     inflated, it streams through zlib, so memory holds no more than the declared uncompressed size, itself bounded.
      */
-    static func hashToc(path: String, algorithm: ByteHash, decompress: Bool) throws -> String? {
-        guard try FileReader.head(path: path, count: 4) == Array("xar!".utf8) else {
+    static func hashToc(_ file: File, algorithm: ByteHash, decompress: Bool) throws -> String? {
+        guard file.size >= 4, try file.read(at: 0, count: 4) == Data("xar!".utf8) else {
             return nil
         }
-
-        let data = try FileReader.map(path: path)
-        let header = try self.parseHeader(data: data)
+        let header = try self.parseHeader(data: file.read(at: 0, count: min(file.size, 28)))
 
         // Every length below is attacker-controlled; validate in wide (UInt64) arithmetic and only
         // convert to Int once a value is known to be in range, so a crafted header cannot trap.
         let tocStart = UInt64(header.headerSize)
         let compressedLength = header.compressedTocLength
         guard
-            compressedLength <= UInt64(data.count),
-            tocStart <= UInt64(data.count) - compressedLength
+            compressedLength <= UInt64(file.size),
+            tocStart <= UInt64(file.size) - compressedLength
         else {
-            throw XARError.tocOutsideFile(offset: tocStart, length: compressedLength, fileSize: data.count)
+            throw XARError.tocOutsideFile(offset: tocStart, length: compressedLength, fileSize: file.size)
+        }
+        let toc = Int(tocStart) ..< Int(tocStart + compressedLength)
+
+        guard decompress else {
+            return try algorithm.digest(file, range: toc)
         }
 
-        // A view of the mapped file, hashed in place.
-        let start = Int(tocStart)
-        let compressed = data[start ..< start + Int(compressedLength)]
-
-        let tocData: Data
-        if decompress {
-            // Defend against a decompression bomb: reject a declared uncompressed size beyond a generous
-            // ceiling before allocating the output buffer. Real XAR tables of contents are a few MB at most.
-            guard header.uncompressedTocLength <= UInt64(self.maxUncompressedTocSize) else {
-                throw XARError.tocTooLarge(size: header.uncompressedTocLength)
-            }
-            let size = Int(header.uncompressedTocLength)
-            guard
-                let decompressed = decompressZlib(compressed, size: size),
-                decompressed.count == size
-            else {
-                throw XARError.tocDoesNotDecompress(size: header.uncompressedTocLength)
-            }
-            tocData = decompressed
-
-            if let xml = String(data: tocData, encoding: .utf8) {
-                self.logger.debug("XAR TOC:\n\(xml, privacy: .public)")
-            }
-        } else {
-            tocData = compressed
+        // Defend against a decompression bomb: reject a declared uncompressed size beyond a generous
+        // ceiling before allocating the output buffer. Real XAR tables of contents are a few MB at most.
+        guard header.uncompressedTocLength <= UInt64(self.maxUncompressedTocSize) else {
+            throw XARError.tocTooLarge(size: header.uncompressedTocLength)
+        }
+        guard let tocData = try self.inflate(file, range: toc, size: Int(header.uncompressedTocLength)) else {
+            throw XARError.tocDoesNotDecompress(size: header.uncompressedTocLength)
+        }
+        if let xml = String(data: tocData, encoding: .utf8) {
+            self.logger.debug("XAR TOC:\n\(xml, privacy: .public)")
         }
 
         return try algorithm.digest(tocData)
@@ -134,26 +122,49 @@ enum XARParser {
 
     // MARK: - Zlib Decompression
 
-    private static func decompressZlib(_ data: Data, size: Int) -> Data? {
-        var destLen = uLong(size)
-        var dest = Data(count: size)
-
-        let result = data.withUnsafeBytes { src in
-            dest.withUnsafeMutableBytes { dst in
-                guard
-                    let srcBase = src.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    let dstBase = dst.baseAddress?.assumingMemoryBound(to: UInt8.self)
-                else {
-                    return Z_BUF_ERROR
-                }
-                return uncompress(dstBase, &destLen, srcBase, uLong(data.count))
-            }
-        }
-
-        guard result == Z_OK else {
+    /**
+     The `size` bytes the zlib stream at `range` of the file inflates to, as zlib's `uncompress` would decompress the
+     range from memory: nil unless the stream ends within the range, having filled exactly `size` bytes. Bytes after the
+     end of the stream are ignored, and an empty input is refused. An empty output gets a 1-byte buffer, as in
+     `uncompress`, which reports nothing of what lands there.
+     */
+    private static func inflate(_ file: File, range: Range<Int>, size: Int) throws -> Data? {
+        guard !range.isEmpty else {
             return nil
         }
 
-        return dest.prefix(Int(destLen))
+        var stream = z_stream()
+        guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+            return nil
+        }
+        defer {
+            inflateEnd(&stream)
+        }
+
+        var output = Data(count: max(size, 1))
+        var status = Z_OK
+        try output.withUnsafeMutableBytes { buffer in
+            stream.next_out = buffer.baseAddress?.assumingMemoryBound(to: Bytef.self)
+            stream.avail_out = uInt(buffer.count)
+            _ = try file.stream(range) { chunk in
+                // Once the stream ends or fails, the rest of the range is not part of it.
+                guard status == Z_OK else {
+                    return
+                }
+                stream.next_in = UnsafeMutablePointer(mutating: chunk.baseAddress?.assumingMemoryBound(to: Bytef.self))
+                stream.avail_in = uInt(chunk.count)
+                repeat {
+                    status = zlib.inflate(&stream, Z_NO_FLUSH)
+                } while status == Z_OK && stream.avail_in > 0
+            }
+        }
+
+        guard
+            status == Z_STREAM_END,
+            size == 0 || stream.total_out == size
+        else {
+            return nil
+        }
+        return output.prefix(size)
     }
 }

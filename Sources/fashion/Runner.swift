@@ -742,10 +742,6 @@ struct Digester {
      The digests of one file in the selected mode.
      */
     private func digests(_ path: String) throws -> [DigestResult] {
-        if case let .xarToc(hash, decompress) = self.mode {
-            return try XARParser.hashToc(path: path, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
-        }
-
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed.
         let file = try File(path: path)
         return switch self.mode {
@@ -756,8 +752,8 @@ struct Digester {
         case let .symhash(hash, separator, sortSymbols):
             try SymHash.compute(file, algorithm: hash, separator: separator, sortSymbols: sortSymbols)
                 .map { DigestResult(digest: $0.digest, label: $0.arch) }
-        case .xarToc:
-            []
+        case let .xarToc(hash, decompress):
+            try XARParser.hashToc(file, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
         case .cdhash:
             try self.cdHashDigests(file, path: path)
         }

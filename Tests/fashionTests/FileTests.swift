@@ -3,12 +3,6 @@ import System
 import XCTest
 
 final class FileTests: XCTestCase {
-    private func tempFile(_ data: Data) throws -> URL {
-        let url = FileManager.default.temporaryDirectory / "fashion-file-\(UUID())"
-        try data.write(to: url)
-        return url
-    }
-
     func testSizeIsTheSizeWhenOpened() throws {
         XCTAssertEqual(try File(data: Data(repeating: 0, count: 4242)).size, 4242)
     }
@@ -56,23 +50,5 @@ final class FileTests: XCTestCase {
         let file = try File(data: Data(repeating: 0xab, count: 1000))
 
         XCTAssertEqual(try file.stream(900 ..< 1900) { _ in }, 100)
-    }
-
-    func testHeadReturnsLeadingBytes() throws {
-        let url = try self.tempFile(Data([1, 2, 3, 4, 5, 6, 7, 8]))
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertEqual(try FileReader.head(path: url.path(), count: 4), [1, 2, 3, 4])
-    }
-
-    func testHeadShortFileReturnsFewerBytes() throws {
-        let url = try self.tempFile(Data([1, 2, 3]))
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertEqual(try FileReader.head(path: url.path(), count: 8), [1, 2, 3])
     }
 }

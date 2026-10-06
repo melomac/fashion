@@ -64,7 +64,7 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)
+        let result = try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: false)
         XCTAssertNil(result)
     }
 
@@ -76,7 +76,7 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)) { error in
+        XCTAssertThrowsError(try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: false)) { error in
             XCTAssertEqual(error as? XARParser.XARError, .headerTooShort)
         }
     }
@@ -97,7 +97,7 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)) { error in
+        XCTAssertThrowsError(try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: false)) { error in
             XCTAssertEqual(error as? XARParser.XARError, .tocOutsideFile(offset: 28, length: 1000, fileSize: 28))
         }
     }
@@ -123,7 +123,7 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)
+        let result = try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: false)
         XCTAssertNotNil(result)
         // Should match one-shot hash of the TOC bytes
         XCTAssertEqual(result, try ByteHash.sha256.digest(tocBytes))
@@ -155,7 +155,7 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)) { error in
+        XCTAssertThrowsError(try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: false)) { error in
             XCTAssertEqual(error as? XARParser.XARError, .tocOutsideFile(offset: 28, length: .max, fileSize: 28))
         }
     }
@@ -194,15 +194,15 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true)) { error in
+        XCTAssertThrowsError(try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: true)) { error in
             XCTAssertEqual(error as? XARParser.XARError, .tocTooLarge(size: UInt64(XARParser.maxUncompressedTocSize + 1)))
         }
         // The compressed TOC itself is still hashed without --decompress.
-        XCTAssertNotNil(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false))
+        XCTAssertNotNil(try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: false))
     }
 
     func testHashTocMissingFileThrows() {
-        XCTAssertThrowsError(try XARParser.hashToc(path: "/tmp/fashion-nonexistent-\(UUID())", algorithm: .sha256, decompress: false))
+        XCTAssertThrowsError(try XARParser.hashToc(File(path: "/tmp/fashion-nonexistent-\(UUID())"), algorithm: .sha256, decompress: false))
     }
 
     func testHashTocDecompressMode() throws {
@@ -243,7 +243,7 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true)
+        let result = try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: true)
 
         XCTAssertNotNil(result)
         XCTAssertEqual(result, try ByteHash.sha256.digest(toc))
@@ -286,8 +286,65 @@ final class XARParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertThrowsError(try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true), "decompressed size must match the header") { error in
+        XCTAssertThrowsError(try XARParser.hashToc(File(path: url.path()), algorithm: .sha256, decompress: true), "decompressed size must match the header") { error in
             XCTAssertEqual(error as? XARParser.XARError, .tocDoesNotDecompress(size: UInt64(toc.count + 999)))
+        }
+    }
+
+    // MARK: - Streaming inflate
+
+    /**
+     A XAR archive holding `toc` as its table of contents, declared `size` bytes uncompressed, then `trailer`.
+     */
+    private func archive(toc: Data, size: Int, trailer: Data = Data()) -> Data {
+        var data = Data("xar!".utf8)
+        data.append(contentsOf: [0x00, 0x1c, 0x00, 0x01]) // header size 28, version 1
+        data.appendUInt64BE(UInt64(toc.count))
+        data.appendUInt64BE(UInt64(size))
+        data.appendUInt32BE(1) // checksum algorithm
+        return data + toc + trailer
+    }
+
+    private func deflate(_ data: Data, level: Int32 = Z_DEFAULT_COMPRESSION) -> Data {
+        var length = compressBound(uLong(data.count))
+        var compressed = Data(count: Int(length))
+        let status = data.withUnsafeBytes { source in
+            compressed.withUnsafeMutableBytes { destination in
+                compress2(destination.baseAddress!.assumingMemoryBound(to: Bytef.self), &length, source.baseAddress?.assumingMemoryBound(to: Bytef.self), uLong(data.count), level)
+            }
+        }
+        XCTAssertEqual(status, Z_OK)
+        return compressed.prefix(Int(length))
+    }
+
+    func testDecompressStreamsAcrossChunks() throws {
+        // Stored blocks keep the table as large compressed as it is inflated, several reads long.
+        let toc = Data((0 ..< File.chunkSize * 3 + 123).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 9) })
+        let file = try File(data: self.archive(toc: self.deflate(toc, level: 0), size: toc.count))
+
+        XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc))
+    }
+
+    func testDecompressIgnoresBytesAfterTheStream() throws {
+        // As zlib's uncompress does: the declared range may run past the end of the stream.
+        let toc = Data("<xar><toc></toc></xar>".utf8)
+        let file = try File(data: self.archive(toc: self.deflate(toc) + Data(repeating: 0xff, count: 100), size: toc.count))
+
+        XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc))
+    }
+
+    func testDecompressToNothingAsUncompressDoes() throws {
+        // uncompress gives an empty output a 1-byte buffer and reports nothing of it: a stream of up to one byte
+        // inflates to an empty table, a longer one does not decompress.
+        for (content, decompresses) in [(Data(), true), (Data("x".utf8), true), (Data("xy".utf8), false)] {
+            let file = try File(data: self.archive(toc: self.deflate(content), size: 0))
+            if decompresses {
+                XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(Data()))
+            } else {
+                XCTAssertThrowsError(try XARParser.hashToc(file, algorithm: .sha256, decompress: true)) { error in
+                    XCTAssertEqual(error as? XARParser.XARError, .tocDoesNotDecompress(size: 0))
+                }
+            }
         }
     }
 }

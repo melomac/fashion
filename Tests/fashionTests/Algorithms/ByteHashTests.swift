@@ -93,7 +93,7 @@ final class ByteHashTests: XCTestCase {
 
     /// A file larger than a read chunk is hashed across several reads.
     func testFileHashAcrossChunks() throws {
-        let data = Data((0 ..< FileReader.chunkSize * 2 + 1024).map { UInt8($0 & 0xff) })
+        let data = Data((0 ..< File.chunkSize * 2 + 1024).map { UInt8($0 & 0xff) })
         let url = try self.tmpFile(data)
         defer {
             try? FileManager.default.removeItem(at: url)
