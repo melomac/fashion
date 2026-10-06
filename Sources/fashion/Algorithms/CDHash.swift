@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import MachO
 import os
+import System
 
 private let logger = Logger(subsystem: "fashion", category: "cdhash")
 
@@ -327,9 +328,10 @@ extension MachO {
     /**
      The Info.plist embedded in `__TEXT,__info_plist`, like `MachORep::infoPlist`: the section's bytes, whatever they
      hold, or nil. As in `MachOBase::findSection`, a segment command too short for the section table it declares holds
-     no section; a section past the slice's end, which `MachO::dataAt` fails to read, is no Info.plist to `codesign`
-     either. On a big-endian slice (ppc, ppc64) `codesign` bounds the section table with the unswapped section count, so
-     it never finds the section.
+     no section. `MachORep::infoPlist` catches a failed `MachO::dataAt`, so a section `codesign` cannot read is no
+     Info.plist either: one past the slice's end, or one larger than the 2 GiB a single read(2) takes. On a big-endian
+     slice (ppc, ppc64) `codesign` bounds the section table with the unswapped section count, so it never finds the
+     section.
      */
     private func infoPlist() throws -> Data? {
         guard
@@ -366,7 +368,12 @@ extension MachO {
             else {
                 return nil
             }
-            return try self.dataAt(Int(offset), count: Int(size))
+            do {
+                return try self.dataAt(Int(offset), count: Int(size))
+            } catch is Errno {
+                // What codesign cannot read either; a file that changed size is still reported.
+                return nil
+            }
         }
         return nil
     }

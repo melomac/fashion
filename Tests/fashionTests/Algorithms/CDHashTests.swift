@@ -348,6 +348,42 @@ final class CDHashTests: XCTestCase {
         try self.assertAdhocMatchesCodesignDetached(ppc)
     }
 
+    func testAdhocTreatsAnInfoPlistThatCannotBeReadAsNone() throws {
+        // MachORep::infoPlist catches a failed read, so a section larger than the 2 GiB a single read(2) takes is no
+        // Info.plist to codesign, like one past the end of the file. The large file is sparse, and --exact keeps the
+        // code it hashes to the image, the same bytes as in the short file.
+        let dir = try self.temporaryDirectory()
+        let size: UInt64 = 0x9000_0000
+        let (data, offset) = try self.compileWithInfoPlist(in: dir, declaredSize: size)
+
+        let short = dir / "short"
+        let sparse = dir / "sparse"
+        try data.write(to: short)
+        try data.write(to: sparse)
+        XCTAssertEqual(truncate(sparse.path, off_t(offset) + off_t(size)), 0)
+
+        XCTAssertEqual(try CDHash.hash(path: sparse.path, exact: true).map(\.hash), try CDHash.hash(path: short.path).map(\.hash))
+        try self.assertAdhocMatchesCodesignDetached(short)
+    }
+
+    func testAdhocReportsAnInfoPlistTheFileNoLongerHolds() throws {
+        // A read codesign cannot do is no Info.plist, but a file that shrank since it was opened is reported, as
+        // everywhere: the section is declared 1 MiB, the file holds it when opened and loses it before it is read,
+        // while the code up to the --exact end is still there.
+        let dir = try self.temporaryDirectory()
+        let (data, _) = try self.compileWithInfoPlist(in: dir, declaredSize: 1 << 20)
+
+        let path = dir / "shrinking"
+        try data.write(to: path)
+        XCTAssertEqual(truncate(path.path, off_t(data.count + (1 << 20))), 0)
+        let file = try File(path: path.path)
+        XCTAssertEqual(truncate(path.path, off_t(data.count)), 0)
+
+        XCTAssertThrowsError(try CDHash.hash(file, path: path.path, exact: true)) { error in
+            XCTAssertTrue(error is FileError, "\(error)")
+        }
+    }
+
     func testLogicalEndMatchesCodesignStrictValidation() throws {
         // Security's MachO ends the image at __LINKEDIT, and codesign's strict validation rejects any byte past it:
         // the bytes appended to a built binary are exactly the ones logicalEnd trims.
@@ -386,6 +422,27 @@ final class CDHashTests: XCTestCase {
         let built = try Self.run("/usr/bin/xcrun", ["-sdk", sdk, "clang"] + arguments + ["-Wl,-no_adhoc_codesign", source.path(), "-o", output.path()])
         try XCTSkipUnless(built, "cannot build \(name) with the \(sdk) SDK")
         return output
+    }
+
+    /**
+     An arm64 `int main` built with a `__TEXT,__info_plist` section, that section then declared `declaredSize` bytes
+     long: the bytes, and the section's offset in them.
+     */
+    private func compileWithInfoPlist(in dir: URL, declaredSize: UInt64) throws -> (data: Data, offset: Int) {
+        let input = dir / "plist"
+        try Data("<plist/>".utf8).write(to: input)
+        var data = try Data(contentsOf: self.compile("built", in: dir, ["-arch", "arm64", "-Wl,-sectcreate,__TEXT,__info_plist,\(input.path())"]))
+
+        let text = try XCTUnwrap(MachO.loadCommands(data: data).first { $0.segmentName == "__TEXT" })
+        let sections = text.data.startIndex + MemoryLayout<segment_command_64>.size
+        let count = try Int(text.load(segment_command_64.self).nsects)
+        let at = try XCTUnwrap((0 ..< count).map { sections + $0 * MemoryLayout<section_64>.size }.first { at in
+            MachO.name(of: data[at ..< at + 16]) == "__info_plist"
+        })
+        let offset = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: section_64.self) }.offset
+        let sizeAt = at + MemoryLayout<section_64>.offset(of: \.size)!
+        data.replaceSubrange(sizeAt ..< sizeAt + 8, with: withUnsafeBytes(of: declaredSize.littleEndian) { Data($0) })
+        return (data, Int(offset))
     }
 
     /// `data` with its first LC_BUILD_VERSION declaring `platform` and `minOS` instead.
