@@ -7,26 +7,43 @@ import os
  A pull-based file-tree iterator over one or more root paths, using POSIX fts(3).
 
  Enumeration is pull-based (`next()`), so the walk stays a short queue ahead of the (slower) hashing stage instead of
- running the whole tree ahead of it. Sorted, it lists files in the byte order of their paths as it goes: the roots are
- ordered once, and each directory as fts reads it (see `fashion_fts_compare`). Roots nested in one another are walked
- one after the other, not merged.
+ running the whole tree ahead of it. Every root goes to one fts walk, which reports each one that cannot be walked with
+ its own error. Sorted, it lists files in the byte order of their paths as it goes: fts orders the roots and each
+ directory as it reads it (see `fashion_fts_compare`). Roots nested in one another are walked one after the other, not
+ merged.
 
  Not thread-safe: `next()` must be called serially (the walking thread does exactly this).
  */
 final class FileWalker: Sequence, IteratorProtocol {
-    private let follow: Bool
     private let reporter: Reporter?
-    private let sorted: Bool
-    private var roots: IndexingIterator<[String]>
     private var fts: UnsafeMutablePointer<FTS>?
+    /// The root being walked, which an error fts reports without an entry is about.
+    private var root = ""
 
     private static let logger = Logger(subsystem: "fashion", category: "walk")
 
     init(paths: [String], follow: Bool, reporter: Reporter? = nil, sorted: Bool = false) {
-        self.follow = follow
         self.reporter = reporter
-        self.sorted = sorted
-        self.roots = (sorted ? Self.sortedRoots(paths) : paths).makeIterator()
+
+        // FTS_COMFOLLOW follows a symlink named as a root (`find -H`); under FTS_PHYSICAL inner symlinks are still
+        // skipped, and under FTS_LOGICAL it is a no-op.
+        let options: Int32 = (follow ? FTS_LOGICAL : FTS_PHYSICAL) | FTS_NOCHDIR | FTS_COMFOLLOW
+        let roots = paths.map(Self.root)
+
+        // fts_open expects a null-terminated array of C strings, which it copies.
+        var argv = roots.map { strdup($0) } + [nil]
+        defer {
+            for path in argv {
+                free(path)
+            }
+        }
+        self.fts = fts_open(&argv, options, sorted ? fashion_fts_compare : nil)
+        if self.fts == nil {
+            let message = String(cString: strerror(errno))
+            for root in roots {
+                reporter?.report(path: root, message: message)
+            }
+        }
     }
 
     deinit {
@@ -40,83 +57,37 @@ final class FileWalker: Sequence, IteratorProtocol {
      The next regular file path, or nil when every root has been fully walked.
      */
     func next() -> String? {
+        guard let fts = self.fts else {
+            return nil
+        }
+
         while true {
-            if let fts = self.fts {
-                if let path = self.readNext(from: fts) {
-                    return path
+            errno = 0
+            guard let entry = fts_read(fts) else {
+                // The end of the walk, unless fts failed.
+                if errno != 0 {
+                    self.reporter?.report(path: self.root, message: String(cString: strerror(errno)))
                 }
                 fts_close(fts)
                 self.fts = nil
-                continue
-            }
-
-            guard let root = self.roots.next() else {
                 return nil
             }
-            if let immediate = self.start(root: root) {
-                return immediate
+
+            var path: String {
+                String(cString: entry.pointee.fts_path)
             }
-        }
-    }
+            let isRoot = entry.pointee.fts_level == FTS_ROOTLEVEL
+            if isRoot {
+                self.root = path
+            }
 
-    // MARK: - Private
-
-    /**
-     Begin a root: returns a path to emit immediately (a single regular file), or nil after opening an
-     fts walk for a directory or skipping/reporting the root.
-     */
-    private func start(root: String) -> String? {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir) else {
-            self.reporter?.report(path: root, message: "No such file or directory")
-            return nil
-        }
-
-        if isDir.boolValue {
-            self.openFTS(root: root)
-            return nil
-        }
-
-        if self.isRegularFile(root) {
-            return root
-        }
-
-        // A directly-named FIFO, device, or socket would block or spin forever in the read path.
-        Self.logger.info("Skipping non-regular file: \(root, privacy: .public)")
-        return nil
-    }
-
-    private func openFTS(root: String) {
-        // fts builds child paths as the root exactly as given plus "/" plus the entry name. Below a macOS 26
-        // deployment target libc appends the slash unconditionally, so `dir/` walks as `dir//file`; newer libc
-        // collapses one trailing slash but not two. Trim them all here, keeping a bare "/".
-        let root = Self.trimmingTrailingSlashes(root)
-
-        // FTS_COMFOLLOW follows a symlink named as a root (`find -H`), which start() already resolved to a
-        // directory; under FTS_PHYSICAL inner symlinks are still skipped, and under FTS_LOGICAL it is a no-op.
-        let options: Int32 = (self.follow ? FTS_LOGICAL : FTS_PHYSICAL) | FTS_NOCHDIR | FTS_COMFOLLOW
-
-        // fts_open expects a null-terminated array of C strings.
-        guard let cPath = root.withCString({ strndup($0, root.utf8.count) }) else {
-            return
-        }
-        defer {
-            free(cPath)
-        }
-
-        var argv: [UnsafeMutablePointer<CChar>?] = [cPath, nil]
-        guard let handle = fts_open(&argv, options, self.sorted ? fashion_fts_compare : nil) else {
-            self.reporter?.report(path: root, message: String(cString: strerror(errno)))
-            return
-        }
-        self.fts = handle
-    }
-
-    private func readNext(from fts: UnsafeMutablePointer<FTS>) -> String? {
-        while let entry = fts_read(fts) {
             switch Int32(entry.pointee.fts_info) {
             case FTS_F:
-                return String(cString: entry.pointee.fts_path)
+                return path
+
+            case FTS_SLNONE where isRoot:
+                // A root is followed: one whose target is missing does not exist.
+                self.reporter?.report(path: path, message: String(cString: strerror(ENOENT)))
 
             case FTS_SL, FTS_SLNONE:
                 // FTS_LOGICAL: symlinks are followed, so these only appear for broken targets.
@@ -124,51 +95,44 @@ final class FileWalker: Sequence, IteratorProtocol {
                 break
 
             case FTS_DC:
-                let cyclePath = String(cString: entry.pointee.fts_path)
-                Self.logger.info("Cycle detected, skipping: \(cyclePath, privacy: .public)")
+                Self.logger.info("Cycle detected, skipping: \(path, privacy: .public)")
 
             case FTS_DNR, FTS_ERR, FTS_NS:
-                let errPath = String(cString: entry.pointee.fts_path)
-                self.reporter?.report(path: errPath, message: String(cString: strerror(entry.pointee.fts_errno)))
+                self.reporter?.report(path: path, message: String(cString: strerror(entry.pointee.fts_errno)))
+
+            case FTS_DEFAULT where isRoot:
+                // A directly-named FIFO, device, or socket would block or spin forever in the read path.
+                Self.logger.info("Skipping non-regular file: \(path, privacy: .public)")
 
             default:
-                // FTS_D (pre-order), FTS_DP (post-order), FTS_DOT — skip.
+                // FTS_D (pre-order), FTS_DP (post-order), FTS_DOT, and non-regular files within a directory — skip.
                 break
             }
         }
-        return nil
     }
 
-    private func isRegularFile(_ path: String) -> Bool {
-        var info = stat()
-        guard stat(path, &info) == 0 else {
-            return false
-        }
-        return (info.st_mode & S_IFMT) == S_IFREG
-    }
+    // MARK: - Private
 
     /**
-     Drop trailing slashes from a root path, keeping a bare "/". Runs once per root, before the walk starts.
+     A root as fts walks it. fts builds child paths as the root exactly as given plus "/" plus the entry name: below a
+     macOS 26 deployment target libc appends the slash unconditionally, so `dir/` walks as `dir//file`, and newer libc
+     collapses one trailing slash but not two. A directory's are trimmed, keeping a bare "/"; anything else keeps
+     them, so `file/` is reported as not a directory rather than hashed.
      */
-    private static func trimmingTrailingSlashes(_ path: String) -> String {
+    private static func root(_ path: String) -> String {
         var trimmed = path[...]
         while trimmed.utf8.count > 1, trimmed.last == "/" {
             trimmed.removeLast()
         }
-        return String(trimmed)
-    }
 
-    /**
-     Roots in the byte order of the paths under them: a directory's, trimmed, followed by "/" as within the walk.
-     */
-    private static func sortedRoots(_ paths: [String]) -> [String] {
-        paths
-            .map { root -> (key: [UInt8], root: String) in
-                var isDirectory: ObjCBool = false
-                let directory = FileManager.default.fileExists(atPath: root, isDirectory: &isDirectory) && isDirectory.boolValue
-                return (Array(self.trimmingTrailingSlashes(root).utf8) + (directory ? [UInt8(ascii: "/")] : []), root)
-            }
-            .sorted { $0.key.lexicographicallyPrecedes($1.key) }
-            .map(\.root)
+        var info = stat()
+        guard
+            trimmed.count < path.count,
+            stat(path, &info) == 0,
+            info.st_mode & S_IFMT == S_IFDIR
+        else {
+            return path
+        }
+        return String(trimmed)
     }
 }

@@ -10,14 +10,14 @@
 _Static_assert(CPU_SUBTYPE_ARM64E_X1 == 12, "CMachOCompat.h fallback for CPU_SUBTYPE_ARM64E_X1 disagrees with the SDK");
 
 /*
- The byte that follows `length` bytes of the entry's name: the next byte of the name, else "/" for a directory, else
- -1 for the end of a file's name, which sorts first.
+ The byte at `index` of the entry's sort key, its name followed by "/" for a directory: -1 past the end, which sorts
+ first.
  */
-static int next_byte(const FTSENT *entry, size_t length) {
-    if (entry->fts_namelen > length) {
-        return (unsigned char)entry->fts_name[length];
+static int key_byte(const FTSENT *entry, size_t index) {
+    if (index < entry->fts_namelen) {
+        return (unsigned char)entry->fts_name[index];
     }
-    if (entry->fts_info == FTS_D || entry->fts_info == FTS_DC || entry->fts_info == FTS_DNR) {
+    if (index == entry->fts_namelen && (entry->fts_info == FTS_D || entry->fts_info == FTS_DC || entry->fts_info == FTS_DNR)) {
         return '/';
     }
     return -1;
@@ -32,5 +32,13 @@ int fashion_fts_compare(const FTSENT **lhs, const FTSENT **rhs) {
     if (order != 0) {
         return order;
     }
-    return next_byte(a, length) - next_byte(b, length);
+    // Names in one directory differ within a byte past the shorter one; roots are whole paths, and `dir` and `dir/f`
+    // only differ further on.
+    for (size_t index = length;; index++) {
+        int left = key_byte(a, index);
+        int right = key_byte(b, index);
+        if (left != right || left == -1) {
+            return left - right;
+        }
+    }
 }

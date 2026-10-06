@@ -149,5 +149,55 @@ final class FileEnumeratorTests: XCTestCase {
 
         // A root inside another is walked after it, not merged into it.
         XCTAssertEqual(self.sortedWalk([(dir / "a").path, dir.path]), self.sortedWalk([dir.path]) + self.sortedWalk([(dir / "a").path]))
+        // Past `a`, both `a` and `a/sub` go on with "/": the rest of the path decides, in whichever order they are given.
+        let nested = [(dir / "a").path, (dir / "a" / "sub").path]
+        for roots in [nested, nested.reversed()] {
+            XCTAssertEqual(self.sortedWalk(roots), self.sortedWalk([nested[0]]) + self.sortedWalk([nested[1]]))
+        }
+    }
+
+    /**
+     Run the built `fashion` on `arguments`: its exit status and the lines it wrote to stderr.
+     */
+    private func run(_ arguments: [String]) throws -> (status: Int32, errors: [String]) {
+        let process = Process()
+        process.executableURL = try fashionExecutable()
+        process.arguments = arguments
+        process.environment = fashionEnvironment
+        process.standardOutput = FileHandle.nullDevice
+        let stderr = Pipe()
+        process.standardError = stderr
+        try process.run()
+        let output = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init))
+    }
+
+    func testRootsReportTheirOwnErrors() throws {
+        // Each root that cannot be walked is reported with what fts met there: a path in an unreadable directory is
+        // not missing, a file named as a directory is not one, and a root symlink to nothing does not exist.
+        try XCTSkipIf(getuid() == 0, "root reads an unreadable directory")
+        let dir = FileManager.default.temporaryDirectory / "fashion-roots-\(UUID())"
+        try FileManager.default.createDirectory(at: dir / "locked", withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: dir / "locked" / "f")
+        try Data("x".utf8).write(to: dir / "file")
+        try FileManager.default.createSymbolicLink(atPath: (dir / "dangling").path, withDestinationPath: "nowhere")
+        XCTAssertEqual(chmod((dir / "locked").path, 0), 0)
+        defer {
+            chmod((dir / "locked").path, 0o755)
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let roots = [(dir / "locked" / "f").path, (dir / "file").path + "/", (dir / "dangling").path, (dir / "missing").path]
+        XCTAssertTrue(self.sortedWalk(roots).isEmpty)
+
+        let (status, errors) = try self.run(["--sort"] + roots)
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, [
+            "fashion: \(dir.path)/dangling: No such file or directory",
+            "fashion: \(dir.path)/file/: Not a directory",
+            "fashion: \(dir.path)/locked/f: Permission denied",
+            "fashion: \(dir.path)/missing: No such file or directory",
+        ])
     }
 }

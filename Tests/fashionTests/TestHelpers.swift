@@ -125,6 +125,13 @@ func fashionExecutable() throws -> URL {
 
 private final class BundleMarker {}
 
+/**
+ The environment of a `fashion` child. Xcode's test runner sets OS_ACTIVITY_DT_MODE, which copies the child's os_log
+ lines to its stderr: into what a test reads there, or into a pipe nobody reads, where logging the end of the run on
+ SIGTERM would block.
+ */
+let fashionEnvironment = ProcessInfo.processInfo.environment.filter { $0.key != "OS_ACTIVITY_DT_MODE" }
+
 extension URL {
     /**
      Appends a path component using the `/` operator. Test convenience.

@@ -18,8 +18,9 @@
 #endif
 
 /*
- Order one directory's entries by the bytes of their names, a directory's name followed by "/", so that walking
- depth-first lists files in the byte order of their full paths ("a-b" and "a.txt" before "a/x", as '-' and '.' < '/').
+ Order one directory's entries, or the roots of a walk, by the bytes of their names, a directory's name followed by
+ "/", so that walking depth-first lists files in the byte order of their full paths ("a-b" and "a.txt" before "a/x", as
+ '-' and '.' < '/'). A root's name is its whole path: "dir" sorts before "dir/sub".
  */
 int fashion_fts_compare(const FTSENT **lhs, const FTSENT **rhs);
 
