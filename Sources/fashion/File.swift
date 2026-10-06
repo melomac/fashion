@@ -3,6 +3,7 @@ import System
 
 enum FileError: Error, Equatable {
     case sizeChanged(expected: Int, actual: Int)
+    case notRegularFile
 }
 
 extension FileError: LocalizedError {
@@ -10,6 +11,8 @@ extension FileError: LocalizedError {
         switch self {
         case let .sizeChanged(expected, actual):
             "File changed size while hashing (expected \(String(expected, pluralizing: "byte")), read \(actual))"
+        case .notRegularFile:
+            "Not a regular file"
         }
     }
 }
@@ -30,14 +33,25 @@ final class File {
     let size: Int
     private let fd: FileDescriptor
 
+    /**
+     Open the regular file at `path`. The walk found one there, but the path may name something else by the time it is
+     opened: it is opened without blocking, so a FIFO put in its place cannot hang the scan in open(2), and anything but
+     a regular file is refused before it is read.
+     */
     init(path: String) throws {
-        let fd = try FileDescriptor.open(path, .readOnly)
+        let fd = try FileDescriptor.open(path, .readOnly, options: .nonBlocking)
         var info = stat()
         guard fstat(fd.rawValue, &info) == 0 else {
             let error = Errno(rawValue: errno)
             try? fd.close()
             throw error
         }
+        guard info.st_mode & S_IFMT == S_IFREG else {
+            try? fd.close()
+            throw FileError.notRegularFile
+        }
+        // A regular file: its reads block as usual.
+        _ = fcntl(fd.rawValue, F_SETFL, 0)
         _ = fcntl(fd.rawValue, F_NOCACHE, 1)
 
         self.fd = fd

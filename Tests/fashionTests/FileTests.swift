@@ -13,6 +13,22 @@ final class FileTests: XCTestCase {
         }
     }
 
+    func testOpenRefusesWhatIsNotARegularFile() throws {
+        // A FIFO put in place of a walked file would block open(2) until a writer came: it is refused at once instead,
+        // like a directory or a device.
+        let fifo = FileManager.default.temporaryDirectory / "fashion-fifo-\(UUID())"
+        XCTAssertEqual(mkfifo(fifo.path(), 0o600), 0)
+        defer {
+            try? FileManager.default.removeItem(at: fifo)
+        }
+
+        for path in [fifo.path(), FileManager.default.temporaryDirectory.path(), "/dev/null"] {
+            XCTAssertThrowsError(try File(path: path), path) { error in
+                XCTAssertEqual(error as? FileError, .notRegularFile)
+            }
+        }
+    }
+
     func testReadAtOffset() throws {
         let file = try File(data: Data((0 ..< 1000).map { UInt8($0 & 0xff) }))
 

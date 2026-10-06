@@ -15,7 +15,7 @@ final class FileEnumeratorTests: XCTestCase {
     }
 
     func testSortedWalkSkipsFifo() throws {
-        // A directly-named FIFO must be skipped, not opened (which would block forever).
+        // A directly-named FIFO is not a file to hash: the walk skips it.
         let url = FileManager.default.temporaryDirectory / "fashion-fifo-\(UUID())"
         defer {
             try? FileManager.default.removeItem(at: url)

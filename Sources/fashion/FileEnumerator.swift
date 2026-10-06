@@ -100,12 +100,8 @@ final class FileWalker: Sequence, IteratorProtocol {
             case FTS_DNR, FTS_ERR, FTS_NS:
                 self.reporter?.report(path: path, message: String(cString: strerror(entry.pointee.fts_errno)))
 
-            case FTS_DEFAULT where isRoot:
-                // A directly-named FIFO, device, or socket would block or spin forever in the read path.
-                Self.logger.info("Skipping non-regular file: \(path, privacy: .public)")
-
             default:
-                // FTS_D (pre-order), FTS_DP (post-order), FTS_DOT, and non-regular files within a directory — skip.
+                // FTS_D (pre-order), FTS_DP (post-order), FTS_DOT, and non-regular files, named or found — skip.
                 break
             }
         }
