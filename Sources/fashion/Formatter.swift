@@ -19,8 +19,8 @@ enum OutputFormatter {
             return "\(prefix)\(paddedDigest)  \(escaped)"
         }
         let scoreStr = switch algorithm {
-        case .ssdeep: String(format: "%\(self.ssdeepScoreWidth)d", score)
-        case .tlsh: String(format: "%\(self.tlshScoreWidth)d", score)
+        case .ssdeep: String(format: "%\(self.ssdeepScoreWidth)ld", score)
+        case .tlsh: String(format: "%\(self.tlshScoreWidth)ld", score)
         default: ""
         }
         return "\(prefix)\(paddedDigest) \(scoreStr)  \(escaped)"

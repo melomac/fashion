@@ -15,19 +15,19 @@ extension OptionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .conflictingModes:
-            NSLocalizedString("--symhash, --xar-toc, and --slices are mutually exclusive.", comment: "Conflicting command-line modes")
+            "--symhash, --xar-toc, and --slices are mutually exclusive."
         case let .unsupportedSymHashAlgorithm(algorithm):
-            String(format: NSLocalizedString("--symhash does not support the %@ algorithm.", comment: "Unsupported SymHash algorithm"), algorithm.rawValue)
+            "--symhash does not support the \(algorithm.rawValue) algorithm."
         case .unsupportedXarCDHash:
-            NSLocalizedString("--xar-toc does not support the cdhash algorithm.", comment: "Unsupported XAR table-of-contents algorithm")
+            "--xar-toc does not support the cdhash algorithm."
         case .unsupportedSlicesCDHash:
-            NSLocalizedString("--slices does not support the cdhash algorithm; use --algo cdhash on its own.", comment: "Unsupported architecture-slice algorithm")
+            "--slices does not support the cdhash algorithm; use --algo cdhash on its own."
         case .exactWithIncompatibleMode:
-            NSLocalizedString("--exact does not apply to --symhash or --xar-toc.", comment: "Exact mode used with an incompatible command-line mode")
+            "--exact does not apply to --symhash or --xar-toc."
         case .decompressWithoutXarToc:
-            NSLocalizedString("--decompress requires --xar-toc.", comment: "Missing command-line mode required for decompression")
+            "--decompress requires --xar-toc."
         case .negativeScore:
-            NSLocalizedString("--score must be zero or greater.", comment: "Invalid fuzzy matching score")
+            "--score must be zero or greater."
         }
     }
 }

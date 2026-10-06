@@ -19,23 +19,23 @@ extension ParserError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .truncatedMachHeader(expectedSize, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: expected a %d-byte header in a %d-byte file", comment: "Truncated thin Mach-O header"), expectedSize, fileSize)
+            "Invalid Mach-O: expected a \(expectedSize)-byte header in a \(fileSize)-byte file"
         case let .invalidLoadCommandTable(size, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: sizeofcmds %u does not hold a load-command table in the %d-byte slice", comment: "Malformed Mach-O load-command table"), size, fileSize)
+            "Invalid Mach-O: sizeofcmds \(size) does not hold a load-command table in the \(fileSize)-byte slice"
         case let .truncatedLoadCommand(cmd, size, expectedSize):
-            String(format: NSLocalizedString("Invalid Mach-O: load command 0x%x is only %@; its structure requires %ld", comment: "Truncated Mach-O load command"), cmd, String(size, pluralizing: "byte"), expectedSize)
+            "Invalid Mach-O: load command 0x\(String(cmd, radix: 16)) is only \(String(size, pluralizing: "byte")); its structure requires \(expectedSize)"
         case let .invalidFatArchitectureTable(count, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: nfat_arch %u does not fit in the %d-byte file", comment: "Truncated universal Mach-O architecture table"), count, fileSize)
+            "Invalid Mach-O: nfat_arch \(count) does not fit in the \(fileSize)-byte file"
         case let .invalidFatArchitectureRange(offset, size, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: fat architecture range at offset %llu with size %llu is outside the %d-byte file", comment: "Malformed universal Mach-O architecture range"), offset, size, fileSize)
+            "Invalid Mach-O: fat architecture range at offset \(offset) with size \(size) is outside the \(fileSize)-byte file"
         case let .invalidSymbolTableRange(offset, count, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: symbol table at offset %u with %@ is outside the %d-byte slice", comment: "Malformed Mach-O symbol-table range"), offset, String(Int(count), pluralizing: "entry", plural: "entries"), fileSize)
+            "Invalid Mach-O: symbol table at offset \(offset) with \(String(Int(count), pluralizing: "entry", plural: "entries")) is outside the \(fileSize)-byte slice"
         case let .invalidStringTableRange(offset, size, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: string table at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O string-table range"), offset, size, fileSize)
+            "Invalid Mach-O: string table at offset \(offset) with size \(size) is outside the \(fileSize)-byte slice"
         case let .symbolNamesTooLong(limit):
-            String(format: NSLocalizedString("Mach-O too large: its external symbol names add up to more than %ld bytes", comment: "External symbol names beyond the symhash limit"), limit)
+            "Mach-O too large: its external symbol names add up to more than \(limit) bytes"
         case let .invalidStringTableIndex(index, tableSize):
-            String(format: NSLocalizedString("Invalid Mach-O: string table index %u is outside the %u-byte table", comment: "Malformed Mach-O string-table index"), index, tableSize)
+            "Invalid Mach-O: string table index \(index) is outside the \(tableSize)-byte table"
         }
     }
 }

@@ -68,7 +68,7 @@ final class FileWalker: Sequence, IteratorProtocol {
     private func start(root: String) -> String? {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir) else {
-            self.reporter?.report(path: root, message: NSLocalizedString("No such file or directory", comment: "Missing scan root"))
+            self.reporter?.report(path: root, message: "No such file or directory")
             return nil
         }
 

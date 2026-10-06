@@ -30,15 +30,15 @@ enum XARParser {
         var errorDescription: String? {
             switch self {
             case .invalidMagic:
-                NSLocalizedString("Not a XAR archive", comment: "File without the XAR magic")
+                "Not a XAR archive"
             case .headerTooShort:
-                NSLocalizedString("XAR header too short", comment: "Truncated XAR header")
+                "XAR header too short"
             case let .tocOutsideFile(offset, length, fileSize):
-                String(format: NSLocalizedString("Invalid XAR: table of contents at offset %llu with length %llu is outside the %ld-byte file", comment: "XAR table of contents past the end of the file"), offset, length, fileSize)
+                "Invalid XAR: table of contents at offset \(offset) with length \(length) is outside the \(fileSize)-byte file"
             case let .tocTooLarge(size):
-                String(format: NSLocalizedString("Invalid XAR: table of contents declares %llu bytes uncompressed, beyond the %ld-byte limit", comment: "XAR table of contents larger than the decompression limit"), size, XARParser.maxUncompressedTocSize)
+                "Invalid XAR: table of contents declares \(size) bytes uncompressed, beyond the \(XARParser.maxUncompressedTocSize)-byte limit"
             case let .tocDoesNotDecompress(size):
-                String(format: NSLocalizedString("Invalid XAR: table of contents does not decompress to its declared %llu bytes", comment: "XAR table of contents that zlib cannot decompress to its declared size"), size)
+                "Invalid XAR: table of contents does not decompress to its declared \(size) bytes"
             }
         }
     }

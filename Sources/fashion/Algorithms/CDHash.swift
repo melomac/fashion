@@ -20,21 +20,21 @@ extension CDHashError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .invalidCodeSignatureRange(offset, size, fileSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature range at offset %u with size %u is outside the %d-byte slice", comment: "Malformed Mach-O code-signature range"), offset, size, fileSize)
+            "Invalid Mach-O: code signature range at offset \(offset) with size \(size) is outside the \(fileSize)-byte slice"
         case let .truncatedCodeSignatureSuperblob(signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature is only %@; an embedded signature header requires 12", comment: "Truncated embedded code-signature header"), String(signatureSize, pluralizing: "byte"))
+            "Invalid Mach-O: code signature is only \(String(signatureSize, pluralizing: "byte")); an embedded signature header requires 12"
         case let .invalidCodeSignatureMagic(magic):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature has invalid magic 0x%08x", comment: "Malformed embedded code-signature magic"), magic)
+            "Invalid Mach-O: code signature has invalid magic \(String(format: "0x%08x", magic))"
         case let .invalidCodeSignatureSuperblobLength(length, signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature declares a %u-byte superblob inside a %d-byte signature", comment: "Malformed embedded code-signature superblob length"), length, signatureSize)
+            "Invalid Mach-O: code signature declares a \(length)-byte superblob inside a \(signatureSize)-byte signature"
         case let .invalidCodeSignatureIndexTable(count, length):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature index count %u does not fit in the %u-byte superblob", comment: "Malformed embedded code-signature index table"), count, length)
+            "Invalid Mach-O: code signature index count \(count) does not fit in the \(length)-byte superblob"
         case let .invalidCodeSignatureBlobOffset(offset, signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature blob offset %u is outside the %d-byte superblob", comment: "Malformed embedded code-signature blob offset"), offset, signatureSize)
+            "Invalid Mach-O: code signature blob offset \(offset) is outside the \(signatureSize)-byte superblob"
         case let .invalidCodeSignatureBlobRange(offset, size, signatureSize):
-            String(format: NSLocalizedString("Invalid Mach-O: code signature blob at offset %u with size %u is outside the %d-byte superblob", comment: "Malformed embedded code-signature blob range"), offset, size, signatureSize)
+            "Invalid Mach-O: code signature blob at offset \(offset) with size \(size) is outside the \(signatureSize)-byte superblob"
         case let .codeDirectoryTooLarge(length):
-            String(format: NSLocalizedString("Mach-O too large: its %ld-byte ad-hoc CodeDirectory would overflow the 32-bit length field", comment: "Ad-hoc CodeDirectory too large to synthesize"), length)
+            "Mach-O too large: its \(length)-byte ad-hoc CodeDirectory would overflow the 32-bit length field"
         }
     }
 }

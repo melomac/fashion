@@ -8,9 +8,9 @@ enum CryptoDigestError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .unsupported(algorithm):
-            String(format: NSLocalizedString("CryptoDigest does not support %@", comment: "Algorithm that is not a CryptoKit digest"), algorithm.rawValue)
+            "CryptoDigest does not support \(algorithm.rawValue)"
         case let .sizeChanged(expected, actual):
-            String(format: NSLocalizedString("File changed size while hashing (expected %@, read %ld)", comment: "File that changed size while being hashed"), String(expected, pluralizing: "byte"), actual)
+            "File changed size while hashing (expected \(String(expected, pluralizing: "byte")), read \(actual))"
         }
     }
 }

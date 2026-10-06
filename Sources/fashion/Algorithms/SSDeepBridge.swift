@@ -10,7 +10,7 @@ extension SSDeepError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .fileHashFailed(status):
-            String(format: NSLocalizedString("ssdeep failed to hash the file (status %d)", comment: "ssdeep file hashing failure"), status)
+            "ssdeep failed to hash the file (status \(status))"
         }
     }
 }
