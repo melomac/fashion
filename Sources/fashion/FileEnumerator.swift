@@ -83,7 +83,12 @@ final class FileWalker: Sequence, IteratorProtocol {
 
             switch Int32(entry.pointee.fts_info) {
             case FTS_F:
-                return path
+                if let file = String(validatingCString: entry.pointee.fts_path) {
+                    return file
+                }
+                // A name that is not UTF-8 (on NFS, say) would come back with replacement characters, as another path
+                // that might name another file: report it rather than hash something else.
+                self.reporter?.report(path: path, message: String(cString: strerror(EILSEQ)))
 
             case FTS_SLNONE where isRoot:
                 // A root is followed: one whose target is missing does not exist.
