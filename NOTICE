@@ -1,0 +1,72 @@
+fashion
+https://melomac.com/fashion
+
+The source code is available at: https://codeberg.org/melomac/fashion
+A mirror is available at: https://github.com/melomac/fashion
+The fashion binary is built from the tag matching its version (fashion --version).
+
+fashion is licensed under the GNU General Public License version 3, see LICENSE.
+
+The fashion binary includes the third-party code listed below. The ssdeep and TLSH sources, with their license files,
+are in the repository's submodules/ at the commits the release tag pins; swift-argument-parser is the version
+Package.resolved pins.
+
+
+ssdeep
+https://github.com/ssdeep-project/ssdeep
+
+fuzzy.c and fuzzy.h, licensed under the GNU General Public License version 2 or (at your option) any later version,
+used here under version 3, see LICENSE:
+
+    Copyright (C) 2002 Andrew Tridgell
+    Copyright (C) 2006, 2010 ManTech International Corporation
+    Copyright (C) 2012 Kyrus
+    Copyright (C) 2013 Helmut Grohne
+    Copyright (C) 2017, 2026 Tsukasa OI
+
+edit_dist.c, licensed under any of the Boost Software License 1.0, GPL v2 or GPL v3, used here under GPL v3, see
+LICENSE:
+
+    Copyright (C) 2014 kikairoya
+    Copyright (C) 2014 Jesse Kornblum
+
+
+TLSH
+https://github.com/trendmicro/tlsh
+
+TLSH is provided for use under two licenses, Apache OR BSD, and fashion uses it under the BSD license:
+
+    Copyright (c) 2013, Trend Micro Incorporated
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without modification,
+    are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+
+    2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+
+    3. Neither the name of the copyright holder nor the names of its contributors
+       may be used to endorse or promote products derived from this software without
+       specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+    ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+    WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+    IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+    INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+    BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+    LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+    OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+    OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+swift-argument-parser
+https://github.com/apple/swift-argument-parser
+
+Licensed under the Apache License version 2.0 with the Runtime Library Exception, which waives attribution for the
+portions compiled into the binary. Listed here for completeness.

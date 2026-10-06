@@ -199,3 +199,8 @@ Python made it very easy thanks to built-in hashlib, io, and [python-ssdeep](htt
 But [uv](https://docs.astral.sh/uv/ "An extremely fast Python package and project manager, written in Rust.") was [complaining](https://github.com/DinoTools/python-ssdeep/pull/70/changes#diff-60f61ab7a8d1910d86d9fda2261620314edcae5894d5aaa236b821c7256badd7R8 "GitHub: DinoTools/python-ssdeep PR70") about pkg_resources, and I needed features Python couldn't give me without significant effort.
 
 So here we are: Swift, native, concurrent, with C and C++ dependencies bridged as submodules, and zero external runtime requirements.
+
+### License
+
+`fashion` is licensed under the [GNU General Public License version 3](LICENSE).
+The binary includes third-party code from [ssdeep][] (GPL-2.0-or-later) and [TLSH][] (used under BSD-3-Clause): [NOTICE](NOTICE) carries their copyright notices and license terms.

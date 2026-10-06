@@ -32,7 +32,7 @@ install: release
 .PHONY: zip
 zip: release
 	rm -f $(ARCHIVE_PATH)
-	zip -j $(ARCHIVE_PATH) /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) LICENSE
+	zip -j $(ARCHIVE_PATH) /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) LICENSE NOTICE
 
 # ----------------------------------------------------------------------------
 # Xcode
