@@ -8,6 +8,7 @@ private enum OptionError: Error, Equatable {
     case unsupportedSlicesCDHash
     case exactWithIncompatibleMode
     case decompressWithoutXarToc
+    case negativeJobs
     case negativeScore
 }
 
@@ -26,6 +27,8 @@ extension OptionError: LocalizedError {
             "--exact does not apply to --symhash or --xar-toc."
         case .decompressWithoutXarToc:
             "--decompress requires --xar-toc."
+        case .negativeJobs:
+            "--jobs must be zero or greater."
         case .negativeScore:
             "--score must be zero or greater."
         }
@@ -124,10 +127,8 @@ struct Fashion: ParsableCommand {
     }
 
     var resolvedJobs: Int {
-        if self.jobs == 0 || self.jobs > ProcessInfo.processInfo.activeProcessorCount {
-            return ProcessInfo.processInfo.activeProcessorCount
-        }
-        return max(1, self.jobs)
+        let processors = ProcessInfo.processInfo.activeProcessorCount
+        return self.jobs == 0 ? processors : min(self.jobs, processors)
     }
 
     var resolvedSeparator: String {
@@ -171,6 +172,10 @@ struct Fashion: ParsableCommand {
         }
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
             throw ValidationError(OptionError.decompressWithoutXarToc)
+        }
+        // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
+        if self.jobs < 0 {
+            throw ValidationError(OptionError.negativeJobs)
         }
         if self.matchOptions.score < 0 {
             throw ValidationError(OptionError.negativeScore)

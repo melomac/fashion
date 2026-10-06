@@ -31,7 +31,7 @@ install: release
 
 .PHONY: zip
 zip: release
-	rm $(ARCHIVE_PATH)
+	rm -f $(ARCHIVE_PATH)
 	zip -j $(ARCHIVE_PATH) /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) LICENSE
 
 # ----------------------------------------------------------------------------
