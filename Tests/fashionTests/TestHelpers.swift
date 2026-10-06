@@ -19,15 +19,15 @@ extension File {
 }
 
 /**
- Test conveniences over the parser: open a fixture or a path, and best-effort views of a fixture that read as far
+ Test conveniences over the parsers: open a fixture or a path, and best-effort views of a fixture that read as far
  as a damaged load-command table parses instead of throwing (production only uses the throwing initializer).
  */
-extension MachOParser {
-    static func open(path: String) throws -> BinaryType {
+extension Universal {
+    static func open(path: String) throws -> Universal {
         try self.open(File(path: path))
     }
 
-    static func open(data: Data) throws -> BinaryType {
+    static func open(data: Data) throws -> Universal {
         try self.open(File(data: data))
     }
 
@@ -40,25 +40,12 @@ extension MachOParser {
     }
 
     /// One architecture of a universal fixture, copied out as if extracted.
-    static func sliceData(fileData: Data, arch: FatArch) -> Data {
+    static func sliceData(fileData: Data, arch: Architecture) -> Data {
         Data(fileData.bytes(in: arch.range))
     }
 
     static func fileEnd(data: Data) throws -> Int {
         try self.fileEnd(File(data: data))
-    }
-
-    static func loadCommands(data: Data) -> [LoadCommand] {
-        (try? MachO(lenient: File(data: data)))?.loadCommands ?? []
-    }
-
-    static func machOEnd(data: Data) -> Int {
-        (try? MachO(lenient: File(data: data)))?.logicalEnd() ?? data.count
-    }
-
-    /// The external symbol names of raw tables, `symtab` counting from the start of `data`.
-    static func externalSymbolNames(data: Data, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [Data] {
-        try self.externalSymbolNames(file: File(data: data), offset: 0, length: data.count, symtab: symtab, is64: is64, swap: swap)
     }
 }
 
@@ -66,6 +53,21 @@ extension MachO {
     /// A fixture read as a thin file.
     init?(_ data: Data) throws {
         try self.init(File(data: data))
+    }
+
+    static func loadCommands(data: Data) -> [LoadCommand] {
+        (try? MachO(lenient: File(data: data)))?.loadCommands ?? []
+    }
+
+    static func logicalEnd(data: Data) -> Int {
+        (try? MachO(lenient: File(data: data)))?.logicalEnd() ?? data.count
+    }
+}
+
+extension SymHash {
+    /// The external symbol names of raw tables, `symtab` counting from the start of `data`.
+    static func externalSymbolNames(data: Data, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [Data] {
+        try self.externalSymbolNames(file: File(data: data), offset: 0, length: data.count, symtab: symtab, is64: is64, swap: swap)
     }
 }
 

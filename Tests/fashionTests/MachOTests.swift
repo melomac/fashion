@@ -2,20 +2,20 @@
 import MachO
 import XCTest
 
-final class MachOParserTests: XCTestCase {
+final class MachOTests: XCTestCase {
     func testArchNameARM64() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 0), "arm64")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 0), "arm64")
     }
 
     func testArchNameARM64E() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64E), "arm64e")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64E), "arm64e")
     }
 
     /**
      `CPU_SUBTYPE_ARM64E_X1` (12): the third slice of macOS 27 system binaries, `arm64e.x1` to codesign.
      */
     func testArchNameARM64EX1() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 12), "arm64e.x1")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 12), "arm64e.x1")
     }
 
     /**
@@ -23,48 +23,48 @@ final class MachOParserTests: XCTestCase {
      into `arm64`: codesign resolves --arch arm64 to some other arm64-family slice without complaint.
      */
     func testArchNameUnknownARM64SubtypeIsVisible() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 99), "unknown(16777228,99)")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: 99), "unknown(16777228,99)")
     }
 
     func testArchNameX86_64() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: 3), "x86_64")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: 3), "x86_64")
     }
 
     func testArchNameX86_64H() {
         // CPU_SUBTYPE_X86_64_H (8): a Haswell slice is its own architecture to codesign, not a second `x86_64`.
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_H), "x86_64h")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_H), "x86_64h")
     }
 
     func testArchNameARM64_32() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64_32, cpuSubtype: CPU_SUBTYPE_ARM64_32_V8), "arm64_32")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM64_32, cpuSubtype: CPU_SUBTYPE_ARM64_32_V8), "arm64_32")
     }
 
     func testArchNameI386() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_I386, cpuSubtype: 0), "i386")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_I386, cpuSubtype: 0), "i386")
     }
 
     func testArchNameARM() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM, cpuSubtype: 0), "arm")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM, cpuSubtype: 0), "arm")
     }
 
     func testArchNamePPC() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_POWERPC, cpuSubtype: 0), "ppc")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_POWERPC, cpuSubtype: 0), "ppc")
     }
 
     func testArchNamePPC64() {
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_POWERPC64, cpuSubtype: 0), "ppc64")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_POWERPC64, cpuSubtype: 0), "ppc64")
     }
 
     func testArchNameMasksCapabilityBits() {
         let subtypeWithCaps = CPU_SUBTYPE_ARM64E | cpu_subtype_t(bitPattern: 0x8000_0000)
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: subtypeWithCaps), "arm64e")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: subtypeWithCaps), "arm64e")
 
         // Shipping arm64e.x1 slices carry the same versioned-ABI flag: cpusubtype 0x8000000c.
-        XCTAssertEqual(MachOParser.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: cpu_subtype_t(bitPattern: 0x8000_000c)), "arm64e.x1")
+        XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM64, cpuSubtype: cpu_subtype_t(bitPattern: 0x8000_000c)), "arm64e.x1")
     }
 
     func testArchNameUnknownCPU() {
-        XCTAssertEqual(MachOParser.archName(cpuType: 9999, cpuSubtype: 0), "unknown(9999,0)")
+        XCTAssertEqual(Universal.archName(cpuType: 9999, cpuSubtype: 0), "unknown(9999,0)")
     }
 
     /**
@@ -76,9 +76,9 @@ final class MachOParserTests: XCTestCase {
      */
     func testArchNamesMatchCodesign() throws {
         let path = "/bin/ls"
-        let names: [String] = switch try MachOParser.open(path: path) {
-        case let .fat(archs): archs.map { MachOParser.archName(cpuType: $0.cpuType, cpuSubtype: $0.cpuSubtype) }
-        case let .thin(slice): [MachOParser.archName(cpuType: slice.cpuType, cpuSubtype: slice.cpuSubtype)]
+        let names: [String] = switch try Universal.open(path: path) {
+        case let .fat(archs): archs.map { Universal.archName(cpuType: $0.cpuType, cpuSubtype: $0.cpuSubtype) }
+        case let .thin(slice): [Universal.archName(cpuType: slice.cpuType, cpuSubtype: slice.cpuSubtype)]
         case .notMachO: []
         }
         try XCTSkipIf(names.isEmpty, "\(path) is not a Mach-O")
@@ -218,7 +218,7 @@ final class MachOParserTests: XCTestCase {
     func testOpenNotMachO() throws {
         let data = Data("Hello, World!".utf8)
 
-        if case .notMachO = try MachOParser.open(data: data) {
+        if case .notMachO = try Universal.open(data: data) {
             // pass
         } else {
             XCTFail("Expected notMachO")
@@ -228,7 +228,7 @@ final class MachOParserTests: XCTestCase {
     func testOpenEmptyData() throws {
         let data = Data()
 
-        if case .notMachO = try MachOParser.open(data: data) {
+        if case .notMachO = try Universal.open(data: data) {
             // pass
         } else {
             XCTFail("Expected notMachO for empty data")
@@ -238,7 +238,7 @@ final class MachOParserTests: XCTestCase {
     func testOpenThin64() throws {
         let data = self.makeThin64(cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64E)
 
-        if case let .thin(slice) = try MachOParser.open(data: data) {
+        if case let .thin(slice) = try Universal.open(data: data) {
             XCTAssertEqual(slice.cpuType, CPU_TYPE_ARM64)
             XCTAssertEqual(slice.cpuSubtype, CPU_SUBTYPE_ARM64E)
         } else {
@@ -249,7 +249,7 @@ final class MachOParserTests: XCTestCase {
     func testOpenThin64Swapped() throws {
         let data = self.makeThin64Swapped(cpuType: CPU_TYPE_X86_64, cpuSubtype: 3)
 
-        if case let .thin(slice) = try MachOParser.open(data: data) {
+        if case let .thin(slice) = try Universal.open(data: data) {
             XCTAssertEqual(slice.cpuType, CPU_TYPE_X86_64)
             XCTAssertEqual(slice.cpuSubtype, 3)
         } else {
@@ -260,7 +260,7 @@ final class MachOParserTests: XCTestCase {
     func testOpenThin32() throws {
         let data = self.makeThin32(cpuType: CPU_TYPE_I386)
 
-        if case let .thin(slice) = try MachOParser.open(data: data) {
+        if case let .thin(slice) = try Universal.open(data: data) {
             XCTAssertEqual(slice.cpuType, CPU_TYPE_I386)
         } else {
             XCTFail("Expected thin for MH_MAGIC")
@@ -270,7 +270,7 @@ final class MachOParserTests: XCTestCase {
     func testOpenThin32Swapped() throws {
         let data = self.makeThin32Swapped(cpuType: CPU_TYPE_ARM)
 
-        if case let .thin(slice) = try MachOParser.open(data: data) {
+        if case let .thin(slice) = try Universal.open(data: data) {
             XCTAssertEqual(slice.cpuType, CPU_TYPE_ARM)
         } else {
             XCTFail("Expected thin for MH_CIGAM")
@@ -280,7 +280,7 @@ final class MachOParserTests: XCTestCase {
     func testOpenFat() throws {
         let data = self.makeFat()
 
-        if case let .fat(archs) = try MachOParser.open(data: data) {
+        if case let .fat(archs) = try Universal.open(data: data) {
             XCTAssertEqual(archs.count, 1)
             XCTAssertEqual(archs[0].cpuType, CPU_TYPE_ARM64)
         } else {
@@ -291,11 +291,11 @@ final class MachOParserTests: XCTestCase {
     func testOpenFat64() throws {
         let data = self.makeFat64()
 
-        if case let .fat(archs) = try MachOParser.open(data: data) {
+        if case let .fat(archs) = try Universal.open(data: data) {
             XCTAssertEqual(archs.count, 1)
             XCTAssertEqual(archs[0].cpuType, CPU_TYPE_ARM64)
             XCTAssertEqual(archs[0].offset, 4096)
-            let slice = MachOParser.sliceData(fileData: data, arch: archs[0])
+            let slice = Universal.sliceData(fileData: data, arch: archs[0])
             XCTAssertEqual(slice.count, Int(archs[0].size))
         } else {
             XCTFail("Expected fat64 binary")
@@ -312,7 +312,7 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32BE(64)
         data.appendUInt32BE(12)
 
-        XCTAssertThrowsError(try MachOParser.open(data: data)) { error in
+        XCTAssertThrowsError(try Universal.open(data: data)) { error in
             XCTAssertEqual(error as? ParserError, .invalidFatArchitectureTable(count: 2, fileSize: 28))
         }
     }
@@ -321,15 +321,15 @@ final class MachOParserTests: XCTestCase {
         // `lipo -create` also builds universal static libraries, whose slices are `ar` archives rather
         // than Mach-O. The container must open, and the Mach-O-only hashes must simply yield nothing.
         var data = self.makeFatArchive()
-        if case let .fat(archs) = try MachOParser.open(data: data) {
-            XCTAssertEqual(archs.map { MachOParser.archName(cpuType: $0.cpuType, cpuSubtype: $0.cpuSubtype) }, ["arm64", "x86_64"])
+        if case let .fat(archs) = try Universal.open(data: data) {
+            XCTAssertEqual(archs.map { Universal.archName(cpuType: $0.cpuType, cpuSubtype: $0.cpuSubtype) }, ["arm64", "x86_64"])
         } else {
             XCTFail("Expected a universal archive to open as fat")
         }
 
         let clean = data.count
         data.append(Data(repeating: 0x41, count: 100))
-        XCTAssertEqual(try MachOParser.fileEnd(data: data), clean)
+        XCTAssertEqual(try Universal.fileEnd(data: data), clean)
 
         let url = FileManager.default.temporaryDirectory / "fashion-fat-archive-\(UUID()).a"
         try data.write(to: url)
@@ -367,7 +367,7 @@ final class MachOParserTests: XCTestCase {
         data.append(Data(repeating: 0, count: 32 - data.count))
         data.append(slice)
 
-        XCTAssertNoThrow(try MachOParser.open(data: data))
+        XCTAssertNoThrow(try Universal.open(data: data))
 
         let url = FileManager.default.temporaryDirectory / "fashion-fat-malformed-\(UUID())"
         try data.write(to: url)
@@ -403,7 +403,7 @@ final class MachOParserTests: XCTestCase {
         }
 
         // Positive control: the true geometry opens.
-        guard case let .fat(archs) = try MachOParser.open(data: fat(offset: 64, size: UInt32(slice.count))) else {
+        guard case let .fat(archs) = try Universal.open(data: fat(offset: 64, size: UInt32(slice.count))) else {
             return XCTFail("Expected a fat binary")
         }
         XCTAssertEqual(archs.count, 1)
@@ -412,7 +412,7 @@ final class MachOParserTests: XCTestCase {
         let rejected: [(offset: UInt32, size: UInt32)] = [(UInt32(table - 4), UInt32(slice.count)), (64, 0), (64, UInt32(slice.count) + 1000)]
         for (offset, size) in rejected {
             let data = fat(offset: offset, size: size)
-            XCTAssertThrowsError(try MachOParser.open(data: data), "offset \(offset) size \(size)") { error in
+            XCTAssertThrowsError(try Universal.open(data: data), "offset \(offset) size \(size)") { error in
                 XCTAssertEqual(error as? ParserError, .invalidFatArchitectureRange(offset: UInt64(offset), size: UInt64(size), fileSize: data.count))
             }
         }
@@ -427,7 +427,7 @@ final class MachOParserTests: XCTestCase {
                 data.appendUInt32(magic)
                 data.append(Data(repeating: 0, count: count - 4))
 
-                guard case .notMachO = try MachOParser.open(data: data) else {
+                guard case .notMachO = try Universal.open(data: data) else {
                     return XCTFail("\(count)-byte magic \(String(magic, radix: 16)) must not be a Mach-O")
                 }
             }
@@ -441,7 +441,7 @@ final class MachOParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        if case .thin = try MachOParser.open(path: url.path()) {
+        if case .thin = try Universal.open(path: url.path()) {
             // pass
         } else {
             XCTFail("Expected thin from path")
@@ -449,7 +449,7 @@ final class MachOParserTests: XCTestCase {
     }
 
     func testOpenFromMissingPath() {
-        XCTAssertThrowsError(try MachOParser.open(path: "/tmp/fashion-nonexistent-\(UUID())"))
+        XCTAssertThrowsError(try Universal.open(path: "/tmp/fashion-nonexistent-\(UUID())"))
     }
 
     // MARK: - isMachO (whether open reads a Mach-O)
@@ -461,7 +461,7 @@ final class MachOParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertTrue(try MachOParser.isMachO(path: url.path()))
+        XCTAssertTrue(try Universal.isMachO(path: url.path()))
     }
 
     func testIsMachOFalseForNonMachO() throws {
@@ -471,11 +471,11 @@ final class MachOParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertFalse(try MachOParser.isMachO(path: url.path()))
+        XCTAssertFalse(try Universal.isMachO(path: url.path()))
     }
 
     func testIsMachOThrowsForMissingFile() {
-        XCTAssertThrowsError(try MachOParser.isMachO(path: "/tmp/fashion-nonexistent-\(UUID())"))
+        XCTAssertThrowsError(try Universal.isMachO(path: "/tmp/fashion-nonexistent-\(UUID())"))
     }
 
     func testIsMachOTrueForFatBinary() throws {
@@ -485,7 +485,7 @@ final class MachOParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertTrue(try MachOParser.isMachO(path: url.path()))
+        XCTAssertTrue(try Universal.isMachO(path: url.path()))
     }
 
     func testUniversalSliceLimitMatchesDyld() throws {
@@ -516,13 +516,13 @@ final class MachOParserTests: XCTestCase {
 
             var dyldSlices = 0
             let status = macho_for_each_slice(url.path()) { _, _, _, _ in dyldSlices += 1 }
-            if case let .fat(archs) = try MachOParser.open(data: data) {
+            if case let .fat(archs) = try Universal.open(data: data) {
                 XCTAssertEqual(status, 0, "dyld rejects the \(count)-slice file fashion reads as universal")
                 XCTAssertEqual(archs.count, dyldSlices)
             } else {
                 XCTAssertNotEqual(status, 0, "dyld reads the \(count)-slice file fashion rejects")
             }
-            XCTAssertEqual(try MachOParser.isMachO(path: url.path()), count <= 16)
+            XCTAssertEqual(try Universal.isMachO(path: url.path()), count <= 16)
         }
     }
 
@@ -536,7 +536,7 @@ final class MachOParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertFalse(try MachOParser.isMachO(path: url.path()))
+        XCTAssertFalse(try Universal.isMachO(path: url.path()))
     }
 
     func testIsMachOFalseForBogusFatArchCount() throws {
@@ -550,14 +550,14 @@ final class MachOParserTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertFalse(try MachOParser.isMachO(path: url.path()))
+        XCTAssertFalse(try Universal.isMachO(path: url.path()))
     }
 
     // MARK: - Load commands
 
     func testLoadCommandsThin64() {
         let data = self.makeThin64()
-        let cmds = MachOParser.loadCommands(data: data)
+        let cmds = MachO.loadCommands(data: data)
 
         XCTAssertEqual(cmds.count, 1)
         XCTAssertEqual(cmds[0].cmd, UInt32(LC_SYMTAB))
@@ -566,25 +566,25 @@ final class MachOParserTests: XCTestCase {
 
     func testLoadCommandsThin64Swapped() {
         let data = self.makeThin64Swapped()
-        let cmds = MachOParser.loadCommands(data: data)
+        let cmds = MachO.loadCommands(data: data)
 
         XCTAssertEqual(cmds.count, 1)
         XCTAssertEqual(cmds[0].cmd, UInt32(LC_SYMTAB))
     }
 
     func testLoadCommandsEmptyData() {
-        XCTAssertTrue(MachOParser.loadCommands(data: Data()).isEmpty)
+        XCTAssertTrue(MachO.loadCommands(data: Data()).isEmpty)
     }
 
     func testLoadCommandsNotMachO() {
-        XCTAssertTrue(MachOParser.loadCommands(data: Data("hello".utf8)).isEmpty)
+        XCTAssertTrue(MachO.loadCommands(data: Data("hello".utf8)).isEmpty)
     }
 
     func testLoadCommandsTruncatedHeader() {
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
 
-        XCTAssertTrue(MachOParser.loadCommands(data: data).isEmpty)
+        XCTAssertTrue(MachO.loadCommands(data: data).isEmpty)
     }
 
     func testSliceRejectsTruncatedLoadCommand() {
@@ -712,7 +712,7 @@ final class MachOParserTests: XCTestCase {
         let slice = try XCTUnwrap(MachO(self.thinHeader(ncmds: 3, sizeofcmds: UInt32(commands.count), commands: commands)))
         XCTAssertEqual(slice.loadCommands.count, 3)
 
-        XCTAssertThrowsError(try MachOParser.parseSymtab(command: slice.loadCommands[1])) { error in
+        XCTAssertThrowsError(try SymHash.parseSymtab(command: slice.loadCommands[1])) { error in
             XCTAssertEqual(error as? ParserError, .truncatedLoadCommand(cmd: UInt32(LC_SYMTAB), size: 16, expectedSize: 24))
         }
     }
@@ -733,8 +733,8 @@ final class MachOParserTests: XCTestCase {
 
     func testParseSymtab() throws {
         let data = self.makeThin64()
-        let cmds = MachOParser.loadCommands(data: data)
-        let symtab = try MachOParser.parseSymtab(command: cmds[0])
+        let cmds = MachO.loadCommands(data: data)
+        let symtab = try SymHash.parseSymtab(command: cmds[0])
 
         XCTAssertNotNil(symtab)
         XCTAssertEqual(symtab?.symoff, 56)
@@ -742,15 +742,15 @@ final class MachOParserTests: XCTestCase {
     }
 
     func testParseSymtabWrongCommand() {
-        let cmd = MachOParser.LoadCommand(cmd: UInt32(LC_SEGMENT_64), data: Data(repeating: 0, count: 24))
+        let cmd = MachO.LoadCommand(cmd: UInt32(LC_SEGMENT_64), data: Data(repeating: 0, count: 24))
 
-        XCTAssertNil(try MachOParser.parseSymtab(command: cmd))
+        XCTAssertNil(try SymHash.parseSymtab(command: cmd))
     }
 
     func testParseSymtabTooShort() {
-        let cmd = MachOParser.LoadCommand(cmd: UInt32(LC_SYMTAB), data: Data(repeating: 0, count: 8))
+        let cmd = MachO.LoadCommand(cmd: UInt32(LC_SYMTAB), data: Data(repeating: 0, count: 8))
 
-        XCTAssertThrowsError(try MachOParser.parseSymtab(command: cmd)) { error in
+        XCTAssertThrowsError(try SymHash.parseSymtab(command: cmd)) { error in
             XCTAssertEqual(error as? ParserError, .truncatedLoadCommand(cmd: UInt32(LC_SYMTAB), size: 8, expectedSize: 24))
         }
     }
@@ -773,7 +773,7 @@ final class MachOParserTests: XCTestCase {
      `externalSymbolNames` decoded for comparison: it returns bytes.
      */
     private func externalSymbolNames(_ data: Data, _ symtab: symtab_command, is64: Bool = true, swap: Bool = false) throws -> [String] {
-        try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: is64, swap: swap).map { String(decoding: $0, as: UTF8.self) }
+        try SymHash.externalSymbolNames(data: data, symtab: symtab, is64: is64, swap: swap).map { String(decoding: $0, as: UTF8.self) }
     }
 
     /**
@@ -856,12 +856,12 @@ final class MachOParserTests: XCTestCase {
         // As if each name were read in turn: names beyond the limit before a bad index fail as too long, and a bad
         // index before them fails as a bad index.
         let name = Data(repeating: 0x41, count: 1 << 20) + Data([0])
-        let count = MachOParser.maxSymbolNamesLength / (1 << 20) + 1
+        let count = SymHash.maxSymbolNamesLength / (1 << 20) + 1
         let bad = UInt32(name.count)
 
         let (tooLong, tooLongTable) = self.symbols(strings: name, indexes: Array(repeating: 0, count: count) + [bad])
         XCTAssertThrowsError(try self.externalSymbolNames(tooLong, tooLongTable)) { error in
-            XCTAssertEqual(error as? ParserError, .symbolNamesTooLong(limit: MachOParser.maxSymbolNamesLength))
+            XCTAssertEqual(error as? ParserError, .symbolNamesTooLong(limit: SymHash.maxSymbolNamesLength))
         }
         let (badIndex, badIndexTable) = self.symbols(strings: name, indexes: [bad] + Array(repeating: 0, count: count))
         XCTAssertThrowsError(try self.externalSymbolNames(badIndex, badIndexTable)) { error in
@@ -885,26 +885,26 @@ final class MachOParserTests: XCTestCase {
     func testExternalSymbolNamesAreBounded() throws {
         // Names may overlap: symbols all pointing at one long name add up to far more than the file holds.
         let name = Data(repeating: 0x41, count: 1 << 20)
-        let count = MachOParser.maxSymbolNamesLength / name.count + 1
+        let count = SymHash.maxSymbolNamesLength / name.count + 1
         var data = name
         for _ in 0 ..< count {
             data.append(self.nlist(strx: 0, type: 0x01))
         }
         let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: UInt32(name.count), nsyms: UInt32(count), stroff: 0, strsize: UInt32(name.count))
 
-        XCTAssertThrowsError(try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: true, swap: false)) { error in
-            XCTAssertEqual(error as? ParserError, .symbolNamesTooLong(limit: MachOParser.maxSymbolNamesLength))
+        XCTAssertThrowsError(try SymHash.externalSymbolNames(data: data, symtab: symtab, is64: true, swap: false)) { error in
+            XCTAssertEqual(error as? ParserError, .symbolNamesTooLong(limit: SymHash.maxSymbolNamesLength))
         }
         // Up to the limit, overlapping names are names like any other.
         let atLimit = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: UInt32(name.count), nsyms: UInt32(count - 1), stroff: 0, strsize: UInt32(name.count))
-        XCTAssertEqual(try MachOParser.externalSymbolNames(data: data, symtab: atLimit, is64: true, swap: false).count, count - 1)
+        XCTAssertEqual(try SymHash.externalSymbolNames(data: data, symtab: atLimit, is64: true, swap: false).count, count - 1)
     }
 
     func testExternalSymbolNamesOutOfBounds() {
         let data = Data(count: 10)
         let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: 0, nsyms: 100, stroff: 0, strsize: 10)
 
-        XCTAssertThrowsError(try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: true, swap: false)) { error in
+        XCTAssertThrowsError(try SymHash.externalSymbolNames(data: data, symtab: symtab, is64: true, swap: false)) { error in
             XCTAssertEqual(error as? ParserError, .invalidSymbolTableRange(offset: 0, count: 100, fileSize: 10))
         }
     }
@@ -921,7 +921,7 @@ final class MachOParserTests: XCTestCase {
 
     func testArchitectureReadsAtItsOffset() throws {
         let fat = self.makeFat()
-        guard case let .fat(archs) = try MachOParser.open(data: fat) else {
+        guard case let .fat(archs) = try Universal.open(data: fat) else {
             return XCTFail("Expected fat")
         }
         let image = try XCTUnwrap(MachO(File(data: fat), offset: archs[0].range.lowerBound, length: archs[0].range.count))
@@ -938,7 +938,7 @@ final class MachOParserTests: XCTestCase {
     func testMachOEndNoTrailingSlack() {
         let data = self.makeThin64()
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
     }
 
     func testMachOEndStripsAppendedGarbage() {
@@ -946,7 +946,7 @@ final class MachOParserTests: XCTestCase {
         let original = data.count
         data.append(Data(repeating: 0x41, count: 100))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), original)
+        XCTAssertEqual(MachO.logicalEnd(data: data), original)
     }
 
     func testMachOEndSwappedStripsAppendedGarbage() {
@@ -954,19 +954,19 @@ final class MachOParserTests: XCTestCase {
         let original = data.count
         data.append(Data(repeating: 0xff, count: 64))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), original)
+        XCTAssertEqual(MachO.logicalEnd(data: data), original)
     }
 
     func testMachOEndNonMachOReturnsFullLength() {
         let data = Data("not a mach-o, just some text".utf8)
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
     }
 
     func testMachOEndTruncatedReturnsFullLength() {
         let data = Data([0xcf, 0xfa, 0xed]) // truncated MH_MAGIC_64
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
     }
 
     func testMachOEndRealBinaryWithinBounds() throws {
@@ -974,12 +974,12 @@ final class MachOParserTests: XCTestCase {
             throw XCTSkip("/bin/ls not readable")
         }
 
-        let slice: Data = switch try MachOParser.open(data: data) {
-        case let .fat(archs): MachOParser.sliceData(fileData: data, arch: archs[0])
+        let slice: Data = switch try Universal.open(data: data) {
+        case let .fat(archs): Universal.sliceData(fileData: data, arch: archs[0])
         case .thin: data
         case .notMachO: Data()
         }
-        let end = MachOParser.machOEnd(data: slice)
+        let end = MachO.logicalEnd(data: slice)
 
         XCTAssertGreaterThan(end, 0)
         XCTAssertLessThanOrEqual(end, slice.count)
@@ -987,11 +987,11 @@ final class MachOParserTests: XCTestCase {
 
     func testExactHashIgnoresAppendedGarbage() throws {
         var macho = self.makeThin64()
-        let cleanEnd = MachOParser.machOEnd(data: macho)
+        let cleanEnd = MachO.logicalEnd(data: macho)
         let cleanHash = try ByteHash.sha256.digest(Data(macho.prefix(cleanEnd)))
 
         macho.append(Data(repeating: 0x41, count: 4096))
-        let dirtyEnd = MachOParser.machOEnd(data: macho)
+        let dirtyEnd = MachO.logicalEnd(data: macho)
         let dirtyTrimmed = try ByteHash.sha256.digest(Data(macho.prefix(dirtyEnd)))
         let dirtyWhole = try ByteHash.sha256.digest(macho)
 
@@ -1024,7 +1024,7 @@ final class MachOParserTests: XCTestCase {
         let logicalEnd = data.count
         data.append(Data(repeating: 0x41, count: 100)) // appended garbage
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
+        XCTAssertEqual(MachO.logicalEnd(data: data), logicalEnd)
     }
 
     func testMachOEndLinkedit32Trim() {
@@ -1051,7 +1051,7 @@ final class MachOParserTests: XCTestCase {
         let logicalEnd = data.count
         data.append(Data(repeating: 0x41, count: 80))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd)
+        XCTAssertEqual(MachO.logicalEnd(data: data), logicalEnd)
     }
 
     func testMachOEndWithoutLinkeditOrSymtabKeepsWholeSlice() {
@@ -1079,7 +1079,7 @@ final class MachOParserTests: XCTestCase {
         data.append(Data(repeating: 0xab, count: 128 - data.count))
         data.append(Data(repeating: 0x41, count: 50))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
     }
 
     func testMachOEndFirstCommandWins() {
@@ -1103,14 +1103,14 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32(1); data.appendUInt32(1); data.appendUInt32(0); data.appendUInt32(0) // maxprot, initprot, nsects, flags
         data.append(Data(repeating: 0xab, count: 250 - data.count))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), 144)
+        XCTAssertEqual(MachO.logicalEnd(data: data), 144)
     }
 
     func testMachOEndPastSliceKeepsWholeSlice() {
         var data = self.makeThin64()
         data.replaceSubrange(52 ..< 56, with: withUnsafeBytes(of: UInt32(1000).littleEndian) { Data($0) }) // strsize past the slice
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), data.count)
+        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
     }
 
     func testMachOEndFatSliceStripsGarbage() throws {
@@ -1130,11 +1130,11 @@ final class MachOParserTests: XCTestCase {
         fat.append(Data(repeating: 0, count: 4096 - fat.count))
         fat.append(slice)
 
-        guard case let .fat(archs) = try MachOParser.open(data: fat) else {
+        guard case let .fat(archs) = try Universal.open(data: fat) else {
             XCTFail("Expected fat"); return
         }
-        let extracted = MachOParser.sliceData(fileData: fat, arch: archs[0])
-        XCTAssertEqual(MachOParser.machOEnd(data: extracted), cleanEnd, "per-arch slice trim must strip in-slice garbage")
+        let extracted = Universal.sliceData(fileData: fat, arch: archs[0])
+        XCTAssertEqual(MachO.logicalEnd(data: extracted), cleanEnd, "per-arch slice trim must strip in-slice garbage")
     }
 
     func testMachOEndSkipsOtherCommands() {
@@ -1156,7 +1156,7 @@ final class MachOParserTests: XCTestCase {
         let logicalEnd = data.count // 80
         data.append(Data(repeating: 0x41, count: 50))
 
-        XCTAssertEqual(MachOParser.machOEnd(data: data), logicalEnd, "a command before LC_SYMTAB must not block trimming")
+        XCTAssertEqual(MachO.logicalEnd(data: data), logicalEnd, "a command before LC_SYMTAB must not block trimming")
     }
 
     // MARK: - fileEnd (whole-file logical end)
@@ -1165,14 +1165,14 @@ final class MachOParserTests: XCTestCase {
         var thin = self.makeThin64()
         let clean = thin.count
         thin.append(Data(repeating: 0x41, count: 100))
-        XCTAssertEqual(try MachOParser.fileEnd(data: thin), clean)
+        XCTAssertEqual(try Universal.fileEnd(data: thin), clean)
     }
 
     func testFileEndFatStripsTrailingGarbage() throws {
         var fat = self.makeFat()
         let clean = fat.count
         fat.append(Data(repeating: 0x41, count: 200))
-        XCTAssertEqual(try MachOParser.fileEnd(data: fat), clean)
+        XCTAssertEqual(try Universal.fileEnd(data: fat), clean)
     }
 
     func testFileEndFat64RejectsHugeOffset() {
@@ -1186,7 +1186,7 @@ final class MachOParserTests: XCTestCase {
         data.appendUInt32BE(0)
         data.appendUInt32BE(0)
 
-        XCTAssertThrowsError(try MachOParser.fileEnd(data: data)) { error in
+        XCTAssertThrowsError(try Universal.fileEnd(data: data)) { error in
             XCTAssertEqual(
                 error.localizedDescription,
                 "Invalid Mach-O: fat architecture range at offset \(UInt64.max) with size 1 is outside the 40-byte file",
@@ -1223,6 +1223,6 @@ final class MachOParserTests: XCTestCase {
 
     func testFileEndNonMachOReturnsFullLength() throws {
         let data = Data("plain text, not mach-o".utf8)
-        XCTAssertEqual(try MachOParser.fileEnd(data: data), data.count)
+        XCTAssertEqual(try Universal.fileEnd(data: data), data.count)
     }
 }

@@ -799,7 +799,7 @@ struct Digester {
      malformed thin file, and trimmed to its logical end when `--exact` is set. Only the headers are read.
      */
     private func sliceRanges(_ file: File) throws -> [(range: Range<Int>, arch: String)] {
-        guard case let .fat(archs) = try MachOParser.open(file) else {
+        guard case let .fat(archs) = try Universal.open(file) else {
             return []
         }
 
@@ -808,7 +808,7 @@ struct Digester {
             // all is hashed whole.
             let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count)
             let length = image.map { self.exact ? $0.logicalEnd() : arch.range.count } ?? arch.range.count
-            return (arch.range.lowerBound ..< arch.range.lowerBound + length, MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
+            return (arch.range.lowerBound ..< arch.range.lowerBound + length, Universal.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
         }
     }
 
@@ -820,6 +820,6 @@ struct Digester {
         guard self.exact else {
             return try hash.digest(file)
         }
-        return try hash.digest(file, range: 0 ..< MachOParser.fileEnd(file))
+        return try hash.digest(file, range: 0 ..< Universal.fileEnd(file))
     }
 }

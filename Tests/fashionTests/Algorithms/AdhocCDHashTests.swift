@@ -212,7 +212,7 @@ final class AdhocCDHashTests: XCTestCase {
         guard let file = try? File(path: "/bin/ls") else {
             throw XCTSkip("/bin/ls not readable")
         }
-        let image: MachO? = switch try MachOParser.open(file) {
+        let image: MachO? = switch try Universal.open(file) {
         case let .fat(archs): try MachO(file, offset: archs[0].range.lowerBound, length: archs[0].range.count)
         case let .thin(image): image
         case .notMachO: nil

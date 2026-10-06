@@ -26,13 +26,13 @@ final class CDHashTests: XCTestCase {
         }
 
         // For thin binary or first slice, hash(data:) on the slice should match
-        switch try MachOParser.open(data: data) {
+        switch try Universal.open(data: data) {
         case .thin:
             let dataHash = try CDHash.hash(data: data)
             XCTAssertEqual(dataHash, pathResults[0].hash)
         case let .fat(archs):
             // hash(data:) on first slice should match first path result
-            let slice = MachOParser.sliceData(fileData: data, arch: archs[0])
+            let slice = Universal.sliceData(fileData: data, arch: archs[0])
             let dataHash = try CDHash.hash(data: slice)
             XCTAssertEqual(dataHash, pathResults[0].hash)
         case .notMachO:
@@ -53,7 +53,7 @@ final class CDHashTests: XCTestCase {
         for candidate in candidates {
             guard
                 FileManager.default.fileExists(atPath: candidate),
-                case .fat? = try? MachOParser.open(path: candidate)
+                case .fat? = try? Universal.open(path: candidate)
             else {
                 continue
             }
@@ -225,7 +225,7 @@ final class CDHashTests: XCTestCase {
         // CodeDirectory, which has no execSeg fields.
         let dir = try self.temporaryDirectory()
         let intel = try Data(contentsOf: self.compile("intel", in: dir, ["-arch", "x86_64"]))
-        let text = try XCTUnwrap(MachOParser.loadCommands(data: intel).first { $0.cmd == UInt32(LC_SEGMENT_64) && $0.data.dropFirst(8).prefix(6) == Data("__TEXT".utf8) }).data.startIndex
+        let text = try XCTUnwrap(MachO.loadCommands(data: intel).first { $0.cmd == UInt32(LC_SEGMENT_64) && $0.data.dropFirst(8).prefix(6) == Data("__TEXT".utf8) }).data.startIndex
         var noText = intel
         noText.replaceSubrange(text + 8 ..< text + 14, with: Data("__TEXX".utf8)) // segname
         var emptyText = intel
@@ -390,7 +390,7 @@ final class CDHashTests: XCTestCase {
 
     /// `data` with its first LC_BUILD_VERSION declaring `platform` and `minOS` instead.
     private static func settingBuildVersion(_ data: Data, platform: Int32, minOS: UInt32) throws -> Data {
-        let command = try XCTUnwrap(MachOParser.loadCommands(data: data).first { $0.cmd == UInt32(LC_BUILD_VERSION) }, "no LC_BUILD_VERSION")
+        let command = try XCTUnwrap(MachO.loadCommands(data: data).first { $0.cmd == UInt32(LC_BUILD_VERSION) }, "no LC_BUILD_VERSION")
         var fields = Data()
         fields.appendUInt32(UInt32(bitPattern: platform))
         fields.appendUInt32(minOS)

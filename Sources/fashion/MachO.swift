@@ -1,6 +1,43 @@
 import Foundation
 import MachO
 
+enum ParserError: Error, Equatable {
+    case truncatedMachHeader(expectedSize: Int, fileSize: Int)
+    case invalidLoadCommandTable(size: UInt32, fileSize: Int)
+    case truncatedLoadCommand(cmd: UInt32, size: Int, expectedSize: Int)
+    case invalidFatArchitectureTable(count: UInt32, fileSize: Int)
+    case invalidFatArchitectureRange(offset: UInt64, size: UInt64, fileSize: Int)
+    case invalidSymbolTableRange(offset: UInt32, count: UInt32, fileSize: Int)
+    case invalidStringTableRange(offset: UInt32, size: UInt32, fileSize: Int)
+    case invalidStringTableIndex(index: UInt32, tableSize: UInt32)
+    case symbolNamesTooLong(limit: Int)
+}
+
+extension ParserError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case let .truncatedMachHeader(expectedSize, fileSize):
+            "Invalid Mach-O: expected a \(expectedSize)-byte header in a \(fileSize)-byte file"
+        case let .invalidLoadCommandTable(size, fileSize):
+            "Invalid Mach-O: sizeofcmds \(size) does not hold a load-command table in the \(fileSize)-byte slice"
+        case let .truncatedLoadCommand(cmd, size, expectedSize):
+            "Invalid Mach-O: load command 0x\(String(cmd, radix: 16)) is only \(String(size, pluralizing: "byte")); its structure requires \(expectedSize)"
+        case let .invalidFatArchitectureTable(count, fileSize):
+            "Invalid Mach-O: nfat_arch \(count) does not fit in the \(fileSize)-byte file"
+        case let .invalidFatArchitectureRange(offset, size, fileSize):
+            "Invalid Mach-O: fat architecture range at offset \(offset) with size \(size) is outside the \(fileSize)-byte file"
+        case let .invalidSymbolTableRange(offset, count, fileSize):
+            "Invalid Mach-O: symbol table at offset \(offset) with \(String(Int(count), pluralizing: "entry", plural: "entries")) is outside the \(fileSize)-byte slice"
+        case let .invalidStringTableRange(offset, size, fileSize):
+            "Invalid Mach-O: string table at offset \(offset) with size \(size) is outside the \(fileSize)-byte slice"
+        case let .symbolNamesTooLong(limit):
+            "Mach-O too large: its external symbol names add up to more than \(limit) bytes"
+        case let .invalidStringTableIndex(index, tableSize):
+            "Invalid Mach-O: string table index \(index) is outside the \(tableSize)-byte table"
+        }
+    }
+}
+
 /**
  A single parsed thin Mach-O image, named after Security's `MachO`: a thin file, or one architecture of a universal one.
 
@@ -10,7 +47,7 @@ import MachO
 
  `init?(_:offset:length:)` returns nil for anything that is not a thin Mach-O and throws for one Security refuses;
  `init?(lenient:offset:length:)` keeps whatever prefix of a damaged load-command table parses, for best-effort inspection.
- For a fat binary, open the container with `MachOParser` and read each architecture as its own `MachO`.
+ For a fat binary, open the container with `Universal` and read each architecture as its own `MachO`.
  */
 struct MachO {
     /// The file the image lies in.
@@ -26,7 +63,7 @@ struct MachO {
 
     let filetype: UInt32
     private let sizeofcmds: Int
-    let loadCommands: [MachOParser.LoadCommand]
+    let loadCommands: [LoadCommand]
     /// Whether the commands fill the table the way `MachOBase::nextCommand` requires.
     private let tableIsValid: Bool
 
@@ -128,7 +165,7 @@ struct MachO {
     // MARK: - Commands (Security's MachOBase)
 
     /// The first load command of type `cmd`, like `MachOBase::findCommand`.
-    func findCommand(_ cmd: UInt32) -> MachOParser.LoadCommand? {
+    func findCommand(_ cmd: UInt32) -> LoadCommand? {
         self.loadCommands.first { $0.cmd == cmd }
     }
 
@@ -136,7 +173,7 @@ struct MachO {
      The first `LC_SEGMENT` or `LC_SEGMENT_64` named `name`, like `MachOBase::findSegment`, which throws for a segment
      command it passes that cannot hold even a 32-bit `segment_command`.
      */
-    func findSegment(_ name: String) throws -> MachOParser.LoadCommand? {
+    func findSegment(_ name: String) throws -> LoadCommand? {
         for command in self.loadCommands where [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(command.cmd) {
             _ = try command.load(segment_command.self)
             if command.segmentName == name {
@@ -256,7 +293,7 @@ struct MachO {
      `nextCommand` never checks the first command, which Security then reads past its copy of the table when it overruns
      it: that is refused here too.
      */
-    private static func parseLoadCommands(data: Data, headerSize: Int, sizeofcmds: Int, swap: Bool) -> (commands: [MachOParser.LoadCommand], valid: Bool) {
+    private static func parseLoadCommands(data: Data, headerSize: Int, sizeofcmds: Int, swap: Bool) -> (commands: [LoadCommand], valid: Bool) {
         let end = headerSize + sizeofcmds
         guard
             sizeofcmds >= MemoryLayout<load_command>.size,
@@ -273,7 +310,7 @@ struct MachO {
             }
         }
 
-        var commands: [MachOParser.LoadCommand] = []
+        var commands: [LoadCommand] = []
         var offset = headerSize
         while true {
             let (cmd, size) = header(at: offset)
@@ -283,7 +320,7 @@ struct MachO {
             else {
                 return (commands, false)
             }
-            commands.append(MachOParser.LoadCommand(cmd: cmd, data: data.bytes(in: offset ..< offset + size)))
+            commands.append(LoadCommand(cmd: cmd, data: data.bytes(in: offset ..< offset + size)))
 
             offset += size
             guard offset < end else {
@@ -316,7 +353,18 @@ struct MachO {
 
 // MARK: -
 
-extension MachOParser.LoadCommand {
+extension MachO {
+    /**
+     A load command as laid out on disk: `data` spans the whole command, 8-byte header included, so its
+     count is the command's `cmdsize`.
+     */
+    struct LoadCommand {
+        let cmd: UInt32
+        let data: Data
+    }
+}
+
+extension MachO.LoadCommand {
     /**
      The command's fixed structure, or nil when the command is too short to hold it.
      */
