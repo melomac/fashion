@@ -117,8 +117,7 @@ extension MachO {
      */
     struct CodeDirectoryHash {
         let hash: String
-        /// The hash algorithm: `sha1` / `sha256` / `sha256t` / `sha384` for an embedded directory,
-        /// or `sha1` / `sha256` for a synthesized ad-hoc directory.
+        /// The hash type's name (see `HashType`): `sha1` or `sha256` for a synthesized ad-hoc directory.
         let type: String
         let adhoc: Bool
     }
@@ -126,7 +125,7 @@ extension MachO {
     /**
      The slice's cdhashes, or the reason it has none (`skipReason` is set exactly when `hashes` is empty).
 
-     A signed slice yields every code directory Security loads from its signature, strongest first per hashRank: the
+     A signed slice yields every code directory Security loads from its signature, strongest first per `HashType.rank`: the
      head is the kernel-enforced cdhash.
 
      An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1), unless its filetype is one
@@ -141,9 +140,9 @@ extension MachO {
         let signature = try self.findCodeSignature()
         if let signature {
             let hashes = try Self.loadCodeDirectories(self.signingData(signature))
-                .sorted { Self.hashRank($0.hashType) > Self.hashRank($1.hashType) }
-                .compactMap { cd in
-                    Self.digest(codeDirectory: cd.data, hashType: cd.hashType).map { CodeDirectoryHash(hash: $0, type: Self.typeName(cd.hashType), adhoc: false) }
+                .sorted { $0.hashType.rank > $1.hashType.rank }
+                .map { cd in
+                    CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false)
                 }
             if !hashes.isEmpty {
                 return (hashes, nil)
@@ -251,60 +250,6 @@ extension MachO {
         return nil
     }
 
-    /**
-     The cdhash: the directory digested under its own hash type.
-     */
-    private static func digest(codeDirectory blob: Data, hashType: UInt8) -> String? {
-        switch hashType {
-        case self.csHashTypeSHA1:
-            Insecure.SHA1.hash(data: blob).hexString
-        case self.csHashTypeSHA256, self.csHashTypeSHA256Truncated:
-            // Truncation applies to the hash slots inside the CD; the CD digest itself is plain SHA-256.
-            SHA256.hash(data: blob).hexString
-        case self.csHashTypeSHA384:
-            SHA384.hash(data: blob).hexString
-        case self.csHashTypeSHA512:
-            SHA512.hash(data: blob).hexString
-        default:
-            nil
-        }
-    }
-
-    /**
-     The width of one hash slot of `hashType`, like the hasher `CodeDirectory::hashFor` makes; nil for a type it does not
-     know.
-     */
-    fileprivate static func slotSize(_ hashType: UInt8) -> Int? {
-        switch hashType {
-        case self.csHashTypeSHA1: Insecure.SHA1.byteCount
-        case self.csHashTypeSHA256: SHA256.byteCount
-        case self.csHashTypeSHA256Truncated: 20
-        case self.csHashTypeSHA384: SHA384.byteCount
-        case self.csHashTypeSHA512: SHA512.byteCount
-        default: nil
-        }
-    }
-
-    private static func typeName(_ hashType: UInt8) -> String {
-        switch hashType {
-        case self.csHashTypeSHA1: "sha1"
-        case self.csHashTypeSHA256: "sha256"
-        case self.csHashTypeSHA256Truncated: "sha256t"
-        case self.csHashTypeSHA384: "sha384"
-        case self.csHashTypeSHA512: "sha512"
-        default: "unknown"
-        }
-    }
-
-    /**
-     Order among code directories, higher first, as xnu chooses (`bsd/kern/ubc_subr.c`). SHA-512, which Security loads but
-     xnu does not know, comes last.
-     */
-    private static func hashRank(_ hashType: UInt8) -> Int {
-        [self.csHashTypeSHA512, self.csHashTypeSHA1, self.csHashTypeSHA256Truncated, self.csHashTypeSHA256, self.csHashTypeSHA384]
-            .firstIndex(of: hashType) ?? -1
-    }
-
     // MARK: - Ad-hoc synthesis
 
     /**
@@ -333,7 +278,7 @@ extension MachO {
         )
 
         return try builder.build(code: self).map { hashType, cd in
-            CodeDirectoryHash(hash: hashType.hexDigest(cd), type: hashType.name, adhoc: true)
+            CodeDirectoryHash(hash: hashType.digest(cd).hexString, type: hashType.name, adhoc: true)
         }
     }
 
@@ -449,12 +394,6 @@ extension MachO {
     private static let csslotAlternateBase: UInt32 = 0x1000
     private static let csslotAlternateLimit: UInt32 = 0x1005
 
-    private static let csHashTypeSHA1: UInt8 = 1
-    private static let csHashTypeSHA256: UInt8 = 2
-    private static let csHashTypeSHA256Truncated: UInt8 = 3
-    private static let csHashTypeSHA384: UInt8 = 4
-    private static let csHashTypeSHA512: UInt8 = 5
-
     // Filetypes codesign signs as Mach-O code; it signs any other one as a generic file (`Format=generic`).
     private static let codeFiletypes = [
         MH_EXECUTE,
@@ -470,7 +409,7 @@ extension MachO {
 
 private struct EmbeddedCodeDirectory {
     let data: Data
-    let hashType: UInt8
+    let hashType: HashType
 
     /**
      A code directory Security accepts, with the checks `SecStaticCode::loadCodeDirectories` makes: its header holds
@@ -493,8 +432,11 @@ private struct EmbeddedCodeDirectory {
             return nil
         }
 
-        let (hashSize, hashType, pageSizeLog) = blob.withUnsafeBytes { raw -> (Int, UInt8, UInt8) in (Int(raw[36]), raw[37], raw[39]) }
-        guard MachO.slotSize(hashType) == hashSize else {
+        let (hashSize, rawHashType, pageSizeLog) = blob.withUnsafeBytes { raw -> (Int, UInt8, UInt8) in (Int(raw[36]), raw[37], raw[39]) }
+        guard
+            let hashType = HashType(rawValue: rawHashType),
+            hashType.slotSize == hashSize
+        else {
             return nil
         }
 
@@ -613,8 +555,8 @@ private struct CodeDirectoryBuilder {
      `Builder::build`: the header the fields call for, the identifier, the special slots, then a hash slot per page of
      code, read from the image once for both types. A directory too large is refused before any code is read.
      */
-    func build(code image: MachO) throws -> [(hashType: AdhocHashType, directory: Data)] {
-        let hashTypes: [AdhocHashType] = [.sha256, .sha1]
+    func build(code image: MachO) throws -> [(hashType: HashType, directory: Data)] {
+        let hashTypes: [HashType] = [.sha256, .sha1]
         var directories = try hashTypes.map { try self.directory(hashType: $0) }
         func hashPage(_ page: UnsafeRawBufferPointer) {
             for index in hashTypes.indices {
@@ -657,9 +599,9 @@ private struct CodeDirectoryBuilder {
     /**
      The directory of `hashType` up to its code slots, with room for them.
      */
-    private func directory(hashType: AdhocHashType) throws -> Data {
+    private func directory(hashType: HashType) throws -> Data {
         let pageSize = 1 << Int(self.pageSizeLog)
-        let hashSize = hashType.digestSize
+        let hashSize = hashType.slotSize
         let nSpecialSlots = self.specialSlots.keys.max() ?? 0
         let nCodeSlots = (self.codeLimit + pageSize - 1) / pageSize
         let identifier = Data("ADHOC".utf8) + Data([0])
@@ -684,7 +626,7 @@ private struct CodeDirectoryBuilder {
         header.appendBigEndian(UInt32(nSpecialSlots)) // nSpecialSlots
         header.appendBigEndian(UInt32(nCodeSlots)) // nCodeSlots
         header.appendBigEndian(UInt32(clamping: self.codeLimit)) // codeLimit, 0xffffffff past 4 GiB
-        header.append(contentsOf: [UInt8(hashSize), hashType.csHashType, 0, self.pageSizeLog]) // hashSize, hashType, platform, pageSize
+        header.append(contentsOf: [UInt8(hashSize), hashType.rawValue, 0, self.pageSizeLog]) // hashSize, hashType, platform, pageSize
         header.appendBigEndian(UInt32(0)) // spare2
         header.appendBigEndian(UInt32(0)) // scatterOffset
         header.appendBigEndian(UInt32(0)) // teamOffset
@@ -705,62 +647,59 @@ private struct CodeDirectoryBuilder {
 }
 
 /**
- A hash algorithm used to synthesize an ad-hoc CodeDirectory.
-
- `codesign` builds one directory per algorithm; each carries hash slots of that algorithm's width and yields its own
- cdhash, digested under the same algorithm.
+ A code directory's hash type, numbered as `cs_blobs.h` numbers them (`CS_HASHTYPE_*`) and as Security's
+ `CodeDirectory::hashFor` knows them: the directory's slots are hashes of that type, and its cdhash is the directory
+ digested under it.
  */
-private enum AdhocHashType {
-    case sha256
-    case sha1
+private enum HashType: UInt8 {
+    case sha1 = 1
+    case sha256 = 2
+    case sha256Truncated = 3
+    case sha384 = 4
+    case sha512 = 5
 
-    /**
-     The `cs_blobs.h` hashType byte stored in the CodeDirectory (`CS_HASHTYPE_SHA1` / `CS_HASHTYPE_SHA256`).
-     */
-    var csHashType: UInt8 {
-        switch self {
-        case .sha1: 1
-        case .sha256: 2
-        }
-    }
-
-    /**
-     Width of one hash slot, in bytes.
-     */
-    var digestSize: Int {
+    /// The width of one hash slot: a truncated SHA-256 keeps 20 bytes.
+    var slotSize: Int {
         switch self {
         case .sha1: Insecure.SHA1.byteCount
         case .sha256: SHA256.byteCount
+        case .sha256Truncated: 20
+        case .sha384: SHA384.byteCount
+        case .sha512: SHA512.byteCount
         }
     }
 
-    /**
-     Output label identifying the algorithm on the synthesized line.
-     */
+    /// How a cdhash line names it.
     var name: String {
         switch self {
         case .sha1: "sha1"
         case .sha256: "sha256"
+        case .sha256Truncated: "sha256t"
+        case .sha384: "sha384"
+        case .sha512: "sha512"
         }
     }
 
-    /**
-     Raw digest of `data` — a special or code hash slot inside the CodeDirectory.
-     */
+    /// Order among code directories, higher first, as xnu chooses (`bsd/kern/ubc_subr.c`). SHA-512, which Security loads
+    /// but xnu does not know, comes last.
+    var rank: Int {
+        switch self {
+        case .sha512: 0
+        case .sha1: 1
+        case .sha256Truncated: 2
+        case .sha256: 3
+        case .sha384: 4
+        }
+    }
+
+    /// The whole digest of `data`: a slot or a cdhash. Truncation applies to the slots inside a directory, not to its
+    /// cdhash, which is plain SHA-256.
     func digest(_ data: some DataProtocol) -> Data {
         switch self {
         case .sha1: Data(Insecure.SHA1.hash(data: data))
-        case .sha256: Data(SHA256.hash(data: data))
-        }
-    }
-
-    /**
-     Hex-encoded digest of `data` — the cdhash of the assembled CodeDirectory.
-     */
-    func hexDigest(_ data: Data) -> String {
-        switch self {
-        case .sha1: Insecure.SHA1.hash(data: data).hexString
-        case .sha256: SHA256.hash(data: data).hexString
+        case .sha256, .sha256Truncated: Data(SHA256.hash(data: data))
+        case .sha384: Data(SHA384.hash(data: data))
+        case .sha512: Data(SHA512.hash(data: data))
         }
     }
 }
