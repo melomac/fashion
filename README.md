@@ -129,6 +129,8 @@ The `--slices` flag hashes each architecture individually in addition to the who
 Architecture names come from the OS's own Mach-O naming. It's notably the source `codesign` uses, so they read `arm64`, `arm64e`, `arm64e.x1`, `x86_64`, `x86_64h`, `i386`, legacy `ppc` / `ppc64`, and so on.
 A slice the running OS cannot name yet falls back to a built-in table (`arm64e.x1` on macOS 26 and earlier), then to `unknown(cputype,cpusubtype)` like `lipo -archs`.
 
+Like `codesign`, `fashion` reads a slice's load commands, code signature and embedded Info.plist into memory at the sizes they declare, which a crafted file can make as large as the file itself.
+
 ### Exact flag
 
 Some malware families append garbage data after the Mach-O structure to evade hash based detection.
