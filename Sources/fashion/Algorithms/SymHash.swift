@@ -3,12 +3,10 @@ import MachO
 
 /// Extract external undefined symbols from Mach-O binaries and compute a hash.
 enum SymHash {
-    struct SymHashResult {
-        let digest: String
-        let arch: String?
-    }
-
-    static func compute(_ file: File, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> [SymHashResult] {
+    /**
+     The symhash of a thin Mach-O, or of each architecture of a universal one, labeled with its name.
+     */
+    static func compute(_ file: File, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> [DigestResult] {
         switch try Universal.open(file) {
         case let .fat(archs):
             return try archs.compactMap { arch in
@@ -19,13 +17,13 @@ enum SymHash {
                 else {
                     return nil
                 }
-                return SymHashResult(digest: digest, arch: Universal.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
+                return DigestResult(digest: digest, label: Universal.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
             }
         case let .thin(image):
             guard let digest = try self.hash(image, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols) else {
                 return []
             }
-            return [SymHashResult(digest: digest, arch: nil)]
+            return [DigestResult(digest: digest)]
         case .notMachO:
             return []
         }

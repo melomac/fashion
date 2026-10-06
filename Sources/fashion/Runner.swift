@@ -751,7 +751,6 @@ struct Digester {
             try self.sliceDigests(file, hash: hash)
         case let .symhash(hash, separator, sortSymbols):
             try SymHash.compute(file, algorithm: hash, separator: separator, sortSymbols: sortSymbols)
-                .map { DigestResult(digest: $0.digest, label: $0.arch) }
         case let .xarToc(hash, decompress):
             try XARParser.hashToc(file, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
         case .cdhash:

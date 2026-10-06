@@ -152,7 +152,7 @@ Non-Mach-O files are hashed whole.
 The `-j` / `--jobs` flag controls parallel workers.
 Set `-j 0` to use all available CPU cores.
 
-The `--sort` flag trades some throughput for deterministic output order: paths are collected, sorted, and results are emitted sequentially even under concurrent processing.
+The `--sort` flag prints files in the byte order of their paths, whatever the number of jobs: the walk sorts each directory as it reads it, so hashing starts right away, and a file's lines wait until every file before it has printed.
 
 Enumeration is demand-driven, so the walk never runs far ahead of hashing.
 
