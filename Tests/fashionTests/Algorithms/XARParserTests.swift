@@ -333,6 +333,21 @@ final class XARParserTests: XCTestCase {
         XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc))
     }
 
+    func testDecompressStopsReadingAtTheEndOfTheStream() throws {
+        // The declared range runs two chunks past the stream, which ends in the first: the rest is not read, so the
+        // table still decompresses once the file no longer holds it.
+        let toc = Data("<xar><toc></toc></xar>".utf8)
+        let url = FileManager.default.temporaryDirectory / "fashion-xar-stream-end-\(UUID())"
+        try self.archive(toc: self.deflate(toc) + Data(count: File.chunkSize * 2), size: toc.count).write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let file = try File(path: url.path())
+        XCTAssertEqual(truncate(url.path(), off_t(28 + File.chunkSize)), 0)
+
+        XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc))
+    }
+
     func testDecompressToNothingAsUncompressDoes() throws {
         // uncompress gives an empty output a 1-byte buffer and reports nothing of it: a stream of up to one byte
         // inflates to an empty table, a longer one does not decompress.

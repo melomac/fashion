@@ -146,16 +146,18 @@ enum XARParser {
         try output.withUnsafeMutableBytes { buffer in
             stream.next_out = buffer.baseAddress?.assumingMemoryBound(to: Bytef.self)
             stream.avail_out = uInt(buffer.count)
-            _ = try file.stream(range) { chunk in
-                // Once the stream ends or fails, the rest of the range is not part of it.
-                guard status == Z_OK else {
-                    return
+            // Once the stream ends or fails, the rest of the range is not part of it, and is not read.
+            var offset = range.lowerBound
+            while status == Z_OK, offset < range.upperBound {
+                let chunk = try file.read(at: offset, count: min(File.chunkSize, range.upperBound - offset))
+                offset += chunk.count
+                chunk.withUnsafeBytes { bytes in
+                    stream.next_in = UnsafeMutablePointer(mutating: bytes.baseAddress?.assumingMemoryBound(to: Bytef.self))
+                    stream.avail_in = uInt(bytes.count)
+                    repeat {
+                        status = zlib.inflate(&stream, Z_NO_FLUSH)
+                    } while status == Z_OK && stream.avail_in > 0
                 }
-                stream.next_in = UnsafeMutablePointer(mutating: chunk.baseAddress?.assumingMemoryBound(to: Bytef.self))
-                stream.avail_in = uInt(chunk.count)
-                repeat {
-                    status = zlib.inflate(&stream, Z_NO_FLUSH)
-                } while status == Z_OK && stream.avail_in > 0
             }
         }
 
