@@ -200,4 +200,19 @@ final class FileEnumeratorTests: XCTestCase {
             "fashion: \(dir.path)/missing: No such file or directory",
         ])
     }
+
+    func testUnreadableFileIsReportedLikeAWalkError() throws {
+        // Opening the file fails where the walk did not: the message is the same strerror text a walk error has.
+        try XCTSkipIf(getuid() == 0, "root reads an unreadable file")
+        let url = FileManager.default.temporaryDirectory / "fashion-unreadable-\(UUID())"
+        try Data("x".utf8).write(to: url)
+        XCTAssertEqual(chmod(url.path, 0), 0)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        let (status, errors) = try self.run([url.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, ["fashion: \(url.path): Permission denied"])
+    }
 }

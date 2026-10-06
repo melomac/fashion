@@ -51,4 +51,12 @@ final class FileTests: XCTestCase {
 
         XCTAssertEqual(try file.stream(900 ..< 1900) { _ in }, 100)
     }
+
+    func testMessagesLeaveOutFoundationsPrefix() {
+        // An I/O error reads as strerror says it, whether it comes from System or wrapped by Foundation.
+        XCTAssertEqual(File.message(for: Errno.permissionDenied), "Permission denied")
+        let wrapped = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))])
+        XCTAssertEqual(File.message(for: wrapped), "Permission denied")
+        XCTAssertEqual(File.message(for: FileError.sizeChanged(expected: 2, actual: 1)), "File changed size while hashing (expected 2 bytes, read 1)")
+    }
 }

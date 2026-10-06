@@ -113,6 +113,14 @@ final class File {
         return Errno(rawValue: Int32(underlying.code))
     }
 
+    /**
+     How a diagnostic describes an error: an I/O error as `strerror` says it, like a walk error, without the
+     "The operation couldn't be completed." Foundation puts before it; any other error by its own description.
+     */
+    static func message(for error: Error) -> String {
+        (self.posixError(error) as? Errno)?.description ?? error.localizedDescription
+    }
+
     // MARK: - Private
 
     /**

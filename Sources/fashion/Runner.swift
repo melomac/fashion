@@ -281,7 +281,7 @@ final class Output: @unchecked Sendable {
 
             // Otherwise nothing more can be delivered (SIGPIPE inherited as ignored, or stdout closed): report
             // and exit like coreutils, rather than crash on the uncaught error.
-            let description = OutputFormatter.formatDiagnostic(error.localizedDescription)
+            let description = OutputFormatter.formatDiagnostic(File.message(for: error))
             self.reporter.end("Stopped by write error: \(description)")
             self.console.err("fashion: write error: \(description)")
 
@@ -710,7 +710,7 @@ struct Digester {
         do {
             results = try self.digests(path)
         } catch {
-            reporter.report(path: path, message: error.localizedDescription)
+            reporter.report(path: path, message: File.message(for: error))
             return []
         }
 
