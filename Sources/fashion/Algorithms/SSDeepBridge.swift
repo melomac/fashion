@@ -19,8 +19,8 @@ extension SSDeepError: LocalizedError {
  Bridge to libfuzzy (ssdeep) for fuzzy hashing.
  */
 enum SSDeepBridge {
-    /// Result buffer size mandated by libfuzzy (`FUZZY_MAX_RESULT` = 2 * SPAMSUM_LENGTH + 20).
-    fileprivate static let resultSize = 2 * 64 + 20
+    /// Result buffer size mandated by libfuzzy: `FUZZY_MAX_RESULT`, which Swift cannot import, from the `SPAMSUM_LENGTH` it can.
+    fileprivate static let resultSize = 2 * Int(SPAMSUM_LENGTH) + 20
 
     /**
      Compare two ssdeep signatures. Returns similarity score 0–100.
