@@ -201,6 +201,32 @@ final class FileEnumeratorTests: XCTestCase {
         ])
     }
 
+    func testRootTooLongToLookUpIsReportedAlone() throws {
+        // fts reports a root the kernel cannot look up in order with the others, but refuses every root when one is
+        // longer than its own buffer (about 64 KiB): the roots too long for the kernel are then reported first, and
+        // the others are still walked.
+        let file = FileManager.default.temporaryDirectory / "fashion-long-root-\(UUID())"
+        try Data("x".utf8).write(to: file)
+        defer {
+            try? FileManager.default.removeItem(at: file)
+        }
+        let missing = FileManager.default.temporaryDirectory / "fashion-missing-\(UUID())"
+        let tooLong = String(repeating: "x/", count: Int(PATH_MAX) / 2)
+        let long = String(repeating: "x/", count: 40000)
+
+        XCTAssertEqual(self.sortedWalk([file.path, long, tooLong]), [file.path])
+        XCTAssertEqual(self.sortedWalk([long]), [])
+
+        // Sorted, "/…" comes before "x/…": fts orders the roots it can walk.
+        var (status, errors) = try self.run(["--sort", tooLong, missing.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, ["fashion: \(missing.path): No such file or directory", "fashion: \(tooLong): File name too long"])
+
+        (status, errors) = try self.run(["--sort", file.path, long, tooLong])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, ["fashion: \(long): File name too long", "fashion: \(tooLong): File name too long"])
+    }
+
     func testUnreadableFileIsReportedLikeAWalkError() throws {
         // Opening the file fails where the walk did not: the message is the same strerror text a walk error has.
         try XCTSkipIf(getuid() == 0, "root reads an unreadable file")

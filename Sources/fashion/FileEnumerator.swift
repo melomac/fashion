@@ -28,16 +28,19 @@ final class FileWalker: Sequence, IteratorProtocol {
         // FTS_COMFOLLOW follows a symlink named as a root (`find -H`); under FTS_PHYSICAL inner symlinks are still
         // skipped, and under FTS_LOGICAL it is a no-op.
         let options: Int32 = (follow ? FTS_LOGICAL : FTS_PHYSICAL) | FTS_NOCHDIR | FTS_COMFOLLOW
-        let roots = paths.map(Self.root)
 
-        // fts_open expects a null-terminated array of C strings, which it copies.
-        var argv = roots.map { strdup($0) } + [nil]
-        defer {
-            for path in argv {
-                free(path)
+        var roots = paths.map(Self.root)
+        self.fts = Self.open(roots, options: options, sorted: sorted)
+        if self.fts == nil, errno == ENAMETOOLONG {
+            // fts reports a root it cannot look up in order with the others, but refuses all of them when one is
+            // longer than its path buffer (about 64 KiB). The roots the kernel could not look up either, PATH_MAX
+            // bytes or more, are reported here instead, and the walk is retried with the others.
+            for root in roots where root.utf8.count >= PATH_MAX {
+                reporter?.report(path: root, message: String(cString: strerror(ENAMETOOLONG)))
             }
+            roots.removeAll { $0.utf8.count >= PATH_MAX }
+            self.fts = Self.open(roots, options: options, sorted: sorted)
         }
-        self.fts = fts_open(&argv, options, sorted ? fashion_fts_compare : nil)
         if self.fts == nil {
             let message = String(cString: strerror(errno))
             for root in roots {
@@ -113,6 +116,23 @@ final class FileWalker: Sequence, IteratorProtocol {
     }
 
     // MARK: - Private
+
+    /**
+     `fts_open` over `roots`, or nil with `errno` set when it fails. It expects a null-terminated array of C strings,
+     which it copies. An empty list opens, but the first `fts_read` on it crashes: it is no walk at all.
+     */
+    private static func open(_ roots: [String], options: Int32, sorted: Bool) -> UnsafeMutablePointer<FTS>? {
+        guard !roots.isEmpty else {
+            return nil
+        }
+        var argv = roots.map { strdup($0) } + [nil]
+        defer {
+            for path in argv {
+                free(path)
+            }
+        }
+        return fts_open(&argv, options, sorted ? fashion_fts_compare : nil)
+    }
 
     /**
      A root as fts walks it. fts builds child paths as the root exactly as given plus "/" plus the entry name: below a
