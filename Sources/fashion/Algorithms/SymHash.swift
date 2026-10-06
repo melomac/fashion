@@ -8,7 +8,7 @@ enum SymHash {
         let arch: String?
     }
 
-    static func compute(path: String, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> [SymHashResult] {
+    static func compute(path: String, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> [SymHashResult] {
         // Peek at the magic first: mapping reads a whole file on a volume Foundation deems unsafe (a mounted disk image).
         guard try MachOParser.isMachO(path: path) else {
             return []
@@ -43,7 +43,7 @@ enum SymHash {
     /**
      The symhash of one slice, or nil when it carries no symbol table.
      */
-    private static func hash(_ slice: MachOSlice, algorithm: Algorithm, separator: String, sortSymbols: Bool) throws -> String? {
+    private static func hash(_ slice: MachOSlice, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> String? {
         guard
             let command = slice.findCommand(UInt32(LC_SYMTAB)),
             let symtab = try MachOParser.parseSymtab(command: command, swap: slice.swap)
@@ -65,13 +65,6 @@ enum SymHash {
             joinedData.append(slice.data.bytes(in: name))
         }
 
-        switch algorithm {
-        case .ssdeep:
-            return SSDeepBridge.hash(data: joinedData)
-        case .tlsh:
-            return TLSHBridge.hash(data: joinedData)
-        default:
-            return try CryptoDigest.hash(data: joinedData, algorithm: algorithm)
-        }
+        return try algorithm.digest(joinedData)
     }
 }

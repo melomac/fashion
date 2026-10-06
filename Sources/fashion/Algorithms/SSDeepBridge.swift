@@ -20,73 +20,7 @@ extension SSDeepError: LocalizedError {
  */
 enum SSDeepBridge {
     /// Result buffer size mandated by libfuzzy (`FUZZY_MAX_RESULT` = 2 * SPAMSUM_LENGTH + 20).
-    private static let resultSize = 2 * 64 + 20
-
-    /**
-     Compute ssdeep hash for a file, or for `limit` bytes at `offset` (an architecture of a universal binary, or a
-     trimmed Mach-O), streamed uncached through `FileReader` like every other algorithm.
-
-     The length is declared up front, as `fuzzy_hash_file` does: libfuzzy then skips the block sizes it cannot use,
-     and fails the digest when the file no longer holds that many bytes.
-     */
-    static func hash(path: String, offset: Int = 0, limit: Int? = nil) throws -> String {
-        let length = try limit ?? FileReader.size(path: path) - offset
-        guard let state = fuzzy_new() else {
-            throw Errno(rawValue: errno)
-        }
-        defer {
-            fuzzy_free(state)
-        }
-        guard fuzzy_set_total_input_length(state, UInt64(length)) == 0 else {
-            throw Errno(rawValue: errno)
-        }
-
-        try FileReader.read(path: path, offset: offset, limit: length) { chunk in
-            if let base = chunk.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                _ = fuzzy_update(state, base, chunk.count) // only counts and steps: never fails
-            }
-        }
-
-        var result = [CChar](repeating: 0, count: self.resultSize)
-        let status = fuzzy_digest(state, &result, 0)
-        guard status == 0 else {
-            throw SSDeepError.fileHashFailed(status: Int(status))
-        }
-        return self.decode(result)
-    }
-
-    /**
-     Compute ssdeep hash for raw data.
-
-     Uses the streaming API so the input is not bounded by `fuzzy_hash_buf`'s 32-bit length argument;
-     the digest is identical to hashing the whole buffer in one call.
-     */
-    static func hash(data: Data) -> String? {
-        guard let state = fuzzy_new() else {
-            return nil
-        }
-        defer {
-            fuzzy_free(state)
-        }
-
-        let updated = data.withUnsafeBytes { ptr -> Bool in
-            guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                // Empty input has no base address; feeding zero bytes is valid and yields the "3::" signature.
-                return ptr.count == 0
-            }
-            return fuzzy_update(state, base, ptr.count) == 0
-        }
-        guard updated else {
-            return nil
-        }
-
-        var result = [CChar](repeating: 0, count: self.resultSize)
-        guard fuzzy_digest(state, &result, 0) == 0 else {
-            return nil
-        }
-
-        return self.decode(result)
-    }
+    fileprivate static let resultSize = 2 * 64 + 20
 
     /**
      Compare two ssdeep signatures. Returns similarity score 0–100.
@@ -95,11 +29,42 @@ enum SSDeepBridge {
         let score = fuzzy_compare(sig1, sig2)
         return Int(score)
     }
+}
 
-    // MARK: - Private
+/**
+ A running ssdeep hash, told its length up front as `fuzzy_hash_buf` and `fuzzy_hash_file` do: libfuzzy then skips the
+ block sizes it cannot use, and fails the digest when it is fed any other length.
+ */
+final class SSDeepHasher: ByteHasher {
+    private let state: OpaquePointer
 
-    private static func decode(_ result: [CChar]) -> String {
-        let truncated = result.prefix(while: { $0 != 0 })
-        return String(decoding: truncated.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    init(length: Int) throws {
+        guard let state = fuzzy_new() else {
+            throw Errno(rawValue: errno)
+        }
+        self.state = state
+        guard fuzzy_set_total_input_length(state, UInt64(length)) == 0 else {
+            throw Errno(rawValue: errno)
+        }
+    }
+
+    deinit {
+        fuzzy_free(self.state)
+    }
+
+    func update(_ bytes: UnsafeRawBufferPointer) {
+        // Empty input has no base address, and feeding it nothing yields the "3::" signature.
+        if let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+            _ = fuzzy_update(self.state, base, bytes.count) // only counts and steps: never fails
+        }
+    }
+
+    func finalize() throws -> String? {
+        var result = [CChar](repeating: 0, count: SSDeepBridge.resultSize)
+        let status = fuzzy_digest(self.state, &result, 0)
+        guard status == 0 else {
+            throw SSDeepError.fileHashFailed(status: Int(status))
+        }
+        return String(decoding: result.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 }

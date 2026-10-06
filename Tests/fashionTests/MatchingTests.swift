@@ -56,10 +56,10 @@ final class MatchingTests: XCTestCase {
 
     // MARK: - TLSH fuzzy matching
 
-    func testTLSHMatchRouting() {
+    func testTLSHMatchRouting() throws {
         // Compute a real TLSH hash from data, then verify matching routes through TLSH logic
         let data = Data((0 ..< 1024).map { UInt8($0 % 256) })
-        guard let hash = TLSHBridge.hash(data: data) else { return }
+        guard let hash = try ByteHash.tlsh.digest(data) else { return }
 
         let result = Matching.check(digest: hash, against: [hash], algorithm: .tlsh, threshold: 200)
         XCTAssertNotNil(result)
@@ -67,11 +67,11 @@ final class MatchingTests: XCTestCase {
         XCTAssertEqual(result?.score, 0) // identical = distance 0
     }
 
-    func testTLSHNoMatchAboveThreshold() {
+    func testTLSHNoMatchAboveThreshold() throws {
         // Use real TLSH hashes from different data
         let data1 = Data((0 ..< 1024).map { UInt8($0 % 256) })
         let data2 = Data((0 ..< 1024).map { UInt8(($0 * 7 + 13) % 256) })
-        guard let h1 = TLSHBridge.hash(data: data1), let h2 = TLSHBridge.hash(data: data2) else { return }
+        guard let h1 = try ByteHash.tlsh.digest(data1), let h2 = try ByteHash.tlsh.digest(data2) else { return }
 
         let result = Matching.check(digest: h1, against: [h2], algorithm: .tlsh, threshold: 0)
         // Distance is likely > 0, so threshold 0 means only exact distance 0 matches

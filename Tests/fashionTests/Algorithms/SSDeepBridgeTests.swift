@@ -6,7 +6,7 @@ final class SSDeepBridgeTests: XCTestCase {
     func testHashData() throws {
         // ssdeep needs reasonable data to produce a hash
         let data = Data(repeating: 0x41, count: 4096)
-        let result = SSDeepBridge.hash(data: data)
+        let result = try ByteHash.ssdeep.digest(data)
 
         XCTAssertNotNil(result)
         XCTAssertFalse(try XCTUnwrap(result?.isEmpty))
@@ -20,8 +20,8 @@ final class SSDeepBridgeTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = try SSDeepBridge.hash(path: url.path())
-        XCTAssertFalse(result.isEmpty)
+        let result = try ByteHash.ssdeep.digest(path: url.path())
+        XCTAssertFalse(try XCTUnwrap(result).isEmpty)
     }
 
     func testHashDataMatchesHashFile() throws {
@@ -33,24 +33,23 @@ final class SSDeepBridgeTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertEqual(SSDeepBridge.hash(data: data), try SSDeepBridge.hash(path: url.path()))
+        XCTAssertEqual(try ByteHash.ssdeep.digest(data), try ByteHash.ssdeep.digest(path: url.path()))
     }
 
-    func testHashEmptyData() {
+    func testHashEmptyData() throws {
         // Empty input has no base address; the bridge must not crash and should return the degenerate signature.
-        XCTAssertEqual(SSDeepBridge.hash(data: Data()), "3::")
+        XCTAssertEqual(try ByteHash.ssdeep.digest(Data()), "3::")
     }
 
     func testHashFileMissingThrows() {
-        // The cause libfuzzy's open left in errno is reported, like every other reader does.
-        XCTAssertThrowsError(try SSDeepBridge.hash(path: "/tmp/fashion-nonexistent-\(UUID())")) { error in
+        XCTAssertThrowsError(try ByteHash.ssdeep.digest(path: "/tmp/fashion-nonexistent-\(UUID())")) { error in
             XCTAssertEqual(error as? Errno, .noSuchFileOrDirectory)
         }
     }
 
-    func testCompareIdenticalSignatures() {
+    func testCompareIdenticalSignatures() throws {
         let data = Data(repeating: 0x43, count: 4096)
-        guard let sig = SSDeepBridge.hash(data: data) else {
+        guard let sig = try ByteHash.ssdeep.digest(data) else {
             XCTFail("Failed to compute ssdeep hash")
             return
         }

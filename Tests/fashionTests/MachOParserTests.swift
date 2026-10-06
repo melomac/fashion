@@ -952,12 +952,12 @@ final class MachOParserTests: XCTestCase {
     func testExactHashIgnoresAppendedGarbage() throws {
         var macho = self.makeThin64()
         let cleanEnd = MachOParser.machOEnd(data: macho)
-        let cleanHash = try CryptoDigest.hash(data: Data(macho.prefix(cleanEnd)), algorithm: .sha256)
+        let cleanHash = try ByteHash.sha256.digest(Data(macho.prefix(cleanEnd)))
 
         macho.append(Data(repeating: 0x41, count: 4096))
         let dirtyEnd = MachOParser.machOEnd(data: macho)
-        let dirtyTrimmed = try CryptoDigest.hash(data: Data(macho.prefix(dirtyEnd)), algorithm: .sha256)
-        let dirtyWhole = try CryptoDigest.hash(data: macho, algorithm: .sha256)
+        let dirtyTrimmed = try ByteHash.sha256.digest(Data(macho.prefix(dirtyEnd)))
+        let dirtyWhole = try ByteHash.sha256.digest(macho)
 
         XCTAssertEqual(cleanHash, dirtyTrimmed, "exact (trimmed) hash must be stable across appended garbage")
         XCTAssertNotEqual(cleanHash, dirtyWhole, "whole-file hash must change when garbage is appended")

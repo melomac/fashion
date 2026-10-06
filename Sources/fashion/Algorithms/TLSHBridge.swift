@@ -13,7 +13,7 @@ import Foundation
    Data lengths beyond this cause an out-of-bounds read — undefined behavior in C++.
 
  Trend Micro acknowledged the issue (GitHub issue #99, version 4.6.0) and defined the TLSH of a file as the TLSH of its first ~4 GiB.
- The Java port enforces this via `MAX_DATA_LENGTH` = topval[169]; we apply the same cap here.
+ The Java port enforces this via `MAX_DATA_LENGTH` = topval[169]; `ByteHash.maximumLength` applies the same cap.
 
  The cap is applied unconditionally (fail-closed): capping never changes a result for the common
  sub-4 GiB case and can only ever truncate a pathologically large input, so it is always safe — unlike
@@ -43,66 +43,6 @@ enum TLSHBridge {
      Expected digest version prefix.
      */
     static let digestPrefix = "T1"
-
-    /**
-     Compute TLSH hash for a file, or for `limit` bytes at `offset` (an architecture of a universal binary, or a
-     trimmed Mach-O). Streams in chunks to avoid loading the entire file into memory.
-     Data beyond maximumDataSize (~3.93 GiB) is ignored per the TLSH specification (issue #99).
-     Returns nil if file is too small or hashing fails.
-     */
-    static func hash(path: String, offset: Int = 0, limit: Int? = nil) throws -> String? {
-        let context = tlsh_new()
-        defer {
-            tlsh_free(context)
-        }
-
-        // Cap the data fed to libtlsh at maximumDataSize (~3.93 GiB) per issue #99 (fail-closed).
-        let limit = min(limit ?? .max, Int(clamping: self.maximumDataSize))
-        var total = 0
-        try FileReader.read(path: path, offset: offset, limit: limit) { chunk in
-            guard let base = chunk.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return
-            }
-            tlsh_update(context, base, UInt32(chunk.count))
-            total += chunk.count
-        }
-
-        guard total >= self.minimumDataSize else {
-            return nil
-        }
-
-        return self.digest(of: context)
-    }
-
-    /**
-     Compute TLSH hash for raw data. Returns nil if data is too small.
-
-     Data beyond maximumDataSize (~3.93 GiB) is ignored per the TLSH specification (issue #99).
-     */
-    static func hash(data: Data) -> String? {
-        guard data.count >= self.minimumDataSize else {
-            return nil
-        }
-
-        let context = tlsh_new()
-        defer {
-            tlsh_free(context)
-        }
-
-        let usableCount = min(data.count, Int(clamping: self.maximumDataSize))
-
-        data.withUnsafeBytes { ptr in
-            guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return
-            }
-            for offset in stride(from: 0, to: usableCount, by: FileReader.chunkSize) {
-                let length = min(FileReader.chunkSize, usableCount - offset)
-                tlsh_update(context, base.advanced(by: offset), UInt32(length))
-            }
-        }
-
-        return self.digest(of: context)
-    }
 
     /**
      Compute distance between two TLSH hashes. Lower = more similar. Returns -1 on error, including for a string that is
@@ -136,7 +76,7 @@ enum TLSHBridge {
     /**
      Close a running hash and return its upper-case `T1` digest, or nil when libtlsh produced none.
      */
-    private static func digest(of context: tlsh_t?) -> String? {
+    fileprivate static func digest(of context: tlsh_t?) -> String? {
         tlsh_final(context)
 
         guard let cString = tlsh_get_hash(context, 1) else {
@@ -162,5 +102,35 @@ enum TLSHBridge {
             return nil
         }
         return String(digits)
+    }
+}
+
+/**
+ A running TLSH hash, fed at most `TLSHBridge.maximumDataSize` bytes (see `ByteHash.maximumLength`).
+ */
+final class TLSHHasher: ByteHasher {
+    private let context = tlsh_new()
+    private var length = 0
+
+    deinit {
+        tlsh_free(self.context)
+    }
+
+    func update(_ bytes: UnsafeRawBufferPointer) {
+        guard let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+            return
+        }
+        tlsh_update(self.context, base, UInt32(bytes.count))
+        self.length += bytes.count
+    }
+
+    /**
+     The digest, or nil below `TLSHBridge.minimumDataSize` bytes or when libtlsh makes none.
+     */
+    func finalize() -> String? {
+        guard self.length >= TLSHBridge.minimumDataSize else {
+            return nil
+        }
+        return TLSHBridge.digest(of: self.context)
     }
 }

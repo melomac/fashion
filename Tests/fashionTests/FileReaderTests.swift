@@ -15,22 +15,44 @@ final class FileReaderTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
+        let fd = try FileReader.open(path: url.path())
+        defer {
+            try? fd.close()
+        }
+
         var collected = Data()
-        try FileReader.read(path: url.path()) { collected.append(contentsOf: $0) }
+        XCTAssertEqual(try FileReader.read(fd, offset: 0, length: content.count) { collected.append(contentsOf: $0) }, content.count)
 
         XCTAssertEqual(collected, content)
     }
 
-    func testReadHonorsLimit() throws {
+    func testReadHonorsOffsetAndLength() throws {
+        let url = try self.tempFile(Data((0 ..< 1000).map { UInt8($0 & 0xff) }))
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let fd = try FileReader.open(path: url.path())
+        defer {
+            try? fd.close()
+        }
+
+        var collected = Data()
+        XCTAssertEqual(try FileReader.read(fd, offset: 10, length: 100) { collected.append(contentsOf: $0) }, 100)
+
+        XCTAssertEqual(collected, Data((10 ..< 110).map { UInt8($0) }))
+    }
+
+    func testReadStopsAtTheEnd() throws {
         let url = try self.tempFile(Data(repeating: 0xab, count: 1000))
         defer {
             try? FileManager.default.removeItem(at: url)
         }
+        let fd = try FileReader.open(path: url.path())
+        defer {
+            try? fd.close()
+        }
 
-        var count = 0
-        try FileReader.read(path: url.path(), limit: 100) { count += $0.count }
-
-        XCTAssertEqual(count, 100)
+        XCTAssertEqual(try FileReader.read(fd, offset: 900, length: 1000) { _ in }, 100)
     }
 
     func testHeadReturnsLeadingBytes() throws {
@@ -57,14 +79,15 @@ final class FileReaderTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertEqual(try FileReader.size(path: url.path()), 4242)
+        let fd = try FileReader.open(path: url.path())
+        defer {
+            try? fd.close()
+        }
+
+        XCTAssertEqual(try FileReader.size(fd), 4242)
     }
 
-    func testReadThrowsForMissingFile() {
-        XCTAssertThrowsError(try FileReader.read(path: "/tmp/fashion-missing-\(UUID())") { _ in })
-    }
-
-    func testSizeThrowsForMissingFile() {
-        XCTAssertThrowsError(try FileReader.size(path: "/tmp/fashion-missing-\(UUID())"))
+    func testOpenThrowsForMissingFile() {
+        XCTAssertThrowsError(try FileReader.open(path: "/tmp/fashion-missing-\(UUID())"))
     }
 }

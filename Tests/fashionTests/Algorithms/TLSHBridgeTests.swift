@@ -6,14 +6,14 @@ final class TLSHBridgeTests: XCTestCase {
         UInt8($0 % 256)
     })
 
-    func testHashDataTooSmall() {
+    func testHashDataTooSmall() throws {
         XCTAssertNil(
-            TLSHBridge.hash(data: Data(repeating: 0x41, count: 10)),
+            try ByteHash.tlsh.digest(Data(repeating: 0x41, count: 10)),
         )
     }
 
     func testHashDataLargeEnough() throws {
-        let hash = try XCTUnwrap(TLSHBridge.hash(data: self.data))
+        let hash = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
 
         XCTAssertNotNil(hash)
         XCTAssertFalse(hash.isEmpty)
@@ -25,14 +25,14 @@ final class TLSHBridgeTests: XCTestCase {
         defer {
             try? FileManager.default.removeItem(at: url)
         }
-        let hash = try TLSHBridge.hash(path: url.path())
+        let hash = try ByteHash.tlsh.digest(path: url.path())
 
         XCTAssertNotNil(hash)
         XCTAssertFalse(try XCTUnwrap(hash?.isEmpty))
     }
 
     func testDiffIdenticalHashes() throws {
-        let hash = try XCTUnwrap(TLSHBridge.hash(data: self.data))
+        let hash = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
         XCTAssertFalse(hash.isEmpty)
 
         let distance = TLSHBridge.diff(hash, hash)
@@ -47,7 +47,7 @@ final class TLSHBridgeTests: XCTestCase {
 
     func testDiffRequiresWholeDigests() throws {
         // libtlsh reads the 70 digits it needs and accepts whatever follows them: only whole digests may be compared.
-        let hash = try XCTUnwrap(TLSHBridge.hash(data: self.data))
+        let hash = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
         let digits = String(hash.dropFirst(2))
         XCTAssertEqual(TLSHBridge.diff(hash, digits), 0, "the T1 prefix is optional")
         XCTAssertEqual(TLSHBridge.diff(hash, "t1" + digits.lowercased()), 0, "digests compare regardless of case")
@@ -58,16 +58,16 @@ final class TLSHBridgeTests: XCTestCase {
         }
     }
 
-    func testHashDeterministic() {
-        let first = TLSHBridge.hash(data: self.data)
+    func testHashDeterministic() throws {
+        let first = try ByteHash.tlsh.digest(self.data)
 
         for _ in 0 ..< 10 {
-            XCTAssertEqual(TLSHBridge.hash(data: self.data), first, "TLSH produced different hash for identical input")
+            XCTAssertEqual(try ByteHash.tlsh.digest(self.data), first, "TLSH produced different hash for identical input")
         }
     }
 
     func testDiffStripsT1Prefix() throws {
-        let hash = try XCTUnwrap(TLSHBridge.hash(data: self.data))
+        let hash = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
 
         let prefixed = "T1" + hash.dropFirst(2)
         XCTAssertEqual(TLSHBridge.diff(hash, prefixed), 0)

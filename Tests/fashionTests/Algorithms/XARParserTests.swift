@@ -126,7 +126,7 @@ final class XARParserTests: XCTestCase {
         let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: false)
         XCTAssertNotNil(result)
         // Should match one-shot hash of the TOC bytes
-        XCTAssertEqual(result, try CryptoDigest.hash(data: tocBytes, algorithm: .sha256))
+        XCTAssertEqual(result, try ByteHash.sha256.digest(tocBytes))
     }
 
     func testParseHeaderRejectsUndersizedHeaderSize() throws {
@@ -246,7 +246,7 @@ final class XARParserTests: XCTestCase {
         let result = try XARParser.hashToc(path: url.path(), algorithm: .sha256, decompress: true)
 
         XCTAssertNotNil(result)
-        XCTAssertEqual(result, try CryptoDigest.hash(data: toc, algorithm: .sha256))
+        XCTAssertEqual(result, try ByteHash.sha256.digest(toc))
     }
 
     func testHashTocDecompressSizeMismatchThrows() throws {

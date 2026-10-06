@@ -652,17 +652,28 @@ extension Fashion {
  command line, so hash threads read plain values instead of resolving every option for every file.
  */
 struct Digester {
+    /**
+     What a scan digests in each file. Every mode but cdhash streams bytes through a `ByteHash`.
+     */
+    enum Mode {
+        /// The whole file, or its Mach-O image with `--exact`.
+        case file(ByteHash)
+        /// The whole file, then each architecture of a universal binary.
+        case slices(ByteHash)
+        /// The external symbol names of each Mach-O slice.
+        case symhash(ByteHash, separator: String, sortSymbols: Bool)
+        /// The table of contents of a XAR archive.
+        case xarToc(ByteHash, decompress: Bool)
+        /// The code directory hashes of each Mach-O slice.
+        case cdhash
+    }
+
     let algorithm: Algorithm
+    let mode: Mode
     let targets: [String]
     let score: Int
     let quiet: Bool
     let exact: Bool
-    let slices: Bool
-    let symhash: Bool
-    let separator: String
-    let sortSymbols: Bool
-    let xarToc: Bool
-    let decompress: Bool
 
     init(_ command: Fashion) {
         self.algorithm = command.resolvedAlgorithm
@@ -670,12 +681,21 @@ struct Digester {
         self.score = command.resolvedScore
         self.quiet = command.quiet
         self.exact = command.exact
-        self.slices = command.slices
-        self.symhash = command.symbolOptions.symhash
-        self.separator = command.resolvedSeparator
-        self.sortSymbols = command.symbolOptions.sortSymbols
-        self.xarToc = command.xarOptions.xarToc
-        self.decompress = command.xarOptions.decompress
+
+        // `--algo cdhash` is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
+        guard let hash = ByteHash(self.algorithm) else {
+            self.mode = .cdhash
+            return
+        }
+        self.mode = if command.symbolOptions.symhash {
+            .symhash(hash, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.sortSymbols)
+        } else if command.xarOptions.xarToc {
+            .xarToc(hash, decompress: command.xarOptions.decompress)
+        } else if command.slices {
+            .slices(hash)
+        } else {
+            .file(hash)
+        }
     }
 
     // MARK: - Output Lines
@@ -705,8 +725,11 @@ struct Digester {
             guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score) else {
                 continue
             }
-            if self.quiet || self.symhash {
-                return [self.quiet ? OutputFormatter.formatPath(path) : OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm)]
+            if self.quiet {
+                return [OutputFormatter.formatPath(path)]
+            }
+            if case .symhash = self.mode {
+                return [OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm)]
             }
             lines.append(OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: self.algorithm))
         }
@@ -719,21 +742,19 @@ struct Digester {
      The digests of one file in the selected mode.
      */
     private func digests(_ path: String) throws -> [DigestResult] {
-        if self.symhash {
-            return try SymHash.compute(path: path, algorithm: self.algorithm, separator: self.separator, sortSymbols: self.sortSymbols)
+        switch self.mode {
+        case let .file(hash):
+            try self.fileDigest(path, hash: hash).map { [DigestResult(digest: $0)] } ?? []
+        case let .slices(hash):
+            try self.sliceDigests(path, hash: hash)
+        case let .symhash(hash, separator, sortSymbols):
+            try SymHash.compute(path: path, algorithm: hash, separator: separator, sortSymbols: sortSymbols)
                 .map { DigestResult(digest: $0.digest, label: $0.arch) }
+        case let .xarToc(hash, decompress):
+            try XARParser.hashToc(path: path, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
+        case .cdhash:
+            try self.cdHashDigests(path)
         }
-        if self.xarToc {
-            let digest = try XARParser.hashToc(path: path, algorithm: self.algorithm, decompress: self.decompress)
-            return digest.map { [DigestResult(digest: $0)] } ?? []
-        }
-        if self.algorithm == .cdhash {
-            return try self.cdHashDigests(path)
-        }
-        if self.slices {
-            return try self.sliceDigests(path)
-        }
-        return try self.fileDigest(path).map { [DigestResult(digest: $0)] } ?? []
     }
 
     /**
@@ -757,13 +778,13 @@ struct Digester {
     /**
      The whole-file digest, then one per architecture of a universal binary, each trimmed when `--exact` is set.
      */
-    private func sliceDigests(_ path: String) throws -> [DigestResult] {
+    private func sliceDigests(_ path: String, hash: ByteHash) throws -> [DigestResult] {
         // Read the container first, so a malformed one fails before any hashing.
         let slices = try self.sliceRanges(path)
 
-        var results = try self.fileDigest(path).map { [DigestResult(digest: $0)] } ?? []
+        var results = try self.fileDigest(path, hash: hash).map { [DigestResult(digest: $0)] } ?? []
         for slice in slices {
-            if let digest = try self.digest(path, range: slice.range) {
+            if let digest = try hash.digest(path: path, range: slice.range) {
                 results.append(DigestResult(digest: digest, label: slice.arch))
             }
         }
@@ -799,35 +820,10 @@ struct Digester {
      The digest of the whole file or, with `--exact`, of a Mach-O's logical content only: the map is lazy, so `fileEnd`
      faults just the header.
      */
-    private func fileDigest(_ path: String) throws -> String? {
+    private func fileDigest(_ path: String, hash: ByteHash) throws -> String? {
         guard self.exact, try MachOParser.isMachO(path: path) else {
-            return try self.digest(path)
+            return try hash.digest(path: path)
         }
-        return try self.digest(path, range: 0 ..< MachOParser.fileEnd(data: FileReader.map(path: path)))
-    }
-
-    /**
-     The digest of a file, or of `range` of it: streamed uncached from the descriptor at the range's offset, the way
-     Security's `CodeDirectory::Builder` reads a slice's code, so hashing neither maps nor copies a slice. Crypto, git
-     and ssdeep digests of a range fail closed when the file no longer holds it.
-     */
-    private func digest(_ path: String, range: Range<Int>? = nil) throws -> String? {
-        let offset = range?.lowerBound ?? 0
-        let limit = range?.count
-
-        return switch self.algorithm {
-        case .md5, .sha1, .sha256, .sha384, .sha512:
-            try CryptoDigest.hash(path: path, algorithm: self.algorithm, offset: offset, limit: limit, exactLength: limit)
-        case .git:
-            try GitBlobDigest.hash(path: path, useSHA256: false, offset: offset, limit: limit)
-        case .git256:
-            try GitBlobDigest.hash(path: path, useSHA256: true, offset: offset, limit: limit)
-        case .ssdeep:
-            try SSDeepBridge.hash(path: path, offset: offset, limit: limit)
-        case .tlsh:
-            try TLSHBridge.hash(path: path, offset: offset, limit: limit)
-        case .cdhash:
-            try CDHash.hash(path: path).first?.hash
-        }
+        return try hash.digest(path: path, range: 0 ..< MachOParser.fileEnd(data: FileReader.map(path: path)))
     }
 }

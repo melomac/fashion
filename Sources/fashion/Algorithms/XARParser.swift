@@ -83,7 +83,7 @@ enum XARParser {
      whole file on a volume Foundation deems unsafe, such as a mounted disk image). Throws for one that is, but whose
      header or table of contents is malformed, rather than report nothing for it.
      */
-    static func hashToc(path: String, algorithm: Algorithm, decompress: Bool) throws -> String? {
+    static func hashToc(path: String, algorithm: ByteHash, decompress: Bool) throws -> String? {
         guard try FileReader.head(path: path, count: 4) == Array("xar!".utf8) else {
             return nil
         }
@@ -129,21 +129,7 @@ enum XARParser {
             tocData = compressed
         }
 
-        // Hash the TOC data
-        switch algorithm {
-        case .md5, .sha1, .sha256, .sha384, .sha512:
-            return try CryptoDigest.hash(data: tocData, algorithm: algorithm)
-        case .git:
-            return try GitBlobDigest.hashData(tocData, useSHA256: false)
-        case .git256:
-            return try GitBlobDigest.hashData(tocData, useSHA256: true)
-        case .ssdeep:
-            return SSDeepBridge.hash(data: tocData)
-        case .tlsh:
-            return TLSHBridge.hash(data: tocData)
-        case .cdhash:
-            return nil
-        }
+        return try algorithm.digest(tocData)
     }
 
     // MARK: - Zlib Decompression
