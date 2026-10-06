@@ -807,7 +807,7 @@ struct Digester {
             // all is hashed whole.
             let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count)
             let length = image.map { self.exact ? $0.logicalEnd() : arch.range.count } ?? arch.range.count
-            return (arch.range.lowerBound ..< arch.range.lowerBound + length, Universal.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
+            return (arch.range.lowerBound ..< arch.range.lowerBound + length, arch.name)
         }
     }
 

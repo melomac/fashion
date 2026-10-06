@@ -25,6 +25,11 @@ enum Universal {
         var range: Range<Int> {
             Int(self.offset) ..< Int(self.offset + self.size)
         }
+
+        /// Its name, as `codesign --arch` spells it (see `archName`), like Security's `Architecture::name`.
+        var name: String {
+            Universal.archName(cpuType: self.cpuType, cpuSubtype: self.cpuSubtype)
+        }
     }
 
     // MARK: - Open

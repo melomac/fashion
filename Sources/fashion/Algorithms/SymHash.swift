@@ -17,7 +17,7 @@ enum SymHash {
                 else {
                     return nil
                 }
-                return DigestResult(digest: digest, label: Universal.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
+                return DigestResult(digest: digest, label: arch.name)
             }
         case let .thin(image):
             guard let digest = try self.hash(image, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols) else {

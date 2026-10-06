@@ -72,7 +72,7 @@ enum CDHash {
         switch try Universal.open(file) {
         case let .fat(archs):
             try archs.flatMap { arch -> [SliceResult] in
-                let name = Universal.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
+                let name = arch.name
                 // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
                 guard let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count) else {
                     self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")

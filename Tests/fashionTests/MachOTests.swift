@@ -77,7 +77,7 @@ final class MachOTests: XCTestCase {
     func testArchNamesMatchCodesign() throws {
         let path = "/bin/ls"
         let names: [String] = switch try Universal.open(path: path) {
-        case let .fat(archs): archs.map { Universal.archName(cpuType: $0.cpuType, cpuSubtype: $0.cpuSubtype) }
+        case let .fat(archs): archs.map(\.name)
         case let .thin(slice): [Universal.archName(cpuType: slice.cpuType, cpuSubtype: slice.cpuSubtype)]
         case .notMachO: []
         }
@@ -322,7 +322,7 @@ final class MachOTests: XCTestCase {
         // than Mach-O. The container must open, and the Mach-O-only hashes must simply yield nothing.
         var data = self.makeFatArchive()
         if case let .fat(archs) = try Universal.open(data: data) {
-            XCTAssertEqual(archs.map { Universal.archName(cpuType: $0.cpuType, cpuSubtype: $0.cpuSubtype) }, ["arm64", "x86_64"])
+            XCTAssertEqual(archs.map(\.name), ["arm64", "x86_64"])
         } else {
             XCTFail("Expected a universal archive to open as fat")
         }
