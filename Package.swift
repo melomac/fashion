@@ -2,13 +2,6 @@
 
 import PackageDescription
 
-// TLSH's layout depends on these defines, so its library and the wrapper that includes its headers must share them.
-let tlshSettings: [CXXSetting] = [
-    .headerSearchPath("../../submodules/tlsh/include"),
-    .define("BUCKETS_128"),
-    .define("CHECKSUM_1B"),
-]
-
 let package = Package(
     name: "fashion",
     platforms: [
@@ -19,18 +12,19 @@ let package = Package(
     ],
     targets: [
         // CSSDeep and CTLSH compile the submodules' sources through one-line includes, so the headers SwiftPM needs
-        // are tracked here: it runs neither ssdeep's autotools nor TLSH's CMake.
+        // are tracked here: it runs neither ssdeep's autotools nor TLSH's CMake. CTLSH also holds the C interface Swift
+        // calls TLSH's C++ through.
         .target(
             name: "CSSDeep",
         ),
         .target(
             name: "CTLSH",
-            cxxSettings: tlshSettings,
-        ),
-        .target(
-            name: "CTLSHWrapper",
-            dependencies: ["CTLSH"],
-            cxxSettings: tlshSettings,
+            cxxSettings: [
+                .headerSearchPath("../../submodules/tlsh/include"),
+                // TLSH's layout depends on these defines, and its digests on the layout (see tlsh_version.h).
+                .define("BUCKETS_128"),
+                .define("CHECKSUM_1B"),
+            ],
         ),
         .target(
             name: "CMachOCompat",
@@ -41,7 +35,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 "CMachOCompat",
                 "CSSDeep",
-                "CTLSHWrapper",
+                "CTLSH",
             ],
         ),
         .testTarget(
