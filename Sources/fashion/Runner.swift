@@ -380,7 +380,7 @@ final class Reporter: @unchecked Sendable {
     private func summary(_ counts: (files: Int, errors: Int)) -> String {
         let duration = (self.clock.now - self.start).formatted(.units(allowed: [.hours, .minutes, .seconds, .milliseconds], width: .narrow))
         // Not `.byteCount(style:)`: its formatter adds about 1 ms to every run, and its decimal separator follows the locale.
-        let peak = Self.peakFootprint().map { String(format: ", %.1f MB peak memory", Double($0) / 1_048_576) } ?? ""
+        let peak = Self.peakFootprint().map { String(format: ", %.1f MB peak memory", Double($0) / 1_000_000) } ?? ""
 
         return "\(String(counts.files, pluralizing: "file")) with \(String(counts.errors, pluralizing: "error")) in \(duration)\(peak)"
     }
