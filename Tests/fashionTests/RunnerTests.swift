@@ -129,6 +129,21 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(accepted, 0)
     }
 
+    func testExactTrimsEachSliceInPlace() throws {
+        // --exact ends a slice where it lies in the universal file: with 100 bytes appended inside the slice, the file
+        // still hashes whole, and the slice without them.
+        let slice = self.machO()
+        let fat = self.fat(wrapping: slice + Data(repeating: 0x41, count: 100))
+        let url = try self.write(fat, name: "fat-padded")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        let digester = try Digester(Fashion.parse([url.path, "--slices", "--exact", "--quiet"]))
+        let lines = digester.lines(for: url.path, reporter: Reporter(console: Console()))
+        XCTAssertEqual(lines, try [ByteHash.sha256.digest(fat), ByteHash.sha256.digest(slice)])
+    }
+
     func testSlicesHashInPlace() throws {
         // A slice is read from the file at its offset, never copied: a copy made every slice a hash thread held
         // resident at once, gigabytes over /Applications. One larger than any earlier peak of the process shows it.

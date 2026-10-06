@@ -1,9 +1,9 @@
 /*
  C helpers the Swift code needs:
- - Mach-O CPU subtypes missing from older SDKs. macOS 27 (Xcode 27) added CPU_SUBTYPE_ARM64E_X1 to <mach/machine.h>.
-   This header supplies the same definition when building against an earlier SDK, so Swift code can use the SDK name
-   unconditionally. It is guarded, so the SDK's own definition wins whenever it exists, and CMachOCompat.c then checks
-   the fallback against it.
+ - Mach-O constants missing from older SDKs. macOS 27 (Xcode 27) added CPU_SUBTYPE_ARM64E_X1 to <mach/machine.h>, and
+   macOS 26 the load commands below to <mach-o/loader.h>. This header supplies the same definitions when building
+   against an earlier SDK, so Swift code can use the SDK names unconditionally. They are guarded, so the SDK's own
+   definition wins whenever it exists, and CMachOCompat.c then checks each fallback against it.
  - The fts(3) comparator of `--sort`, written in C so it reads FTSENT through whichever layout <fts.h> declares.
  */
 
@@ -11,10 +11,24 @@
 #define CMACHO_COMPAT_H
 
 #include <fts.h>
+#include <mach-o/loader.h>
 #include <mach/machine.h>
 
 #ifndef CPU_SUBTYPE_ARM64E_X1
 #define CPU_SUBTYPE_ARM64E_X1 ((cpu_subtype_t) 12)
+#endif
+
+#ifndef LC_FUNCTION_VARIANTS
+#define LC_FUNCTION_VARIANTS 0x37
+#endif
+#ifndef LC_FUNCTION_VARIANT_FIXUPS
+#define LC_FUNCTION_VARIANT_FIXUPS 0x38
+#endif
+#ifndef LC_TARGET_TRIPLE
+#define LC_TARGET_TRIPLE 0x39
+#endif
+#ifndef LC_LAZY_LOAD_DYLIB_INFO
+#define LC_LAZY_LOAD_DYLIB_INFO 0x3A
 #endif
 
 /*

@@ -1,6 +1,6 @@
 /*
- SwiftPM needs one translation unit per target. This one also verifies the fallback in CMachOCompat.h: on an SDK
- that defines the subtype itself the guarded fallback is inert, and the assertion compares the SDK's value with
+ SwiftPM needs one translation unit per target. This one also verifies the fallbacks in CMachOCompat.h: on an SDK
+ that defines a constant itself the guarded fallback is inert, and the assertion compares the SDK's value with
  the one the fallback would have supplied.
  */
 #include "CMachOCompat.h"
@@ -8,6 +8,10 @@
 #include <string.h>
 
 _Static_assert(CPU_SUBTYPE_ARM64E_X1 == 12, "CMachOCompat.h fallback for CPU_SUBTYPE_ARM64E_X1 disagrees with the SDK");
+_Static_assert(LC_FUNCTION_VARIANTS == 0x37, "CMachOCompat.h fallback for LC_FUNCTION_VARIANTS disagrees with the SDK");
+_Static_assert(LC_FUNCTION_VARIANT_FIXUPS == 0x38, "CMachOCompat.h fallback for LC_FUNCTION_VARIANT_FIXUPS disagrees with the SDK");
+_Static_assert(LC_TARGET_TRIPLE == 0x39, "CMachOCompat.h fallback for LC_TARGET_TRIPLE disagrees with the SDK");
+_Static_assert(LC_LAZY_LOAD_DYLIB_INFO == 0x3A, "CMachOCompat.h fallback for LC_LAZY_LOAD_DYLIB_INFO disagrees with the SDK");
 
 /*
  The byte at `index` of the entry's sort key, its name followed by "/" for a directory: -1 past the end, which sorts

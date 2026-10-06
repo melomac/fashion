@@ -16,6 +16,8 @@ debug:
 .PHONY: test
 test:
 	swift test --enable-code-coverage
+	# Again with the other --exact ending (see Package.swift), in its own build directory.
+	SECURITY_STRICT_VALIDATION=NO swift test --scratch-path .build/segments
 
 .PHONY: format
 format:

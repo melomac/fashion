@@ -1054,8 +1054,9 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(MachO.logicalEnd(data: data), logicalEnd)
     }
 
-    func testMachOEndWithoutLinkeditOrSymtabKeepsWholeSlice() {
-        // Security's MachO ends the image only at __LINKEDIT or the LC_SYMTAB strings: other commands never trim.
+    func testMachOEndWithOnlyADysymtab() {
+        // The indirect symbol table LC_DYSYMTAB references ends the image, except to Security's MachO, which ends it
+        // only at __LINKEDIT or the LC_SYMTAB strings.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -1079,11 +1080,16 @@ final class MachOTests: XCTestCase {
         data.append(Data(repeating: 0xab, count: 128 - data.count))
         data.append(Data(repeating: 0x41, count: 50))
 
+#if SECURITY_STRICT_VALIDATION
         XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
+#else
+        XCTAssertEqual(MachO.logicalEnd(data: data), 128)
+#endif
     }
 
-    func testMachOEndFirstCommandWins() {
-        // LC_SYMTAB comes before __LINKEDIT here, so its string table ends the image even though __LINKEDIT reaches further.
+    func testMachOEndSymtabBeforeLinkedit() {
+        // LC_SYMTAB comes before __LINKEDIT here: to Security's MachO its string table ends the image even though
+        // __LINKEDIT reaches further.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -1103,7 +1109,81 @@ final class MachOTests: XCTestCase {
         data.appendUInt32(1); data.appendUInt32(1); data.appendUInt32(0); data.appendUInt32(0) // maxprot, initprot, nsects, flags
         data.append(Data(repeating: 0xab, count: 250 - data.count))
 
+#if SECURITY_STRICT_VALIDATION
         XCTAssertEqual(MachO.logicalEnd(data: data), 144)
+#else
+        XCTAssertEqual(MachO.logicalEnd(data: data), 200)
+#endif
+    }
+
+    func testMachOEndSegmentPastLinkedit() {
+        // A dSYM's __DWARF segment follows __LINKEDIT, where Security's MachO ends the image.
+        var data = Data()
+        data.appendUInt32(MH_MAGIC_64)
+        data.appendInt32(CPU_TYPE_ARM64)
+        data.appendInt32(0)
+        data.appendUInt32(UInt32(MH_DSYM))
+        data.appendUInt32(2) // ncmds
+        data.appendUInt32(144) // sizeofcmds = 2 * LC_SEGMENT_64(72)
+        data.appendUInt32(0)
+        data.appendUInt32(0)
+        for (name, fileoff, filesize) in [("__LINKEDIT", 0, 200), ("__DWARF", 200, 100)] as [(String, UInt64, UInt64)] {
+            data.appendUInt32(UInt32(LC_SEGMENT_64))
+            data.appendUInt32(72)
+            data.append(Data(name.utf8)); data.append(Data(repeating: 0, count: 16 - name.utf8.count))
+            data.appendUInt64(0); data.appendUInt64(filesize); data.appendUInt64(fileoff); data.appendUInt64(filesize) // vmaddr, vmsize, fileoff, filesize
+            data.appendUInt32(1); data.appendUInt32(1); data.appendUInt32(0); data.appendUInt32(0) // maxprot, initprot, nsects, flags
+        }
+        data.append(Data(repeating: 0xab, count: 300 - data.count))
+        data.append(Data(repeating: 0x41, count: 50))
+
+#if SECURITY_STRICT_VALIDATION
+        XCTAssertEqual(MachO.logicalEnd(data: data), 200)
+#else
+        XCTAssertEqual(MachO.logicalEnd(data: data), 300)
+#endif
+    }
+
+    func testMachOEndEmptySymtab() {
+        // An empty string table at offset 0 ends the image at 0 for Security's MachO; the header and load commands
+        // always belong to it otherwise.
+        var data = self.makeThin64()
+        data.replaceSubrange(48 ..< 56, with: Data(count: 8)) // stroff, strsize
+        data.append(Data(repeating: 0x41, count: 50))
+
+#if SECURITY_STRICT_VALIDATION
+        XCTAssertEqual(MachO.logicalEnd(data: data), 0)
+#else
+        XCTAssertEqual(MachO.logicalEnd(data: data), 56)
+#endif
+    }
+
+    func testMachOEndUnmodeledCommand() {
+        // A command that might reference bytes not modeled here keeps the whole slice, except for Security's MachO,
+        // which only looks for __LINKEDIT and LC_SYMTAB.
+        var data = Data()
+        data.appendUInt32(MH_MAGIC_64)
+        data.appendInt32(CPU_TYPE_ARM64)
+        data.appendInt32(0)
+        data.appendUInt32(2)
+        data.appendUInt32(2) // ncmds
+        data.appendUInt32(40) // sizeofcmds = unknown(16) + LC_SYMTAB(24)
+        data.appendUInt32(0)
+        data.appendUInt32(0)
+        data.appendUInt32(0xab) // a command id loader.h does not define
+        data.appendUInt32(16)
+        data.append(Data(repeating: 0, count: 8))
+        data.appendUInt32(UInt32(LC_SYMTAB))
+        data.appendUInt32(24)
+        data.appendUInt32(72); data.appendUInt32(0); data.appendUInt32(72); data.appendUInt32(8) // strings end at 80
+        data.append(Data(repeating: 0xab, count: 80 - data.count))
+        data.append(Data(repeating: 0x41, count: 100))
+
+#if SECURITY_STRICT_VALIDATION
+        XCTAssertEqual(MachO.logicalEnd(data: data), 80)
+#else
+        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
+#endif
     }
 
     func testMachOEndPastSliceKeepsWholeSlice() {

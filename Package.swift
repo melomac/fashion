@@ -2,6 +2,11 @@
 
 import PackageDescription
 
+// --exact ends a Mach-O where codesign's strict validation does; SECURITY_STRICT_VALIDATION=NO in the environment builds
+// the other ending, past every byte the load commands reference (see MachO.logicalEnd()). Xcode reads this, not
+// fashion.xcconfig, when it opens the package.
+let strictValidation: [SwiftSetting] = Context.environment["SECURITY_STRICT_VALIDATION"] == "NO" ? [] : [.define("SECURITY_STRICT_VALIDATION")]
+
 let package = Package(
     name: "fashion",
     platforms: [
@@ -37,10 +42,12 @@ let package = Package(
                 "CSSDeep",
                 "CTLSH",
             ],
+            swiftSettings: strictValidation,
         ),
         .testTarget(
             name: "fashionTests",
             dependencies: ["fashion"],
+            swiftSettings: strictValidation,
         ),
     ],
 )

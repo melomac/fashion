@@ -114,7 +114,7 @@ enum Universal {
     // MARK: - Logical Extent
 
     /**
-     The logical end of an entire file: a thin Mach-O trims to its referenced extent,
+     The logical end of an entire file: a thin Mach-O ends where `MachO.logicalEnd()` ends its image,
      a fat binary trims to the end of its last architecture slice, and any other input is left whole.
 
      Bytes beyond this are trailing slack appended after the Mach-O content.

@@ -147,6 +147,8 @@ eaf8c357224751a209c0d164c779da7c77c6369f04a94f5ea6efbe21fda62930  prostorify.com
 `--exact` works with any algorithm and combines with `--slices` to trim each architecture of a universal binary.
 Non-Mach-O files are hashed whole.
 
+Built with `SECURITY_STRICT_VALIDATION=NO` in the environment, `--exact` keeps every byte the segments and link-edit tables reference instead, so a dSYM keeps the `__DWARF` segment that follows `__LINKEDIT`, and a slice with a load command `fashion` does not model is hashed whole.
+
 ### Concurrency
 
 The `-j` / `--jobs` flag controls parallel workers.

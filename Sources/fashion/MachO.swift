@@ -1,3 +1,4 @@
+import CMachOCompat // the load commands macOS 26 added, on older SDKs
 import Foundation
 import MachO
 
@@ -121,7 +122,7 @@ struct MachO {
         }
 
         // validateStructure stops at the first __LINKEDIT segment or LC_SYMTAB, where it finds the end of the image;
-        // an image that does not end there only fails strict validation, which logicalEnd() reports.
+        // an image that does not end there only fails strict validation.
         for command in image.loadCommands {
             switch command.cmd {
             case UInt32(LC_SEGMENT):
@@ -220,10 +221,12 @@ struct MachO {
 
     // MARK: - Logical Extent
 
+#if SECURITY_STRICT_VALIDATION
     /**
      Where the Mach-O image ends, as Security's `MachO` decides it for strict validation: at the end of the
      `__LINKEDIT` segment or of the `LC_SYMTAB` string table, whichever command comes first. Bytes past it are
-     appended to the image, which `codesign` rejects.
+     appended to the image, which `codesign` rejects. `Package.swift` defines `SECURITY_STRICT_VALIDATION` unless
+     the environment sets it to `NO`.
 
      The whole slice when it declares neither, or an end that lies past the slice.
      */
@@ -248,6 +251,127 @@ struct MachO {
         }
         return self.length
     }
+#else
+    /**
+     Where the Mach-O image ends: past the header, the load commands, and every byte its segments and link-edit tables
+     reference, so a dSYM keeps the `__DWARF` segment that follows `__LINKEDIT`. Bytes past it are appended to the image.
+     Built with `SECURITY_STRICT_VALIDATION=NO` in the environment; otherwise the image ends where `codesign`'s
+     strict validation expects it to.
+
+     The whole slice when a command references bytes past the slice, is too short for its structure, or might
+     reference bytes not modeled here.
+     */
+    func logicalEnd() -> Int {
+        let headerSize = self.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+        let count = UInt64(self.length)
+        var end = min(headerSize + self.sizeofcmds, self.length)
+
+        for command in self.loadCommands {
+            guard let ranges = self.fileRanges(of: command) else {
+                return self.length
+            }
+            for range in ranges where range.size > 0 {
+                guard
+                    range.size <= count,
+                    range.offset <= count - range.size
+                else {
+                    return self.length
+                }
+                end = max(end, Int(range.offset + range.size))
+            }
+        }
+        return end
+    }
+
+    /**
+     The file ranges a load command references: none for a command whose data is inline, nil for one too short for its
+     structure or that might reference bytes not modeled here.
+     */
+    private func fileRanges(of command: LoadCommand) -> [(offset: UInt64, size: UInt64)]? {
+        // `count` entries of `stride` bytes at `offset`: a 32-bit count times a structure size fits in 64 bits.
+        func range(_ offset: some FixedWidthInteger, _ count: some FixedWidthInteger, stride: Int = 1) -> (offset: UInt64, size: UInt64) {
+            (UInt64(self.sw(offset)), UInt64(self.sw(count)) * UInt64(stride))
+        }
+
+        switch command.cmd {
+        case UInt32(LC_SEGMENT):
+            return command.payload(as: segment_command.self).map { [range($0.fileoff, $0.filesize)] }
+        case UInt32(LC_SEGMENT_64):
+            return command.payload(as: segment_command_64.self).map { [range($0.fileoff, $0.filesize)] }
+        case UInt32(LC_SYMTAB):
+            let entry = self.is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size
+            return command.payload(as: symtab_command.self).map { [range($0.symoff, $0.nsyms, stride: entry), range($0.stroff, $0.strsize)] }
+        case UInt32(LC_DYSYMTAB):
+            let module = self.is64 ? MemoryLayout<dylib_module_64>.size : MemoryLayout<dylib_module>.size
+            return command.payload(as: dysymtab_command.self).map { [
+                range($0.tocoff, $0.ntoc, stride: MemoryLayout<dylib_table_of_contents>.size),
+                range($0.modtaboff, $0.nmodtab, stride: module),
+                range($0.extrefsymoff, $0.nextrefsyms, stride: MemoryLayout<dylib_reference>.size),
+                range($0.indirectsymoff, $0.nindirectsyms, stride: MemoryLayout<UInt32>.size),
+                range($0.extreloff, $0.nextrel, stride: MemoryLayout<relocation_info>.size),
+                range($0.locreloff, $0.nlocrel, stride: MemoryLayout<relocation_info>.size),
+            ] }
+        case UInt32(LC_DYLD_INFO), UInt32(LC_DYLD_INFO_ONLY):
+            return command.payload(as: dyld_info_command.self).map { [
+                range($0.rebase_off, $0.rebase_size),
+                range($0.bind_off, $0.bind_size),
+                range($0.weak_bind_off, $0.weak_bind_size),
+                range($0.lazy_bind_off, $0.lazy_bind_size),
+                range($0.export_off, $0.export_size),
+            ] }
+        case UInt32(LC_CODE_SIGNATURE), UInt32(LC_SEGMENT_SPLIT_INFO), UInt32(LC_FUNCTION_STARTS), UInt32(LC_DATA_IN_CODE),
+             UInt32(LC_DYLIB_CODE_SIGN_DRS), UInt32(LC_LINKER_OPTIMIZATION_HINT), UInt32(LC_DYLD_EXPORTS_TRIE),
+             UInt32(LC_DYLD_CHAINED_FIXUPS), UInt32(LC_ATOM_INFO), UInt32(LC_FUNCTION_VARIANTS),
+             UInt32(LC_FUNCTION_VARIANT_FIXUPS), UInt32(LC_LAZY_LOAD_DYLIB_INFO):
+            return command.payload(as: linkedit_data_command.self).map { [range($0.dataoff, $0.datasize)] }
+        case UInt32(LC_ENCRYPTION_INFO), UInt32(LC_ENCRYPTION_INFO_64):
+            // Both layouts place cryptoff and cryptsize at the same offsets.
+            return command.payload(as: encryption_info_command.self).map { [range($0.cryptoff, $0.cryptsize)] }
+        case UInt32(LC_NOTE):
+            return command.payload(as: note_command.self).map { [range($0.offset, $0.size)] }
+        default:
+            return Self.inlineCommands.contains(command.cmd) ? [] : nil
+        }
+    }
+
+    /**
+     The load commands whose data is inline, or lies in a segment measured anyway. Commands that reference data not
+     modeled here, like `LC_TWOLEVEL_HINTS`, `LC_SYMSEG` or `LC_FILESET_ENTRY`, are left out so the slice stays whole.
+     */
+    private static let inlineCommands = Set([
+        LC_THREAD,
+        LC_UNIXTHREAD,
+        LC_LOAD_DYLIB,
+        LC_ID_DYLIB,
+        LC_LAZY_LOAD_DYLIB,
+        LC_PREBOUND_DYLIB,
+        LC_LOAD_DYLINKER,
+        LC_ID_DYLINKER,
+        LC_DYLD_ENVIRONMENT,
+        LC_SUB_FRAMEWORK,
+        LC_SUB_UMBRELLA,
+        LC_SUB_CLIENT,
+        LC_SUB_LIBRARY,
+        LC_ROUTINES,
+        LC_ROUTINES_64,
+        LC_PREBIND_CKSUM,
+        LC_LINKER_OPTION,
+        LC_UUID,
+        LC_SOURCE_VERSION,
+        LC_VERSION_MIN_MACOSX,
+        LC_VERSION_MIN_IPHONEOS,
+        LC_VERSION_MIN_TVOS,
+        LC_VERSION_MIN_WATCHOS,
+        LC_BUILD_VERSION,
+        LC_TARGET_TRIPLE,
+    ].map { UInt32(bitPattern: $0) } + [
+        LC_LOAD_WEAK_DYLIB,
+        LC_REEXPORT_DYLIB,
+        LC_LOAD_UPWARD_DYLIB,
+        LC_RPATH,
+        LC_MAIN,
+    ])
+#endif
 
     // MARK: - Filetype
 
