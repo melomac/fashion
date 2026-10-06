@@ -360,7 +360,7 @@ final class CDHashTests: XCTestCase {
         let paddedURL = dir / "padded"
         try padded.write(to: paddedURL)
 
-        XCTAssertEqual(try XCTUnwrap(MachOSlice(padded)).logicalEnd(), end)
+        XCTAssertEqual(try XCTUnwrap(MachO(padded)).logicalEnd(), end)
         XCTAssertNoThrow(try Self.codesignDetached(original))
         XCTAssertThrowsError(try Self.codesignDetached(paddedURL)) { error in
             XCTAssertTrue(String(describing: error).contains("strict validation"), "\(error)")

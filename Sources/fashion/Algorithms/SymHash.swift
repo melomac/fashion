@@ -21,7 +21,7 @@ enum SymHash {
             return try archs.compactMap { arch in
                 // A universal static library carries `ar` archives, which have no symbol table to hash.
                 guard
-                    let slice = try MachOSlice(MachOParser.sliceData(fileData: data, arch: arch)),
+                    let slice = try MachO(MachOParser.sliceData(fileData: data, arch: arch)),
                     let digest = try self.hash(slice, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols)
                 else {
                     return nil
@@ -43,7 +43,7 @@ enum SymHash {
     /**
      The symhash of one slice, or nil when it carries no symbol table.
      */
-    private static func hash(_ slice: MachOSlice, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> String? {
+    private static func hash(_ slice: MachO, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> String? {
         guard
             let command = slice.findCommand(UInt32(LC_SYMTAB)),
             let symtab = try MachOParser.parseSymtab(command: command, swap: slice.swap)

@@ -810,7 +810,7 @@ struct Digester {
             let slice = MachOParser.sliceData(fileData: data, arch: arch)
             // Parse even without --exact: a malformed slice is an error either way. A slice that is not Mach-O at
             // all is hashed whole.
-            let length = try MachOSlice(slice).map { self.exact ? $0.logicalEnd() : slice.count } ?? slice.count
+            let length = try MachO(slice).map { self.exact ? $0.logicalEnd() : slice.count } ?? slice.count
             // The view keeps the file's indices: it starts at the slice's offset.
             return (slice.startIndex ..< slice.startIndex + length, MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
         }

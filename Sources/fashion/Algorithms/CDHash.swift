@@ -47,7 +47,7 @@ extension CDHashError: LocalizedError {
  An unsigned slice yields a synthesized ad-hoc cdhash: the identity `syspolicyd` computes for unsigned code,
  byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`.
 
- The per-slice computation lives on `MachOSlice` below; this enum opens the binary and attaches architecture names.
+ The per-slice computation lives on `MachO` below; this enum opens the binary and attaches architecture names.
  */
 enum CDHash {
     struct SliceResult {
@@ -81,7 +81,7 @@ enum CDHash {
             return try archs.flatMap { arch -> [SliceResult] in
                 let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
                 // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
-                guard let slice = try MachOSlice(MachOParser.sliceData(fileData: data, arch: arch)) else {
+                guard let slice = try MachO(MachOParser.sliceData(fileData: data, arch: arch)) else {
                     self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")
                     return []
                 }
@@ -98,10 +98,10 @@ enum CDHash {
      Compute CDHash from raw Mach-O data (single thin slice).
 
      Returns the strongest embedded cdhash, or the ad-hoc cdhash when unsigned. Nil for non-Mach-O input,
-     and for a slice with neither (see `MachOSlice.codeDirectoryHashes(exact:)`).
+     and for a slice with neither (see `MachO.codeDirectoryHashes(exact:)`).
      */
     static func hash(data: Data, exact: Bool = false) throws -> String? {
-        try MachOSlice(data)?.codeDirectoryHashes(exact: exact).hashes.first?.hash
+        try MachO(data)?.codeDirectoryHashes(exact: exact).hashes.first?.hash
     }
 
     // MARK: - Private
@@ -109,7 +109,7 @@ enum CDHash {
     /**
      One SliceResult per code directory. The hash type is only set when a slice carries several directories.
      */
-    private static func results(for slice: MachOSlice, arch: String?, path: String, exact: Bool) throws -> [SliceResult] {
+    private static func results(for slice: MachO, arch: String?, path: String, exact: Bool) throws -> [SliceResult] {
         let (directories, skipReason) = try slice.codeDirectoryHashes(exact: exact)
         if let skipReason {
             self.logSkip(path: path, arch: arch, reason: skipReason)
@@ -128,7 +128,7 @@ enum CDHash {
 
 // MARK: - Per-slice code directory logic
 
-extension MachOSlice {
+extension MachO {
     /**
      A single code directory digest of a slice.
      */
@@ -427,11 +427,11 @@ extension MachOSlice {
 
             let (offset, size): (UInt64, UInt64) = text.data.withUnsafeBytes { raw in
                 if self.is64 {
-                    let section = raw.loadUnaligned(fromByteOffset: at, as: section_64.self)
-                    return (UInt64(section.offset), section.size)
+                    let entry = raw.loadUnaligned(fromByteOffset: at, as: section_64.self)
+                    return (UInt64(entry.offset), entry.size)
                 }
-                let section = raw.loadUnaligned(fromByteOffset: at, as: MachO.section.self)
-                return (UInt64(section.offset), UInt64(section.size))
+                let entry = raw.loadUnaligned(fromByteOffset: at, as: section.self)
+                return (UInt64(entry.offset), UInt64(entry.size))
             }
             guard
                 offset <= UInt64(self.data.count),
@@ -512,7 +512,7 @@ private struct EmbeddedCodeDirectory {
         }
 
         let (hashSize, hashType, pageSizeLog) = blob.withUnsafeBytes { raw -> (Int, UInt8, UInt8) in (Int(raw[36]), raw[37], raw[39]) }
-        guard MachOSlice.slotSize(hashType) == hashSize else {
+        guard MachO.slotSize(hashType) == hashSize else {
             return nil
         }
 
@@ -644,7 +644,7 @@ private struct CodeDirectoryBuilder {
 
         // Every field up to execSegFlags; the version keeps the prefix its header holds.
         var header = Data()
-        header.appendBigEndian(MachOSlice.csmagicCodeDirectory) // magic
+        header.appendBigEndian(MachO.csmagicCodeDirectory) // magic
         header.appendBigEndian(length32) // length
         header.appendBigEndian(self.version) // version
         header.appendBigEndian(UInt32(2)) // flags: CS_ADHOC

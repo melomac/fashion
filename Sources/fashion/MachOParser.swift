@@ -61,7 +61,7 @@ enum MachOParser {
 
     enum BinaryType {
         case fat([FatArch])
-        case thin(MachOSlice)
+        case thin(MachO)
         case notMachO
     }
 
@@ -80,7 +80,7 @@ enum MachOParser {
             return .notMachO
         }
 
-        if let slice = try MachOSlice(data) {
+        if let slice = try MachO(data) {
             return .thin(slice)
         }
 

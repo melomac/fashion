@@ -4,12 +4,12 @@ import MachO
 import XCTest
 
 /**
- Ad-hoc cdhash synthesis for unsigned slices, and the `MachOSlice` accessors that feed it.
+ Ad-hoc cdhash synthesis for unsigned slices, and the `MachO` accessors that feed it.
  */
 final class AdhocCDHashTests: XCTestCase {
     /**
      A minimal native-endian thin 64-bit Mach-O with a single segment (`__TEXT` unless renamed) covering
-     `[0, fileSize)`, followed by any extra load `commands`. Unsigned, so `CDHash`/`MachOSlice` synthesize its
+     `[0, fileSize)`, followed by any extra load `commands`. Unsigned, so `CDHash`/`MachO` synthesize its
      ad-hoc cdhash.
      */
     private func makeMachO(cpuType: cpu_type_t = CPU_TYPE_ARM64, filetype: UInt32 = UInt32(MH_EXECUTE), segment: String = "__TEXT", commands: [Data] = [], fileSize: Int = 256) -> Data {
@@ -133,24 +133,24 @@ final class AdhocCDHashTests: XCTestCase {
     // MARK: - MachOBase lookups
 
     func testFindSegment() throws {
-        let slice = try XCTUnwrap(MachOSlice(self.makeMachO()))
+        let slice = try XCTUnwrap(MachO(self.makeMachO()))
         XCTAssertEqual(try slice.findSegment("__TEXT")?.cmd, UInt32(LC_SEGMENT_64))
         XCTAssertNil(try slice.findSegment("__DATA"))
-        XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO(segment: "__TEXX"))).findSegment("__TEXT"))
+        XCTAssertNil(try XCTUnwrap(MachO(self.makeMachO(segment: "__TEXX"))).findSegment("__TEXT"))
     }
 
     func testFindCommand() throws {
-        let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS)])))
+        let slice = try XCTUnwrap(MachO(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS)])))
         XCTAssertEqual(slice.findCommand(UInt32(LC_BUILD_VERSION))?.data.count, 24)
         XCTAssertNil(slice.findCommand(UInt32(LC_CODE_SIGNATURE)))
     }
 
     func testVersionAbsentIsNil() throws {
-        XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO())).version())
+        XCTAssertNil(try XCTUnwrap(MachO(self.makeMachO())).version())
     }
 
     func testPlatformFromBuildVersion() throws {
-        let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS, minOS: 0x000f_0603)])))
+        let slice = try XCTUnwrap(MachO(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS, minOS: 0x000f_0603)])))
         XCTAssertEqual(try slice.version()?.platform, PLATFORM_IOS)
         XCTAssertEqual(try slice.version()?.minOS, 0x000f_0603) // 15.6.3
     }
@@ -163,7 +163,7 @@ final class AdhocCDHashTests: XCTestCase {
             (LC_VERSION_MIN_WATCHOS, PLATFORM_WATCHOS),
         ]
         for (cmd, platform) in pairs {
-            let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(cmd, minOS: 0x0008_0100)])))
+            let slice = try XCTUnwrap(MachO(self.makeMachO(commands: [self.versionMin(cmd, minOS: 0x0008_0100)])))
             XCTAssertEqual(try slice.version()?.platform, platform, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))")
             XCTAssertEqual(try slice.version()?.minOS, 0x0008_0100, "LC_VERSION_MIN 0x\(String(cmd, radix: 16))") // 8.1
         }
@@ -171,13 +171,13 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testPlatformPrecedenceFollowsCodesign() throws {
         // codesign reads the first LC_BUILD_VERSION, even one naming platform 0, ahead of any LC_VERSION_MIN_*.
-        let buildFirst = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS), self.buildVersion(platform: PLATFORM_MACOS)])))
+        let buildFirst = try XCTUnwrap(MachO(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS), self.buildVersion(platform: PLATFORM_MACOS)])))
         XCTAssertEqual(try buildFirst.version()?.platform, PLATFORM_IOS)
 
-        let versionMinFirst = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_IPHONEOS), self.buildVersion(platform: PLATFORM_MACOS)])))
+        let versionMinFirst = try XCTUnwrap(MachO(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_IPHONEOS), self.buildVersion(platform: PLATFORM_MACOS)])))
         XCTAssertEqual(try versionMinFirst.version()?.platform, PLATFORM_MACOS)
 
-        let platformZero = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_MACOSX), self.buildVersion(platform: 0)])))
+        let platformZero = try XCTUnwrap(MachO(self.makeMachO(commands: [self.versionMin(LC_VERSION_MIN_MACOSX), self.buildVersion(platform: 0)])))
         XCTAssertEqual(try platformZero.version()?.platform, 0)
     }
 
@@ -190,7 +190,7 @@ final class AdhocCDHashTests: XCTestCase {
         [UInt32(LC_VERSION_MIN_MACOSX), 8].forEach { shortMin.appendUInt32($0) }
 
         for (command, expectedSize) in [(shortBuild, 24), (shortMin, 16)] {
-            let slice = try XCTUnwrap(MachOSlice(self.makeMachO(commands: [command])))
+            let slice = try XCTUnwrap(MachO(self.makeMachO(commands: [command])))
             let cmd = command.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
             let expected = ParserError.truncatedLoadCommand(cmd: cmd, size: command.count, expectedSize: expectedSize)
             XCTAssertThrowsError(try slice.version()) { XCTAssertEqual($0 as? ParserError, expected) }
@@ -199,13 +199,13 @@ final class AdhocCDHashTests: XCTestCase {
     }
 
     func testNonMachOIsNil() {
-        XCTAssertNil(try MachOSlice(Data("Hello, World!".utf8)))
+        XCTAssertNil(try MachO(Data("Hello, World!".utf8)))
     }
 
     // MARK: - code signature detection
 
     func testFindCodeSignatureUnsignedIsNil() throws {
-        XCTAssertNil(try XCTUnwrap(MachOSlice(self.makeMachO())).findCodeSignature())
+        XCTAssertNil(try XCTUnwrap(MachO(self.makeMachO())).findCodeSignature())
     }
 
     func testFindCodeSignatureSignedIsBeforeEnd() throws {
@@ -217,7 +217,7 @@ final class AdhocCDHashTests: XCTestCase {
         case .thin: data
         case .notMachO: Data()
         }
-        let slice = try XCTUnwrap(MachOSlice(sliceData))
+        let slice = try XCTUnwrap(MachO(sliceData))
         // A signed slice's signature starts after the code and ends within the slice.
         let signature = try XCTUnwrap(try slice.findCodeSignature())
         XCTAssertGreaterThan(signature.offset, 0)
@@ -226,7 +226,7 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testInvalidCodeSignatureRangeThrows() throws {
         let data = self.makeSignedEmptySuperblob(declaredSignatureOffset: 4096)
-        let slice = try XCTUnwrap(MachOSlice(data))
+        let slice = try XCTUnwrap(MachO(data))
         let expected = CDHashError.invalidCodeSignatureRange(offset: 4096, size: 12, fileSize: data.count)
 
         XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
@@ -246,7 +246,7 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testCodeDirectoryOutsideDeclaredSuperblobThrows() throws {
         let data = self.makeCodeDirectoryOutsideDeclaredSuperblob()
-        let slice = try XCTUnwrap(MachOSlice(data))
+        let slice = try XCTUnwrap(MachO(data))
         let expected = CDHashError.invalidCodeSignatureBlobRange(offset: 20, size: 38, signatureSize: 32)
 
         XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
@@ -323,7 +323,7 @@ final class AdhocCDHashTests: XCTestCase {
         let sha256 = self.codeDirectory(hashType: 2)
         let sha384 = self.codeDirectory(hashType: 4)
         let data = self.makeSignedMachO(signature: self.superblob(slots: [(0, sha1), (0x1000, sha256), (0x1001, sha384)]))
-        let slice = try XCTUnwrap(MachOSlice(data))
+        let slice = try XCTUnwrap(MachO(data))
         let directories = try slice.codeDirectoryHashes(exact: false).hashes
 
         XCTAssertEqual(directories.map(\.type), ["sha384", "sha256", "sha1"])
@@ -354,7 +354,7 @@ final class AdhocCDHashTests: XCTestCase {
         ]
 
         for (name, slots, expected) in cases {
-            let slice = try XCTUnwrap(MachOSlice(self.makeSignedMachO(signature: self.superblob(slots: slots))))
+            let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: slots))))
             XCTAssertEqual(try slice.codeDirectoryHashes(exact: false).hashes.map(\.hash), expected, name)
         }
     }
@@ -392,7 +392,7 @@ final class AdhocCDHashTests: XCTestCase {
         ]
 
         for (name, slots) in cases {
-            let slice = try XCTUnwrap(MachOSlice(self.makeSignedMachO(signature: self.superblob(slots: slots))))
+            let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: slots))))
             let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
             XCTAssertNil(skipReason, name)
             XCTAssertEqual(hashes.map(\.adhoc), [true, true], name)
@@ -402,7 +402,7 @@ final class AdhocCDHashTests: XCTestCase {
     // MARK: - Ad-hoc synthesis (unsigned slice)
 
     func testUnsignedSliceSynthesizesAdhoc() throws {
-        let slice = try XCTUnwrap(MachOSlice(self.makeMachO()))
+        let slice = try XCTUnwrap(MachO(self.makeMachO()))
         let directories = try slice.codeDirectoryHashes(exact: false).hashes
 
         // An unsigned slice yields both synthesized ad-hoc cdhashes: SHA-256 first, then SHA-1.
@@ -421,18 +421,18 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertTrue(sha1.hash.allSatisfy(\.isHexDigit))
 
         // Deterministic.
-        XCTAssertEqual(directories.map(\.hash), try MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
+        XCTAssertEqual(directories.map(\.hash), try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
     }
 
     func testExactStripsTrailingGarbage() throws {
         let clean = self.makeMachO(segment: "__LINKEDIT", fileSize: 256) // the image ends with __LINKEDIT
-        let cleanHashes = try XCTUnwrap(try MachOSlice(clean)?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
+        let cleanHashes = try XCTUnwrap(try MachO(clean)?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
 
         var dirty = clean
         dirty.append(Data(repeating: 0x41, count: 100))
 
-        let dirtyExact = try MachOSlice(dirty)?.codeDirectoryHashes(exact: true).hashes.map(\.hash)
-        let dirtyWhole = try MachOSlice(dirty)?.codeDirectoryHashes(exact: false).hashes.map(\.hash)
+        let dirtyExact = try MachO(dirty)?.codeDirectoryHashes(exact: true).hashes.map(\.hash)
+        let dirtyWhole = try MachO(dirty)?.codeDirectoryHashes(exact: false).hashes.map(\.hash)
         XCTAssertEqual(dirtyExact, cleanHashes, "Exact must strip appended garbage (both cdhashes)")
         XCTAssertNotEqual(dirtyWhole, cleanHashes, "Whole-slice adhoc must include garbage")
     }
@@ -442,7 +442,7 @@ final class AdhocCDHashTests: XCTestCase {
         // file to it, so an unsigned slice of that filetype has no ad-hoc cdhash.
         let code: [Int32] = [MH_EXECUTE, MH_PRELOAD, MH_DYLIB, MH_DYLINKER, MH_BUNDLE, MH_KEXT_BUNDLE]
         for filetype in code + [MH_OBJECT, MH_FVMLIB, MH_CORE, MH_DYLIB_STUB, MH_DSYM, MH_FILESET, MH_GPU_EXECUTE, MH_GPU_DYLIB, 0x1d] {
-            let slice = try XCTUnwrap(MachOSlice(self.makeMachO(filetype: UInt32(filetype))))
+            let slice = try XCTUnwrap(MachO(self.makeMachO(filetype: UInt32(filetype))))
             let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
             XCTAssertEqual(hashes.count, code.contains(filetype) ? 2 : 0, slice.filetypeName)
             XCTAssertEqual(skipReason == nil, code.contains(filetype), slice.filetypeName)
@@ -450,9 +450,9 @@ final class AdhocCDHashTests: XCTestCase {
     }
 
     func testFiletypeNames() throws {
-        XCTAssertEqual(try XCTUnwrap(MachOSlice(self.makeMachO(filetype: UInt32(MH_EXECUTE)))).filetypeName, "MH_EXECUTE")
-        XCTAssertEqual(try XCTUnwrap(MachOSlice(self.makeMachO(filetype: UInt32(MH_GPU_DYLIB)))).filetypeName, "MH_GPU_DYLIB")
-        XCTAssertEqual(try XCTUnwrap(MachOSlice(self.makeMachO(filetype: 0x1d))).filetypeName, "unknown(29)")
+        XCTAssertEqual(try XCTUnwrap(MachO(self.makeMachO(filetype: UInt32(MH_EXECUTE)))).filetypeName, "MH_EXECUTE")
+        XCTAssertEqual(try XCTUnwrap(MachO(self.makeMachO(filetype: UInt32(MH_GPU_DYLIB)))).filetypeName, "MH_GPU_DYLIB")
+        XCTAssertEqual(try XCTUnwrap(MachO(self.makeMachO(filetype: 0x1d))).filetypeName, "unknown(29)")
     }
 
     // MARK: - CDHash integration
@@ -472,13 +472,13 @@ final class AdhocCDHashTests: XCTestCase {
             XCTAssertNil(result.arch, "thin binary → nil arch")
         }
 
-        XCTAssertEqual(results.map(\.hash), try MachOSlice(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
+        XCTAssertEqual(results.map(\.hash), try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
     }
 
     func testSignatureWithoutCodeDirectoryIsAdhocUpToTheSignature() throws {
         // codesign calls a slice whose superblob holds no code directory unsigned, and signs it up to the signature.
         let data = self.makeSignedEmptySuperblob()
-        let slice = try XCTUnwrap(MachOSlice(data))
+        let slice = try XCTUnwrap(MachO(data))
         let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
         XCTAssertNil(skipReason)
         XCTAssertEqual(hashes.map(\.adhoc), [true, true])
@@ -486,10 +486,10 @@ final class AdhocCDHashTests: XCTestCase {
         // Whatever follows the signature's offset is not code; what precedes it is.
         var afterSignature = data
         afterSignature.append(Data(repeating: 0xee, count: 64))
-        XCTAssertEqual(try XCTUnwrap(MachOSlice(afterSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
+        XCTAssertEqual(try XCTUnwrap(MachO(afterSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
 
         var beforeSignature = data
         beforeSignature[127] ^= 0xff
-        XCTAssertNotEqual(try XCTUnwrap(MachOSlice(beforeSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
+        XCTAssertNotEqual(try XCTUnwrap(MachO(beforeSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
     }
 }

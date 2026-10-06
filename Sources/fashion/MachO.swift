@@ -2,16 +2,16 @@ import Foundation
 import MachO
 
 /**
- A single parsed thin Mach-O slice.
+ A single parsed thin Mach-O image, named after Security's `MachO`: a thin file, or one architecture of a universal one.
 
  The header (endianness, architecture, filetype) and the load commands are parsed once at initialization;
  the command lookups, code-signature, and logical-extent accessors all reuse that single pass.
 
- `init?(_:)` returns nil for anything that is not a thin Mach-O and throws for one Security's `MachO` refuses;
+ `init?(_:)` returns nil for anything that is not a thin Mach-O and throws for one Security refuses;
  `init?(lenient:)` keeps whatever prefix of a damaged load-command table parses, for best-effort inspection.
- For a fat binary, open the container with `MachOParser` and wrap each architecture slice in its own `MachOSlice`.
+ For a fat binary, open the container with `MachOParser` and wrap each architecture slice in its own `MachO`.
  */
-struct MachOSlice {
+struct MachO {
     /// The slice's bytes; a slice of a universal file is a view that keeps the file's indices (`Data.bytes(in:)`).
     let data: Data
     let is64: Bool
@@ -60,7 +60,7 @@ struct MachOSlice {
         guard let layout = Self.layout(of: data) else {
             return nil
         }
-        guard let slice = MachOSlice(lenient: data) else {
+        guard let slice = MachO(lenient: data) else {
             throw ParserError.truncatedMachHeader(expectedSize: layout.headerSize, fileSize: data.count)
         }
         guard slice.tableIsValid else {
@@ -311,6 +311,6 @@ extension MachOParser.LoadCommand {
      The name of an `LC_SEGMENT` or `LC_SEGMENT_64` (`segname` sits at the same offset in both), nil for any other command.
      */
     var segmentName: String? {
-        [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(self.cmd) ? MachOSlice.name(of: self.data.dropFirst(8).prefix(16)) : nil
+        [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(self.cmd) ? MachO.name(of: self.data.dropFirst(8).prefix(16)) : nil
     }
 }

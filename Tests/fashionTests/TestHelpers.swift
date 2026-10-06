@@ -12,11 +12,11 @@ extension MachOParser {
     }
 
     static func loadCommands(data: Data) -> [LoadCommand] {
-        MachOSlice(lenient: data)?.loadCommands ?? []
+        MachO(lenient: data)?.loadCommands ?? []
     }
 
     static func machOEnd(data: Data) -> Int {
-        MachOSlice(lenient: data)?.logicalEnd() ?? data.count
+        MachO(lenient: data)?.logicalEnd() ?? data.count
     }
 }
 
