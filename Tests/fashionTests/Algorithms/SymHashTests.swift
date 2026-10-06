@@ -11,7 +11,7 @@ final class SymHashTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertThrowsError(try SymHash.compute(path: url.path(), algorithm: .md5, separator: "", sortSymbols: false)) { error in
+        XCTAssertThrowsError(try SymHash.compute(File(path: url.path()), algorithm: .md5, separator: "", sortSymbols: false)) { error in
             XCTAssertEqual(error as? ParserError, .invalidSymbolTableRange(offset: 4096, count: 1, fileSize: 56))
         }
     }
@@ -24,7 +24,7 @@ final class SymHashTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertThrowsError(try SymHash.compute(path: url.path(), algorithm: .md5, separator: "", sortSymbols: false)) { error in
+        XCTAssertThrowsError(try SymHash.compute(File(path: url.path()), algorithm: .md5, separator: "", sortSymbols: false)) { error in
             XCTAssertEqual(error as? ParserError, .invalidStringTableRange(offset: 4096, size: 1, fileSize: 56))
         }
     }

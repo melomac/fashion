@@ -1,19 +1,5 @@
 import CryptoKit
 import Foundation
-import System
-
-enum ByteHashError: Error, Equatable {
-    case sizeChanged(expected: Int, actual: Int)
-}
-
-extension ByteHashError: LocalizedError {
-    var errorDescription: String? {
-        switch self {
-        case let .sizeChanged(expected, actual):
-            "File changed size while hashing (expected \(String(expected, pluralizing: "byte")), read \(actual))"
-        }
-    }
-}
 
 /**
  An algorithm that hashes bytes: every `Algorithm` but cdhash, which hashes a Mach-O's code directories instead (see
@@ -66,24 +52,18 @@ enum ByteHash: String {
 
     /**
      The digest of a file, or of `range` of it: an architecture of a universal binary, or a Mach-O trimmed by --exact.
-     Streamed uncached from one descriptor at the range's offset, the way Security's `CodeDirectory::Builder` reads a
-     slice's code, so hashing neither maps nor copies the file.
+     Streamed from the file at the range's offset, so hashing neither maps nor copies it.
 
-     The length is set when the file is opened, and a file that no longer holds it by the time it is read fails closed:
-     git writes the length into its digest, and ssdeep chooses its block size from it.
+     The length is the size the file had when it was opened, and a file that no longer holds it by the time it is read
+     fails closed: git writes the length into its digest, and ssdeep chooses its block size from it.
      */
-    func digest(path: String, range: Range<Int>? = nil) throws -> String? {
-        let file = try FileReader.open(path: path)
-        defer {
-            try? file.close()
-        }
-
-        let range = try range ?? 0 ..< FileReader.size(file)
+    func digest(_ file: File, range: Range<Int>? = nil) throws -> String? {
+        let range = range ?? 0 ..< file.size
         let length = min(range.count, self.maximumLength)
         var hasher = try self.hasher(length: length)
-        let count = try FileReader.read(file, offset: range.lowerBound, length: length) { hasher.update($0) }
+        let count = try file.stream(range.lowerBound ..< range.lowerBound + length) { hasher.update($0) }
         guard count == length else {
-            throw ByteHashError.sizeChanged(expected: length, actual: count)
+            throw FileError.sizeChanged(expected: length, actual: count)
         }
         return try hasher.finalize()
     }

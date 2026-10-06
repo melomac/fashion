@@ -68,40 +68,23 @@ enum CDHash {
      With `exact`, an unsigned slice is trimmed to its logical extent before synthesis,
      so appended trailing garbage does not change its ad-hoc cdhash.
      */
-    static func hash(path: String, exact: Bool = false) throws -> [SliceResult] {
-        // Peek at the magic first: mapping reads a whole file on a volume Foundation deems unsafe (a mounted disk image).
-        guard try MachOParser.isMachO(path: path) else {
-            return []
-        }
-
-        let data = try FileReader.map(path: path)
-
-        switch try MachOParser.open(data: data) {
+    static func hash(_ file: File, path: String, exact: Bool = false) throws -> [SliceResult] {
+        switch try MachOParser.open(file) {
         case let .fat(archs):
-            return try archs.flatMap { arch -> [SliceResult] in
+            try archs.flatMap { arch -> [SliceResult] in
                 let name = MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype)
                 // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
-                guard let slice = try MachO(MachOParser.sliceData(fileData: data, arch: arch)) else {
+                guard let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count) else {
                     self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")
                     return []
                 }
-                return try self.results(for: slice, arch: name, path: path, exact: exact)
+                return try self.results(for: image, arch: name, path: path, exact: exact)
             }
-        case let .thin(slice):
-            return try self.results(for: slice, arch: nil, path: path, exact: exact)
+        case let .thin(image):
+            try self.results(for: image, arch: nil, path: path, exact: exact)
         case .notMachO:
-            return []
+            []
         }
-    }
-
-    /**
-     Compute CDHash from raw Mach-O data (single thin slice).
-
-     Returns the strongest embedded cdhash, or the ad-hoc cdhash when unsigned. Nil for non-Mach-O input,
-     and for a slice with neither (see `MachO.codeDirectoryHashes(exact:)`).
-     */
-    static func hash(data: Data, exact: Bool = false) throws -> String? {
-        try MachO(data)?.codeDirectoryHashes(exact: exact).hashes.first?.hash
     }
 
     // MARK: - Private
@@ -171,7 +154,7 @@ extension MachO {
             return ([], "\(self.filetypeName) is not code to codesign")
         }
 
-        return try (self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.data.count)), nil)
+        return try (self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.length)), nil)
     }
 
     // MARK: - Embedded signature
@@ -183,11 +166,11 @@ extension MachO {
      */
     private func signingData(_ signature: (offset: Int, size: Int)) throws -> Data {
         let (offset, size) = signature
-        guard offset <= self.data.count - 8 else {
-            throw CDHashError.invalidCodeSignatureRange(offset: UInt32(offset), size: UInt32(size), fileSize: self.data.count)
+        guard offset <= self.length - 8 else {
+            throw CDHashError.invalidCodeSignatureRange(offset: UInt32(offset), size: UInt32(size), fileSize: self.length)
         }
 
-        let header = self.data.bytes(in: offset ..< offset + 8)
+        let header = try self.dataAt(offset, count: 8)
         let (magic, length) = (header.bigEndianUInt32(at: 0), header.bigEndianUInt32(at: 4))
         guard magic == Self.csmagicEmbeddedSignature else {
             throw CDHashError.invalidCodeSignatureMagic(magic: magic)
@@ -197,12 +180,12 @@ extension MachO {
         }
         guard
             size == 0 || Int(length) <= size,
-            Int(length) <= self.data.count - offset
+            Int(length) <= self.length - offset
         else {
             throw CDHashError.invalidCodeSignatureSuperblobLength(length: length, signatureSize: size)
         }
 
-        let superblob = Data(self.data.bytes(in: offset ..< offset + Int(length)))
+        let superblob = try self.dataAt(offset, count: Int(length))
         let count = superblob.bigEndianUInt32(at: 8)
         let indexEnd = 12 + 8 * Int(count)
         guard indexEnd <= superblob.count else {
@@ -349,9 +332,8 @@ extension MachO {
             specialSlots: [1: self.infoPlist(), 2: Self.emptyRequirementsBlob].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
         )
 
-        return try [AdhocHashType.sha256, .sha1].map { hashType in
-            let cd = try builder.build(hashType: hashType, code: self.data)
-            return CodeDirectoryHash(hash: hashType.hexDigest(cd), type: hashType.name, adhoc: true)
+        return try builder.build(code: self).map { hashType, cd in
+            CodeDirectoryHash(hash: hashType.hexDigest(cd), type: hashType.name, adhoc: true)
         }
     }
 
@@ -434,12 +416,12 @@ extension MachO {
                 return (UInt64(entry.offset), UInt64(entry.size))
             }
             guard
-                offset <= UInt64(self.data.count),
-                size <= UInt64(self.data.count) - offset
+                offset <= UInt64(self.length),
+                size <= UInt64(self.length) - offset
             else {
                 return nil
             }
-            return self.data.bytes(in: Int(offset) ..< Int(offset + size))
+            return try self.dataAt(Int(offset), count: Int(size))
         }
         return nil
     }
@@ -626,7 +608,56 @@ private struct CodeDirectoryBuilder {
         }
     }
 
-    func build(hashType: AdhocHashType, code: Data) throws -> Data {
+    /**
+     The directory of each hash type `codesign --digest-algorithm=sha1,sha256` builds, SHA-256 first, like
+     `Builder::build`: the header the fields call for, the identifier, the special slots, then a hash slot per page of
+     code, read from the image once for both types. A directory too large is refused before any code is read.
+     */
+    func build(code image: MachO) throws -> [(hashType: AdhocHashType, directory: Data)] {
+        let hashTypes: [AdhocHashType] = [.sha256, .sha1]
+        var directories = try hashTypes.map { try self.directory(hashType: $0) }
+        func hashPage(_ page: UnsafeRawBufferPointer) {
+            for index in hashTypes.indices {
+                directories[index].append(hashTypes[index].digest(page))
+            }
+        }
+
+        // Pages are hashed as the code streams through; one cut by the end of a chunk waits for the rest of it.
+        let pageSize = 1 << Int(self.pageSizeLog)
+        var partial = Data()
+        let count = try image.stream(0 ..< self.codeLimit) { chunk in
+            var chunk = chunk
+            if !partial.isEmpty {
+                let fill = min(pageSize - partial.count, chunk.count)
+                partial.append(contentsOf: chunk.prefix(fill))
+                chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(fill))
+                guard partial.count == pageSize else {
+                    return
+                }
+                partial.withUnsafeBytes(hashPage)
+                partial.removeAll(keepingCapacity: true)
+            }
+            while chunk.count >= pageSize {
+                hashPage(UnsafeRawBufferPointer(rebasing: chunk.prefix(pageSize)))
+                chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(pageSize))
+            }
+            partial.append(contentsOf: chunk)
+        }
+        guard count == self.codeLimit else {
+            throw FileError.sizeChanged(expected: self.codeLimit, actual: count)
+        }
+        // The last page, shorter than the others.
+        if !partial.isEmpty {
+            partial.withUnsafeBytes(hashPage)
+        }
+
+        return Array(zip(hashTypes, directories))
+    }
+
+    /**
+     The directory of `hashType` up to its code slots, with room for them.
+     */
+    private func directory(hashType: AdhocHashType) throws -> Data {
         let pageSize = 1 << Int(self.pageSizeLog)
         let hashSize = hashType.digestSize
         let nSpecialSlots = self.specialSlots.keys.max() ?? 0
@@ -668,12 +699,6 @@ private struct CodeDirectoryBuilder {
         cd.append(identifier)
         for slot in stride(from: nSpecialSlots, through: 1, by: -1) { // slots -nSpecialSlots ... -1
             cd.append(self.specialSlots[slot].map { hashType.digest($0) } ?? Data(count: hashSize))
-        }
-
-        var offset = 0
-        while offset < self.codeLimit {
-            cd.append(hashType.digest(code.bytes(in: offset ..< min(offset + pageSize, self.codeLimit))))
-            offset += pageSize
         }
         return cd
     }
@@ -722,7 +747,7 @@ private enum AdhocHashType {
     /**
      Raw digest of `data` — a special or code hash slot inside the CodeDirectory.
      */
-    func digest(_ data: Data) -> Data {
+    func digest(_ data: some DataProtocol) -> Data {
         switch self {
         case .sha1: Data(Insecure.SHA1.hash(data: data))
         case .sha256: Data(SHA256.hash(data: data))

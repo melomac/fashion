@@ -338,7 +338,7 @@ final class MachOParserTests: XCTestCase {
         }
 
         XCTAssertTrue(try CDHash.hash(path: url.path()).isEmpty)
-        XCTAssertTrue(try SymHash.compute(path: url.path(), algorithm: .md5, separator: ",", sortSymbols: true).isEmpty)
+        XCTAssertTrue(try SymHash.compute(File(path: url.path()), algorithm: .md5, separator: ",", sortSymbols: true).isEmpty)
     }
 
     func testMalformedMachOInsideFatIsRejectedByConsumers() throws {
@@ -379,7 +379,7 @@ final class MachOParserTests: XCTestCase {
         XCTAssertThrowsError(try CDHash.hash(path: url.path())) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
-        XCTAssertThrowsError(try SymHash.compute(path: url.path(), algorithm: .md5, separator: ",", sortSymbols: true)) { error in
+        XCTAssertThrowsError(try SymHash.compute(File(path: url.path()), algorithm: .md5, separator: ",", sortSymbols: true)) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
     }
@@ -434,12 +434,6 @@ final class MachOParserTests: XCTestCase {
         }
     }
 
-    func testSliceDataRejectsHugeOffset() {
-        // A crafted 64-bit fat arch with an out-of-range offset must not trap on Int(exactly:).
-        let arch = MachOParser.FatArch(cpuType: 0, cpuSubtype: 0, offset: UInt64.max, size: 100)
-        XCTAssertTrue(MachOParser.sliceData(fileData: Data(count: 4096), arch: arch).isEmpty)
-    }
-
     func testOpenFromPath() throws {
         let url = FileManager.default.temporaryDirectory / "fashion-macho-\(UUID())"
         try self.makeThin64().write(to: url)
@@ -458,7 +452,7 @@ final class MachOParserTests: XCTestCase {
         XCTAssertThrowsError(try MachOParser.open(path: "/tmp/fashion-nonexistent-\(UUID())"))
     }
 
-    // MARK: - isMachO (cheap magic peek)
+    // MARK: - isMachO (whether open reads a Mach-O)
 
     func testIsMachOTrueForThinBinary() throws {
         let url = FileManager.default.temporaryDirectory / "fashion-ismacho-\(UUID())"
@@ -776,10 +770,22 @@ final class MachOParserTests: XCTestCase {
     }
 
     /**
-     `externalSymbolNames` decoded for comparison: it returns byte ranges.
+     `externalSymbolNames` decoded for comparison: it returns bytes.
      */
     private func externalSymbolNames(_ data: Data, _ symtab: symtab_command, is64: Bool = true, swap: Bool = false) throws -> [String] {
-        try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: is64, swap: swap).map { String(decoding: data.bytes(in: $0), as: UTF8.self) }
+        try MachOParser.externalSymbolNames(data: data, symtab: symtab, is64: is64, swap: swap).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /**
+     A string table followed by one undefined external symbol per index, and its `symtab_command`.
+     */
+    private func symbols(strings: Data, strsize: Int? = nil, indexes: [UInt32]) -> (data: Data, symtab: symtab_command) {
+        var data = strings
+        for strx in indexes {
+            data.append(self.nlist(strx: strx, type: 0x01))
+        }
+        let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: UInt32(strings.count), nsyms: UInt32(indexes.count), stroff: 0, strsize: UInt32(strsize ?? strings.count))
+        return (data, symtab)
     }
 
     func testExternalSymbolNamesKeepsUndefinedExternalsOnly() throws {
@@ -794,9 +800,6 @@ final class MachOParserTests: XCTestCase {
 
         let symtab = symtab_command(cmd: UInt32(LC_SYMTAB), cmdsize: 24, symoff: symoff, nsyms: 4, stroff: 0, strsize: UInt32(strTable.count))
         XCTAssertEqual(try self.externalSymbolNames(data, symtab), ["_puts"])
-
-        let name = try MachOParser.symbolName(data: data, stroff: 0, strsize: UInt32(strTable.count), strx: 6)
-        XCTAssertEqual(name, 6 ..< 11) // "_main"
     }
 
     func testExternalSymbolNamesSwapsStringIndex() throws {
@@ -811,19 +814,58 @@ final class MachOParserTests: XCTestCase {
     }
 
     func testSymbolNameUnterminatedTableIsBounded() throws {
-        // A string table with no NUL terminator: the scan must stop at strsize, not run off the buffer.
-        let strTable = Data("_main".utf8)
-        let symbolName = try MachOParser.symbolName(data: strTable, stroff: 0, strsize: UInt32(strTable.count), strx: 0)
+        // A string table with no NUL terminator: the name ends with the table, whatever follows it in the file.
+        let (data, symtab) = self.symbols(strings: Data("_main".utf8), indexes: [0])
 
-        XCTAssertEqual(symbolName, 0 ..< 5) // "_main"
+        XCTAssertEqual(try self.externalSymbolNames(data, symtab), ["_main"])
     }
 
     func testSymbolNameStrxBeyondStrsizeThrows() {
-        // strx points past the declared string table extent even though it is within the buffer.
-        let data = Data("_main\u{0}padding".utf8)
+        // strx points past the declared string table extent even though it is within the file.
+        let (data, symtab) = self.symbols(strings: Data("_main\u{0}padding".utf8), strsize: 6, indexes: [6])
 
-        XCTAssertThrowsError(try MachOParser.symbolName(data: data, stroff: 0, strsize: 6, strx: 6)) { error in
+        XCTAssertThrowsError(try self.externalSymbolNames(data, symtab)) { error in
             XCTAssertEqual(error as? ParserError, .invalidStringTableIndex(index: 6, tableSize: 6))
+        }
+    }
+
+    func testExternalSymbolNamesAcrossWindows() throws {
+        // The string table is read in windows of File.chunkSize from the names wanted: names crossing a window's end,
+        // overlapping names, a repeated index, and a last name running to the end of the table all read whole, in
+        // table order.
+        var strings = Data(repeating: 0x2e, count: 3 * File.chunkSize)
+        func put(_ name: String, at offset: Int) {
+            strings.replaceSubrange(offset ..< offset + name.utf8.count + 1, with: Data(name.utf8) + Data([0]))
+        }
+        let crossing = File.chunkSize - 3
+        put("_crossing_a_window", at: crossing)
+        put("_overlapping", at: 2 * File.chunkSize + 100)
+        put("_first", at: 10)
+        strings.replaceSubrange(strings.count - 5 ..< strings.count, with: Data("_last".utf8))
+        let indexes = [crossing, 2 * File.chunkSize + 100, 2 * File.chunkSize + 103, 10, crossing, strings.count - 5].map(UInt32.init)
+        let (data, symtab) = self.symbols(strings: strings, indexes: indexes)
+
+        let expected = indexes.map { strx in
+            String(decoding: strings[Int(strx)...].prefix { $0 != 0 }, as: UTF8.self)
+        }
+        XCTAssertEqual(expected, ["_crossing_a_window", "_overlapping", "erlapping", "_first", "_crossing_a_window", "_last"])
+        XCTAssertEqual(try self.externalSymbolNames(data, symtab), expected)
+    }
+
+    func testExternalSymbolNamesReportTheFirstFailureInTableOrder() throws {
+        // As if each name were read in turn: names beyond the limit before a bad index fail as too long, and a bad
+        // index before them fails as a bad index.
+        let name = Data(repeating: 0x41, count: 1 << 20) + Data([0])
+        let count = MachOParser.maxSymbolNamesLength / (1 << 20) + 1
+        let bad = UInt32(name.count)
+
+        let (tooLong, tooLongTable) = self.symbols(strings: name, indexes: Array(repeating: 0, count: count) + [bad])
+        XCTAssertThrowsError(try self.externalSymbolNames(tooLong, tooLongTable)) { error in
+            XCTAssertEqual(error as? ParserError, .symbolNamesTooLong(limit: MachOParser.maxSymbolNamesLength))
+        }
+        let (badIndex, badIndexTable) = self.symbols(strings: name, indexes: [bad] + Array(repeating: 0, count: count))
+        XCTAssertThrowsError(try self.externalSymbolNames(badIndex, badIndexTable)) { error in
+            XCTAssertEqual(error as? ParserError, .invalidStringTableIndex(index: bad, tableSize: bad))
         }
     }
 
@@ -868,33 +910,27 @@ final class MachOParserTests: XCTestCase {
     }
 
     func testSymbolNameOutOfBounds() {
-        let data = Data(count: 4)
+        let (data, symtab) = self.symbols(strings: Data(count: 4), indexes: [100])
 
-        XCTAssertThrowsError(try MachOParser.symbolName(data: data, stroff: 0, strsize: 4, strx: 100)) { error in
+        XCTAssertThrowsError(try self.externalSymbolNames(data, symtab)) { error in
             XCTAssertEqual(error as? ParserError, .invalidStringTableIndex(index: 100, tableSize: 4))
         }
     }
 
-    // MARK: - sliceData
+    // MARK: - Architectures
 
-    func testSliceData() throws {
+    func testArchitectureReadsAtItsOffset() throws {
         let fat = self.makeFat()
-        if case let .fat(archs) = try MachOParser.open(data: fat) {
-            let slice = MachOParser.sliceData(fileData: fat, arch: archs[0])
-            XCTAssertFalse(slice.isEmpty)
-
-            let magic = slice.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
-            XCTAssertEqual(magic, MH_MAGIC_64)
-        } else {
-            XCTFail("Expected fat")
+        guard case let .fat(archs) = try MachOParser.open(data: fat) else {
+            return XCTFail("Expected fat")
         }
-    }
+        let image = try XCTUnwrap(MachO(File(data: fat), offset: archs[0].range.lowerBound, length: archs[0].range.count))
 
-    func testSliceDataOutOfBounds() {
-        let arch = MachOParser.FatArch(cpuType: 0, cpuSubtype: 0, offset: 9999, size: 100)
-        let data = Data(count: 10)
-
-        XCTAssertTrue(MachOParser.sliceData(fileData: data, arch: arch).isEmpty)
+        XCTAssertEqual(image.offset, archs[0].range.lowerBound)
+        XCTAssertEqual(image.length, archs[0].range.count)
+        XCTAssertEqual(image.cpuType, CPU_TYPE_ARM64)
+        // Load commands count from the image's start, wherever it lies in the file.
+        XCTAssertEqual(image.loadCommands.first?.data.startIndex, MemoryLayout<mach_header_64>.size)
     }
 
     // MARK: - machOEnd (logical extent / exact-image trimming)

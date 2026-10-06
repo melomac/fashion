@@ -20,7 +20,7 @@ final class SSDeepBridgeTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let result = try ByteHash.ssdeep.digest(path: url.path())
+        let result = try ByteHash.ssdeep.digest(File(path: url.path()))
         XCTAssertFalse(try XCTUnwrap(result).isEmpty)
     }
 
@@ -33,7 +33,7 @@ final class SSDeepBridgeTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertEqual(try ByteHash.ssdeep.digest(data), try ByteHash.ssdeep.digest(path: url.path()))
+        XCTAssertEqual(try ByteHash.ssdeep.digest(data), try ByteHash.ssdeep.digest(File(path: url.path())))
     }
 
     func testHashEmptyData() throws {
@@ -42,7 +42,7 @@ final class SSDeepBridgeTests: XCTestCase {
     }
 
     func testHashFileMissingThrows() {
-        XCTAssertThrowsError(try ByteHash.ssdeep.digest(path: "/tmp/fashion-nonexistent-\(UUID())")) { error in
+        XCTAssertThrowsError(try ByteHash.ssdeep.digest(File(path: "/tmp/fashion-nonexistent-\(UUID())"))) { error in
             XCTAssertEqual(error as? Errno, .noSuchFileOrDirectory)
         }
     }

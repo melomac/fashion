@@ -73,7 +73,7 @@ final class ByteHashTests: XCTestCase {
         }
 
         for hash: ByteHash in [.md5, .sha1, .sha256, .sha384, .sha512, .git, .git256, .ssdeep] {
-            XCTAssertEqual(try hash.digest(path: url.path()), try hash.digest(data), "Mismatch for \(hash)")
+            XCTAssertEqual(try hash.digest(File(path: url.path())), try hash.digest(data), "Mismatch for \(hash)")
         }
     }
 
@@ -83,12 +83,12 @@ final class ByteHashTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        XCTAssertEqual(try ByteHash.sha256.digest(path: url.path()), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        XCTAssertEqual(try ByteHash.sha256.digest(File(path: url.path())), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
     }
 
     func testFileHashMissingFileThrows() {
-        XCTAssertThrowsError(try ByteHash.sha256.digest(path: "/tmp/fashion-nonexistent-\(UUID())"))
-        XCTAssertThrowsError(try ByteHash.git.digest(path: "/tmp/fashion-nonexistent-\(UUID())"))
+        XCTAssertThrowsError(try ByteHash.sha256.digest(File(path: "/tmp/fashion-nonexistent-\(UUID())")))
+        XCTAssertThrowsError(try ByteHash.git.digest(File(path: "/tmp/fashion-nonexistent-\(UUID())")))
     }
 
     /// A file larger than a read chunk is hashed across several reads.
@@ -100,7 +100,7 @@ final class ByteHashTests: XCTestCase {
         }
 
         for hash: ByteHash in [.md5, .sha256, .sha512, .git, .ssdeep, .tlsh] {
-            XCTAssertEqual(try hash.digest(path: url.path()), try hash.digest(data), "Mismatch for \(hash)")
+            XCTAssertEqual(try hash.digest(File(path: url.path())), try hash.digest(data), "Mismatch for \(hash)")
         }
     }
 
@@ -111,7 +111,7 @@ final class ByteHashTests: XCTestCase {
         }
 
         for hash: ByteHash in [.md5, .sha256, .git, .ssdeep] {
-            XCTAssertEqual(try hash.digest(path: url.path(), range: 2 ..< 7), try hash.digest(Data("hello".utf8)), "Mismatch for \(hash)")
+            XCTAssertEqual(try hash.digest(File(path: url.path()), range: 2 ..< 7), try hash.digest(Data("hello".utf8)), "Mismatch for \(hash)")
         }
     }
 
@@ -123,19 +123,19 @@ final class ByteHashTests: XCTestCase {
         }
 
         for hash: ByteHash in [.md5, .sha256, .git, .ssdeep, .tlsh] {
-            XCTAssertThrowsError(try hash.digest(path: url.path(), range: 0 ..< 999)) { error in
-                XCTAssertEqual(error as? ByteHashError, .sizeChanged(expected: 999, actual: 5))
+            XCTAssertThrowsError(try hash.digest(File(path: url.path()), range: 0 ..< 999)) { error in
+                XCTAssertEqual(error as? FileError, .sizeChanged(expected: 999, actual: 5))
             }
         }
     }
 
     func testSizeChangedDescriptionAgreesWithCount() {
         XCTAssertEqual(
-            ByteHashError.sizeChanged(expected: 1, actual: 2).localizedDescription,
+            FileError.sizeChanged(expected: 1, actual: 2).localizedDescription,
             "File changed size while hashing (expected 1 byte, read 2)",
         )
         XCTAssertEqual(
-            ByteHashError.sizeChanged(expected: 2, actual: 1).localizedDescription,
+            FileError.sizeChanged(expected: 2, actual: 1).localizedDescription,
             "File changed size while hashing (expected 2 bytes, read 1)",
         )
     }

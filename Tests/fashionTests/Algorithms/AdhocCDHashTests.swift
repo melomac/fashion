@@ -209,19 +209,19 @@ final class AdhocCDHashTests: XCTestCase {
     }
 
     func testFindCodeSignatureSignedIsBeforeEnd() throws {
-        guard let data = try? FileReader.map(path: "/bin/ls") else {
+        guard let file = try? File(path: "/bin/ls") else {
             throw XCTSkip("/bin/ls not readable")
         }
-        let sliceData: Data = switch try MachOParser.open(data: data) {
-        case let .fat(archs): MachOParser.sliceData(fileData: data, arch: archs[0])
-        case .thin: data
-        case .notMachO: Data()
+        let image: MachO? = switch try MachOParser.open(file) {
+        case let .fat(archs): try MachO(file, offset: archs[0].range.lowerBound, length: archs[0].range.count)
+        case let .thin(image): image
+        case .notMachO: nil
         }
-        let slice = try XCTUnwrap(MachO(sliceData))
+        let slice = try XCTUnwrap(image)
         // A signed slice's signature starts after the code and ends within the slice.
         let signature = try XCTUnwrap(try slice.findCodeSignature())
         XCTAssertGreaterThan(signature.offset, 0)
-        XCTAssertLessThanOrEqual(signature.offset + signature.size, slice.data.count)
+        XCTAssertLessThanOrEqual(signature.offset + signature.size, slice.length)
     }
 
     func testInvalidCodeSignatureRangeThrows() throws {

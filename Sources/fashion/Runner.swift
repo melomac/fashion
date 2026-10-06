@@ -272,7 +272,7 @@ final class Output: @unchecked Sendable {
         do {
             try self.console.out(line)
         } catch {
-            let error = FileReader.posixError(error)
+            let error = File.posixError(error)
             if error as? Errno == .brokenPipe {
                 // The reader went away (`| head`): if the trap holds SIGPIPE, this logs the end and dies of it
                 // silently, as the process would have without the trap.
@@ -742,18 +742,24 @@ struct Digester {
      The digests of one file in the selected mode.
      */
     private func digests(_ path: String) throws -> [DigestResult] {
-        switch self.mode {
+        if case let .xarToc(hash, decompress) = self.mode {
+            return try XARParser.hashToc(path: path, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
+        }
+
+        // One descriptor for everything read from the file, whose size when it is opened is the size hashed.
+        let file = try File(path: path)
+        return switch self.mode {
         case let .file(hash):
-            try self.fileDigest(path, hash: hash).map { [DigestResult(digest: $0)] } ?? []
+            try self.fileDigest(file, hash: hash).map { [DigestResult(digest: $0)] } ?? []
         case let .slices(hash):
-            try self.sliceDigests(path, hash: hash)
+            try self.sliceDigests(file, hash: hash)
         case let .symhash(hash, separator, sortSymbols):
-            try SymHash.compute(path: path, algorithm: hash, separator: separator, sortSymbols: sortSymbols)
+            try SymHash.compute(file, algorithm: hash, separator: separator, sortSymbols: sortSymbols)
                 .map { DigestResult(digest: $0.digest, label: $0.arch) }
-        case let .xarToc(hash, decompress):
-            try XARParser.hashToc(path: path, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
+        case .xarToc:
+            []
         case .cdhash:
-            try self.cdHashDigests(path)
+            try self.cdHashDigests(file, path: path)
         }
     }
 
@@ -761,8 +767,8 @@ struct Digester {
      One digest per code directory of each slice, `--exact` trimming an unsigned slice to its logical extent before
      synthesizing its ad-hoc cdhash.
      */
-    private func cdHashDigests(_ path: String) throws -> [DigestResult] {
-        try CDHash.hash(path: path, exact: self.exact).map { result in
+    private func cdHashDigests(_ file: File, path: String) throws -> [DigestResult] {
+        try CDHash.hash(file, path: path, exact: self.exact).map { result in
             // An unsigned slice is labeled ADHOC; its hash type (sha256 / sha1) is appended to tell the two
             // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous.
             let tag: String? = if result.adhoc {
@@ -778,13 +784,13 @@ struct Digester {
     /**
      The whole-file digest, then one per architecture of a universal binary, each trimmed when `--exact` is set.
      */
-    private func sliceDigests(_ path: String, hash: ByteHash) throws -> [DigestResult] {
+    private func sliceDigests(_ file: File, hash: ByteHash) throws -> [DigestResult] {
         // Read the container first, so a malformed one fails before any hashing.
-        let slices = try self.sliceRanges(path)
+        let slices = try self.sliceRanges(file)
 
-        var results = try self.fileDigest(path, hash: hash).map { [DigestResult(digest: $0)] } ?? []
+        var results = try self.fileDigest(file, hash: hash).map { [DigestResult(digest: $0)] } ?? []
         for slice in slices {
-            if let digest = try hash.digest(path: path, range: slice.range) {
+            if let digest = try hash.digest(file, range: slice.range) {
                 results.append(DigestResult(digest: digest, label: slice.arch))
             }
         }
@@ -794,36 +800,30 @@ struct Digester {
     /**
      Where each architecture of a universal binary lies in the file, as Security's `Universal` places a `MachO` at its
      offset; none for any other file. Each slice is validated as a thin Mach-O, so a malformed slice is rejected like a
-     malformed thin file, and trimmed to its logical end when `--exact` is set. Only the headers are read, from a map
-     released before the slices are hashed.
+     malformed thin file, and trimmed to its logical end when `--exact` is set. Only the headers are read.
      */
-    private func sliceRanges(_ path: String) throws -> [(range: Range<Int>, arch: String)] {
-        guard try MachOParser.isMachO(path: path) else {
-            return []
-        }
-        let data = try FileReader.map(path: path)
-        guard case let .fat(archs) = try MachOParser.open(data: data) else {
+    private func sliceRanges(_ file: File) throws -> [(range: Range<Int>, arch: String)] {
+        guard case let .fat(archs) = try MachOParser.open(file) else {
             return []
         }
 
         return try archs.map { arch in
-            let slice = MachOParser.sliceData(fileData: data, arch: arch)
             // Parse even without --exact: a malformed slice is an error either way. A slice that is not Mach-O at
             // all is hashed whole.
-            let length = try MachO(slice).map { self.exact ? $0.logicalEnd() : slice.count } ?? slice.count
-            // The view keeps the file's indices: it starts at the slice's offset.
-            return (slice.startIndex ..< slice.startIndex + length, MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
+            let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count)
+            let length = image.map { self.exact ? $0.logicalEnd() : arch.range.count } ?? arch.range.count
+            return (arch.range.lowerBound ..< arch.range.lowerBound + length, MachOParser.archName(cpuType: arch.cpuType, cpuSubtype: arch.cpuSubtype))
         }
     }
 
     /**
-     The digest of the whole file or, with `--exact`, of a Mach-O's logical content only: the map is lazy, so `fileEnd`
-     faults just the header.
+     The digest of the whole file or, with `--exact`, of a Mach-O's logical content only: `fileEnd` reads just the
+     headers.
      */
-    private func fileDigest(_ path: String, hash: ByteHash) throws -> String? {
-        guard self.exact, try MachOParser.isMachO(path: path) else {
-            return try hash.digest(path: path)
+    private func fileDigest(_ file: File, hash: ByteHash) throws -> String? {
+        guard self.exact else {
+            return try hash.digest(file)
         }
-        return try hash.digest(path: path, range: 0 ..< MachOParser.fileEnd(data: FileReader.map(path: path)))
+        return try hash.digest(file, range: 0 ..< MachOParser.fileEnd(file))
     }
 }

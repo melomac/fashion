@@ -25,7 +25,7 @@ final class TLSHBridgeTests: XCTestCase {
         defer {
             try? FileManager.default.removeItem(at: url)
         }
-        let hash = try ByteHash.tlsh.digest(path: url.path())
+        let hash = try ByteHash.tlsh.digest(File(path: url.path()))
 
         XCTAssertNotNil(hash)
         XCTAssertFalse(try XCTUnwrap(hash?.isEmpty))

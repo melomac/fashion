@@ -4,16 +4,21 @@ import MachO
 /**
  A single parsed thin Mach-O image, named after Security's `MachO`: a thin file, or one architecture of a universal one.
 
- The header (endianness, architecture, filetype) and the load commands are parsed once at initialization;
- the command lookups, code-signature, and logical-extent accessors all reuse that single pass.
+ Like Security's, it reads the header and the load commands once, at initialization, into a buffer whose offsets count
+ from the image's start; the command lookups, code-signature, and logical-extent accessors all reuse that single pass,
+ and anything else is read at its offset when asked for (`dataAt`, `stream`).
 
- `init?(_:)` returns nil for anything that is not a thin Mach-O and throws for one Security refuses;
- `init?(lenient:)` keeps whatever prefix of a damaged load-command table parses, for best-effort inspection.
- For a fat binary, open the container with `MachOParser` and wrap each architecture slice in its own `MachO`.
+ `init?(_:offset:length:)` returns nil for anything that is not a thin Mach-O and throws for one Security refuses;
+ `init?(lenient:offset:length:)` keeps whatever prefix of a damaged load-command table parses, for best-effort inspection.
+ For a fat binary, open the container with `MachOParser` and read each architecture as its own `MachO`.
  */
 struct MachO {
-    /// The slice's bytes; a slice of a universal file is a view that keeps the file's indices (`Data.bytes(in:)`).
-    let data: Data
+    /// The file the image lies in.
+    let file: File
+    /// Where the image starts in its file: zero for a thin file, an architecture's offset in a universal one.
+    let offset: Int
+    /// The image's size: the whole of a thin file, or an architecture of a universal one.
+    let length: Int
     let is64: Bool
     let swap: Bool
     let cpuType: cpu_type_t
@@ -25,51 +30,62 @@ struct MachO {
     /// Whether the commands fill the table the way `MachOBase::nextCommand` requires.
     private let tableIsValid: Bool
 
-    init?(lenient data: Data) {
-        guard
-            let layout = Self.layout(of: data),
-            data.count >= layout.headerSize
-        else {
+    /**
+     The image `length` bytes long at `offset` in `file` (the rest of the file by default). Nil for anything that is not
+     a thin Mach-O; throws for one too short for its header.
+     */
+    init?(lenient file: File, offset: Int = 0, length: Int? = nil) throws {
+        let length = length ?? file.size - offset
+        // Enough for either header, and as little as a peek at the magic of a file that is not Mach-O.
+        let head = try file.read(at: offset, count: min(length, MemoryLayout<mach_header_64>.size))
+        guard let layout = Self.layout(of: head) else {
             return nil
+        }
+        guard head.count >= layout.headerSize else {
+            throw ParserError.truncatedMachHeader(expectedSize: layout.headerSize, fileSize: length)
         }
 
         // mach_header and mach_header_64 share their leading fields, so the 32-bit struct reads them all.
-        let header = data.withUnsafeBytes { $0.loadUnaligned(as: mach_header.self) }
+        let header = head.withUnsafeBytes { $0.loadUnaligned(as: mach_header.self) }
         func swapped<T: FixedWidthInteger>(_ value: T) -> T {
             layout.swap ? value.byteSwapped : value
         }
 
-        self.data = data
+        self.file = file
+        self.offset = offset
+        self.length = length
         self.is64 = layout.is64
         self.swap = layout.swap
         self.cpuType = swapped(header.cputype)
         self.cpuSubtype = swapped(header.cpusubtype)
         self.filetype = swapped(header.filetype)
         self.sizeofcmds = Int(swapped(header.sizeofcmds))
-        (self.loadCommands, self.tableIsValid) = Self.parseLoadCommands(data: data, headerSize: layout.headerSize, sizeofcmds: self.sizeofcmds, swap: layout.swap)
+
+        // The header and the load commands in one buffer, as `MachO::MachO` reads them, when the image holds them.
+        let end = layout.headerSize + self.sizeofcmds
+        let table = end <= length ? try file.read(at: offset, count: end) : head
+        (self.loadCommands, self.tableIsValid) = Self.parseLoadCommands(data: table, headerSize: layout.headerSize, sizeofcmds: self.sizeofcmds, swap: layout.swap)
     }
 
     /**
-     Parse a thin Mach-O as Security's `MachO` constructor does, and throw where it does: for a load-command table that
-     `sizeofcmds` does not hold (`ncmds` plays no part, as in `MachOBase::nextCommand`), and for a segment or symbol
-     table command too short for its structure before the image's end (`MachO::validateStructure`).
+     Parse a thin Mach-O as Security's `MachO` constructor does, and throw where it does: for a header the image cannot
+     hold, for a load-command table that `sizeofcmds` does not hold (`ncmds` plays no part, as in
+     `MachOBase::nextCommand`), and for a segment or symbol table command too short for its structure before the image's
+     end (`MachO::validateStructure`).
 
      Returns nil for data that is not a thin Mach-O at all.
      */
-    init?(_ data: Data) throws {
-        guard let layout = Self.layout(of: data) else {
+    init?(_ file: File, offset: Int = 0, length: Int? = nil) throws {
+        guard let image = try MachO(lenient: file, offset: offset, length: length) else {
             return nil
         }
-        guard let slice = MachO(lenient: data) else {
-            throw ParserError.truncatedMachHeader(expectedSize: layout.headerSize, fileSize: data.count)
-        }
-        guard slice.tableIsValid else {
-            throw ParserError.invalidLoadCommandTable(size: UInt32(slice.sizeofcmds), fileSize: data.count)
+        guard image.tableIsValid else {
+            throw ParserError.invalidLoadCommandTable(size: UInt32(image.sizeofcmds), fileSize: image.length)
         }
 
         // validateStructure stops at the first __LINKEDIT segment or LC_SYMTAB, where it finds the end of the image;
         // an image that does not end there only fails strict validation, which logicalEnd() reports.
-        for command in slice.loadCommands {
+        for command in image.loadCommands {
             switch command.cmd {
             case UInt32(LC_SEGMENT):
                 _ = try command.load(segment_command.self)
@@ -85,7 +101,21 @@ struct MachO {
             }
         }
 
-        self = slice
+        self = image
+    }
+
+    /**
+     The `count` bytes at `offset` in the image, like `MachO::dataAt`; the caller has checked them against `length`.
+     */
+    func dataAt(_ offset: Int, count: Int) throws -> Data {
+        try self.file.read(at: self.offset + offset, count: count)
+    }
+
+    /**
+     Stream `range` of the image through `consume`; returns the count read, short only when the file ends first.
+     */
+    func stream(_ range: Range<Int>, _ consume: (UnsafeRawBufferPointer) throws -> Void) throws -> Int {
+        try self.file.stream(self.offset + range.lowerBound ..< self.offset + range.upperBound, consume)
     }
 
     /**
@@ -175,11 +205,11 @@ struct MachO {
             }
 
             if let range {
-                let count = UInt64(self.data.count)
-                return range.size <= count && range.offset <= count - range.size ? Int(range.offset + range.size) : self.data.count
+                let count = UInt64(self.length)
+                return range.size <= count && range.offset <= count - range.size ? Int(range.offset + range.size) : self.length
             }
         }
-        return self.data.count
+        return self.length
     }
 
     // MARK: - Filetype

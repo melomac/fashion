@@ -48,6 +48,11 @@ enum MachOParser {
         let cpuSubtype: cpu_subtype_t
         let offset: UInt64
         let size: UInt64
+
+        /// Where the architecture lies in its file, which `parseFat` has checked it fits.
+        var range: Range<Int> {
+            Int(self.offset) ..< Int(self.offset + self.size)
+        }
     }
 
     /**
@@ -73,50 +78,25 @@ enum MachOParser {
      A fat architecture is checked to lie inside the file; what it contains is left to each consumer,
      since a universal static library carries `ar` archives rather than Mach-O slices.
      */
-    static func open(data: Data) throws -> BinaryType {
-        // Mirror isMachO(path:): a file shorter than a 32-bit mach_header is not Mach-O code to Security
-        // (MachORep::candidate), so a magic-only stub (a truncated Java class, say) is an ordinary file.
-        guard data.count >= self.minimumSize else {
+    static func open(_ file: File) throws -> BinaryType {
+        // A file shorter than a 32-bit mach_header is not Mach-O code to Security (MachORep::candidate), so a
+        // magic-only stub (a truncated Java class, say) is an ordinary file.
+        guard file.size >= self.minimumSize else {
             return .notMachO
         }
 
-        if let slice = try MachO(data) {
-            return .thin(slice)
+        if let image = try MachO(file) {
+            return .thin(image)
         }
 
-        switch data.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
+        let head = try file.read(at: 0, count: 8)
+        switch head.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
         case FAT_MAGIC, FAT_CIGAM:
-            return try self.parseFat(data: data, is64: false)
+            return try self.parseFat(file, head: head, is64: false)
         case FAT_MAGIC_64, FAT_CIGAM_64:
-            return try self.parseFat(data: data, is64: true)
+            return try self.parseFat(file, head: head, is64: true)
         default:
             return .notMachO
-        }
-    }
-
-    /**
-     Cheap Mach-O check that reads only the leading bytes (uncached), so callers can avoid mapping a
-     large non-Mach-O file (e.g. a multi-GB disk image) just to discover there is nothing to trim.
-
-     Throws on an I/O failure (the file cannot be opened or read),
-     a file that reads successfully but is not Mach-O (or is too small) simply returns false.
-     */
-    static func isMachO(path: String) throws -> Bool {
-        let head = try FileReader.head(path: path, count: self.minimumSize)
-        guard head.count >= self.minimumSize else {
-            return false
-        }
-
-        return head.withUnsafeBytes { raw -> Bool in
-            switch raw.loadUnaligned(as: UInt32.self) {
-            case MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64:
-                return true
-            case FAT_MAGIC, FAT_CIGAM, FAT_MAGIC_64, FAT_CIGAM_64:
-                let nfatArch = UInt32(bigEndian: raw.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
-                return 1 ... self.maxSliceCount ~= nfatArch
-            default:
-                return false
-            }
         }
     }
 
@@ -197,105 +177,121 @@ enum MachOParser {
     }
 
     /**
-     The names of the external undefined symbols in a symbol table, in table order, as byte ranges of `data` (read them
-     with `Data.bytes(in:)`): entries whose type is exactly `N_EXT`, with no `N_STAB` bits and the `N_UNDF` section type.
+     The names of the external undefined symbols in a symbol table, in table order: entries whose type is exactly
+     `N_EXT`, with no `N_STAB` bits and the `N_UNDF` section type, and each name up to its NUL or the end of the table.
 
-     One pass over the mapped bytes, so memory grows with the names that qualify rather than with `nsyms`,
-     which a hostile table sizes freely. Names may overlap in a string table, so their total length is bounded by
-     `maxSymbolNamesLength` rather than by the file: a table whose names go beyond it throws as soon as they do.
+     Neither table is held whole: real ones reach hundreds of MiB (an Affinity framework holds 200 MiB of strings).
+     The entries are read in chunks, then the string table in windows that start at the names wanted, skipping what lies
+     between them. Names may overlap in a string table, so one NUL can end several: they share one buffer, and their
+     total length is bounded by `maxSymbolNamesLength` rather than by the file, since overlapping names let a small
+     crafted table reach gigabytes. The names are checked in table order, as they would be one at a time: an index
+     past the string table is an error unless the names before it already went beyond the limit.
+
+     The image is `length` bytes at `offset` in `file`, which its `symtab` offsets count from; `is64` and `swap` describe
+     its header.
      */
-    static func externalSymbolNames(data: Data, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [Range<Int>] {
+    static func externalSymbolNames(file: File, offset: Int, length: Int, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [Data] {
         // 32-bit slices use the 12-byte `nlist`, 64-bit the 16-byte `nlist_64`; n_strx and n_type sit at the
         // same offsets in both.
         let entrySize = is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size
         let symbolOffset = Int(symtab.symoff)
         guard
-            symbolOffset <= data.count,
-            Int(symtab.nsyms) <= (data.count - symbolOffset) / entrySize
+            symbolOffset <= length,
+            Int(symtab.nsyms) <= (length - symbolOffset) / entrySize
         else {
-            throw ParserError.invalidSymbolTableRange(offset: symtab.symoff, count: symtab.nsyms, fileSize: data.count)
+            throw ParserError.invalidSymbolTableRange(offset: symtab.symoff, count: symtab.nsyms, fileSize: length)
         }
-        try self.validateStringTable(data: data, stroff: symtab.stroff, strsize: symtab.strsize)
+        let tableOffset = Int(symtab.stroff)
+        let tableSize = Int(symtab.strsize)
+        guard
+            tableOffset <= length,
+            tableSize <= length - tableOffset
+        else {
+            throw ParserError.invalidStringTableRange(offset: symtab.stroff, size: symtab.strsize, fileSize: length)
+        }
 
+        // The string index of each external undefined symbol, up to the first one past the table.
         let mask = UInt8(N_STAB | N_EXT | N_TYPE)
-        var names: [Range<Int>] = []
-        var length = 0
-        try data.withUnsafeBytes { ptr in
-            for symbolIndex in 0 ..< Int(symtab.nsyms) {
-                let base = symbolOffset + symbolIndex * entrySize
-                guard ptr.loadUnaligned(fromByteOffset: base + 4, as: UInt8.self) & mask == UInt8(N_EXT) else {
-                    continue
+        let batch = File.chunkSize / entrySize
+        var indexes: [Int] = []
+        var badIndex: ParserError?
+        for first in stride(from: 0, to: Int(symtab.nsyms), by: batch) where badIndex == nil {
+            let count = min(batch, Int(symtab.nsyms) - first)
+            let entries = try file.read(at: offset + symbolOffset + first * entrySize, count: count * entrySize)
+            entries.withUnsafeBytes { raw in
+                for base in stride(from: 0, to: count * entrySize, by: entrySize) where badIndex == nil {
+                    guard raw.loadUnaligned(fromByteOffset: base + 4, as: UInt8.self) & mask == UInt8(N_EXT) else {
+                        continue
+                    }
+                    let strx = raw.loadUnaligned(fromByteOffset: base, as: UInt32.self)
+                    let index = swap ? strx.byteSwapped : strx
+                    guard index < symtab.strsize else {
+                        badIndex = .invalidStringTableIndex(index: index, tableSize: symtab.strsize)
+                        continue
+                    }
+                    indexes.append(Int(index))
                 }
-                let strx = ptr.loadUnaligned(fromByteOffset: base, as: UInt32.self)
-                let name = try self.symbolName(data: data, stroff: symtab.stroff, strsize: symtab.strsize, strx: swap ? strx.byteSwapped : strx)
-                length += name.count
-                guard length <= self.maxSymbolNamesLength else {
+            }
+        }
+
+        // Each wanted name opens where it starts and closes, with every other one open, at the next NUL.
+        var starts = Set(indexes).sorted()[...]
+        var names: [Int: Data] = [:]
+        var open: [Int] = []
+        var pending = Data()
+        var pendingStart = 0
+        var windowStart = starts.first ?? tableSize
+        windows: while windowStart < tableSize {
+            let window = try file.read(at: offset + tableOffset + windowStart, count: min(File.chunkSize, tableSize - windowStart))
+            let windowEnd = windowStart + window.count
+            var at = windowStart
+            while at < windowEnd {
+                if open.isEmpty {
+                    guard let start = starts.first else {
+                        break windows
+                    }
+                    at = start
+                    guard at < windowEnd else {
+                        break
+                    }
+                    pending = Data()
+                    pendingStart = at
+                }
+                while starts.first == at {
+                    open.append(starts.removeFirst())
+                }
+
+                let stop = min(windowEnd, starts.first ?? windowEnd)
+                let nul = window[(at - windowStart) ..< (stop - windowStart)].firstIndex(of: 0)
+                let end = nul.map { windowStart + $0 } ?? stop
+                pending.append(window[(at - windowStart) ..< (end - windowStart)])
+                guard pending.count <= self.maxSymbolNamesLength else {
                     throw ParserError.symbolNamesTooLong(limit: self.maxSymbolNamesLength)
                 }
-                names.append(name)
+                at = end
+                if nul != nil {
+                    for start in open {
+                        names[start] = pending[(start - pendingStart)...]
+                    }
+                    open.removeAll()
+                    at += 1
+                }
             }
+            windowStart = at
         }
-        return names
-    }
-
-    static func validateStringTable(data: Data, stroff: UInt32, strsize: UInt32) throws {
-        let tableOffset = Int(stroff)
-        guard
-            tableOffset <= data.count,
-            Int(strsize) <= data.count - tableOffset
-        else {
-            throw ParserError.invalidStringTableRange(offset: stroff, size: strsize, fileSize: data.count)
-        }
-    }
-
-    /**
-     The byte range of the name at `strx` in a string table, up to its NUL or the end of the table.
-     */
-    static func symbolName(data: Data, stroff: UInt32, strsize: UInt32, strx: UInt32) throws -> Range<Int> {
-        try self.validateStringTable(data: data, stroff: stroff, strsize: strsize)
-
-        guard strx < strsize else {
-            throw ParserError.invalidStringTableIndex(index: strx, tableSize: strsize)
+        // Names still open run to the end of the table.
+        for start in open {
+            names[start] = pending[(start - pendingStart)...]
         }
 
-        let start = Int(stroff) + Int(strx)
-
-        // The string is NUL-terminated, but a crafted table may omit the terminator:
-        // bound the scan to the already-validated string table extent.
-        let tableEnd = Int(stroff) + Int(strsize)
-
-        return data.withUnsafeBytes { raw -> Range<Int> in
-            let bytes = raw.bindMemory(to: UInt8.self)
-            var end = start
-            while end < tableEnd, bytes[end] != 0 {
-                end += 1
-            }
-            return start ..< end
+        let length = indexes.reduce(0) { $0 + names[$1]!.count }
+        guard length <= self.maxSymbolNamesLength else {
+            throw ParserError.symbolNamesTooLong(limit: self.maxSymbolNamesLength)
         }
-    }
-
-    // MARK: - Slice Data
-
-    /**
-     One architecture of a universal file, for parsing, as a view into `fileData` rather than a copy: like Security's
-     `MachO` at an offset in its universal file, it reads only the headers and tables it is asked for. A copy took the
-     whole slice into the heap, each hash thread holding one at once.
-
-     The view keeps the file's indices, so its `startIndex` is the slice's offset: read it with `Data.bytes(in:)`.
-     */
-    static func sliceData(fileData: Data, arch: FatArch) -> Data {
-        // arch.offset/size come from an attacker-controllable fat header; convert through Int(exactly:)
-        // and check the sum in wide arithmetic so a crafted 64-bit fat cannot trap on conversion/overflow.
-        guard
-            let start = Int(exactly: arch.offset),
-            let size = Int(exactly: arch.size),
-            start <= fileData.count,
-            size <= fileData.count - start
-        else {
-            return Data()
+        if let badIndex {
+            throw badIndex
         }
-
-        return fileData.bytes(in: start ..< start + size)
+        return indexes.map { names[$0]! }
     }
 
     // MARK: - Logical Extent
@@ -307,15 +303,14 @@ enum MachOParser {
      Bytes beyond this are trailing slack appended after the Mach-O content.
      Throws when a Mach-O is malformed or a fat architecture range cannot address bytes within the file.
      */
-    static func fileEnd(data: Data) throws -> Int {
-        switch try self.open(data: data) {
-        case let .thin(slice):
-            slice.logicalEnd()
+    static func fileEnd(_ file: File) throws -> Int {
+        switch try self.open(file) {
+        case let .thin(image):
+            image.logicalEnd()
         case let .fat(archs):
-            // parseFat has already proved every range fits, so the sums cannot overflow.
-            archs.map { Int($0.offset) + Int($0.size) }.max() ?? data.count
+            archs.map(\.range.upperBound).max() ?? file.size
         case .notMachO:
-            data.count
+            file.size
         }
     }
 
@@ -348,8 +343,8 @@ enum MachOParser {
      */
     static let maxSymbolNamesLength = 64 << 20
 
-    private static func parseFat(data: Data, is64: Bool) throws -> BinaryType {
-        let nfatArch: UInt32 = data.withUnsafeBytes { ptr in
+    private static func parseFat(_ file: File, head: Data, is64: Bool) throws -> BinaryType {
+        let nfatArch: UInt32 = head.withUnsafeBytes { ptr in
             UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
         }
 
@@ -361,11 +356,11 @@ enum MachOParser {
         // fat_arch_64: cputype(4) cpusubtype(4) offset(8) size(8) align(4) reserved(4) = 32 bytes.
         let entrySize = is64 ? 32 : 20
         let tableSize = 8 + Int(nfatArch) * entrySize
-        guard tableSize <= data.count else {
-            throw ParserError.invalidFatArchitectureTable(count: nfatArch, fileSize: data.count)
+        guard tableSize <= file.size else {
+            throw ParserError.invalidFatArchitectureTable(count: nfatArch, fileSize: file.size)
         }
 
-        return try data.withUnsafeBytes { ptr in
+        return try file.read(at: 0, count: tableSize).withUnsafeBytes { ptr in
             var archs: [FatArch] = []
 
             for architectureIndex in 0 ..< Int(nfatArch) {
@@ -387,10 +382,10 @@ enum MachOParser {
                     let size = Int(exactly: sliceSize),
                     start >= tableSize,
                     size > 0,
-                    start <= data.count,
-                    size <= data.count - start
+                    start <= file.size,
+                    size <= file.size - start
                 else {
-                    throw ParserError.invalidFatArchitectureRange(offset: sliceOffset, size: sliceSize, fileSize: data.count)
+                    throw ParserError.invalidFatArchitectureRange(offset: sliceOffset, size: sliceSize, fileSize: file.size)
                 }
 
                 archs.append(FatArch(

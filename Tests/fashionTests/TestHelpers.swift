@@ -1,22 +1,82 @@
 @testable import fashion
 import Foundation
+import MachO
 import XCTest
 
 /**
- Test conveniences over the parser: open a file by path, and best-effort views of a fixture that read as far
+ A fixture as a file: written to a temporary file, opened and unlinked at once, so the descriptor holds the only
+ reference to it.
+ */
+extension File {
+    convenience init(data: Data) throws {
+        let url = FileManager.default.temporaryDirectory / "fashion-fixture-\(UUID())"
+        try data.write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        try self.init(path: url.path())
+    }
+}
+
+/**
+ Test conveniences over the parser: open a fixture or a path, and best-effort views of a fixture that read as far
  as a damaged load-command table parses instead of throwing (production only uses the throwing initializer).
  */
 extension MachOParser {
     static func open(path: String) throws -> BinaryType {
-        try self.open(data: FileReader.map(path: path))
+        try self.open(File(path: path))
+    }
+
+    static func open(data: Data) throws -> BinaryType {
+        try self.open(File(data: data))
+    }
+
+    /// Whether `open` reads the file as a Mach-O, thin or universal.
+    static func isMachO(path: String) throws -> Bool {
+        if case .notMachO = try self.open(path: path) {
+            return false
+        }
+        return true
+    }
+
+    /// One architecture of a universal fixture, copied out as if extracted.
+    static func sliceData(fileData: Data, arch: FatArch) -> Data {
+        Data(fileData.bytes(in: arch.range))
+    }
+
+    static func fileEnd(data: Data) throws -> Int {
+        try self.fileEnd(File(data: data))
     }
 
     static func loadCommands(data: Data) -> [LoadCommand] {
-        MachO(lenient: data)?.loadCommands ?? []
+        (try? MachO(lenient: File(data: data)))?.loadCommands ?? []
     }
 
     static func machOEnd(data: Data) -> Int {
-        MachO(lenient: data)?.logicalEnd() ?? data.count
+        (try? MachO(lenient: File(data: data)))?.logicalEnd() ?? data.count
+    }
+
+    /// The external symbol names of raw tables, `symtab` counting from the start of `data`.
+    static func externalSymbolNames(data: Data, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [Data] {
+        try self.externalSymbolNames(file: File(data: data), offset: 0, length: data.count, symtab: symtab, is64: is64, swap: swap)
+    }
+}
+
+extension MachO {
+    /// A fixture read as a thin file.
+    init?(_ data: Data) throws {
+        try self.init(File(data: data))
+    }
+}
+
+extension CDHash {
+    static func hash(path: String, exact: Bool = false) throws -> [SliceResult] {
+        try self.hash(File(path: path), path: path, exact: exact)
+    }
+
+    /// The strongest cdhash of a thin fixture, embedded or ad-hoc; nil for anything else.
+    static func hash(data: Data, exact: Bool = false) throws -> String? {
+        try MachO(data)?.codeDirectoryHashes(exact: exact).hashes.first?.hash
     }
 }
 
