@@ -75,7 +75,7 @@ struct Fashion: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fashion",
         abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
-        version: "1.4.3",
+        version: "1.5.0",
     )
 
     @Argument(help: "Paths to scan (default: current directory).", completion: .file())
