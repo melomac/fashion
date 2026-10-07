@@ -135,7 +135,7 @@ final class Console: @unchecked Sendable {
             let tail = path.count <= room ? path : "…" + path.suffix(room - 1)
 
             // Dim, and without auto-wrap so a line too wide for the terminal is clipped: one carriage return erases it.
-            try? FileHandle.standardOutput.write(contentsOf: Data("\r\u{1B}[2m\u{1B}[?7l\(head)\(tail)\u{1B}[?7h\u{1B}[22m\u{1B}[K".utf8))
+            _ = try? FileDescriptor.standardOutput.writeAll("\r\u{1B}[2m\u{1B}[?7l\(head)\(tail)\u{1B}[?7h\u{1B}[22m\u{1B}[K".utf8)
             self.shown = true
         }
     }
@@ -174,13 +174,14 @@ final class Console: @unchecked Sendable {
     /**
      On a terminal, erase the status line first, under the lock so it cannot be redrawn in the middle of the line.
      */
-    private func write(_ line: String, to handle: FileHandle) throws {
+    private func write(_ line: String, to fd: FileDescriptor) throws {
         guard self.isLive else {
-            return try handle.write(contentsOf: Data((line + "\n").utf8))
+            _ = try fd.writeAll((line + "\n").utf8)
+            return
         }
         try self.lock.withLock {
             self.erase()
-            try handle.write(contentsOf: Data((line + "\n").utf8))
+            _ = try fd.writeAll((line + "\n").utf8)
         }
     }
 
@@ -189,7 +190,7 @@ final class Console: @unchecked Sendable {
      */
     private func erase() {
         if self.shown {
-            try? FileHandle.standardOutput.write(contentsOf: Data("\r\u{1B}[K".utf8))
+            _ = try? FileDescriptor.standardOutput.writeAll("\r\u{1B}[K".utf8)
             self.shown = false
         }
     }
@@ -278,7 +279,6 @@ final class Output: @unchecked Sendable {
         do {
             try self.console.out(line)
         } catch {
-            let error = File.posixError(error)
             if error as? Errno == .brokenPipe {
                 // The reader went away (`| head`): if the trap holds SIGPIPE, this logs the end and dies of it
                 // silently, as the process would have without the trap.

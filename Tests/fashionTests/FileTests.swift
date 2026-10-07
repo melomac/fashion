@@ -99,10 +99,9 @@ final class FileTests: XCTestCase {
     }
 
     func testMessagesLeaveOutFoundationsPrefix() {
-        // An I/O error reads as strerror says it, whether it comes from System or wrapped by Foundation.
+        // An I/O error reads as strerror says it, not as Errno's localizedDescription does.
         XCTAssertEqual(File.message(for: Errno.permissionDenied), "Permission denied")
-        let wrapped = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))])
-        XCTAssertEqual(File.message(for: wrapped), "Permission denied")
+        XCTAssertNotEqual(Errno.permissionDenied.localizedDescription, "Permission denied")
         XCTAssertEqual(File.message(for: FileError.sizeChanged(opened: 2, now: 1)), "File changed size while hashing (2 bytes when opened, 1 now)")
     }
 }

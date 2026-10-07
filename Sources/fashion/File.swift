@@ -96,57 +96,35 @@ final class File {
      architecture from the descriptor at its offset. Throws when the file no longer holds the range.
      */
     func stream(_ range: Range<Int>, _ consume: (UnsafeRawBufferPointer) throws -> Void) throws {
-        // The buffer is mapped from the kernel rather than taken from malloc: hash threads freeing a 1 MiB block per
-        // file left about 100 MiB of emptied malloc regions resident, while unmapping returns the pages at once, and a
-        // short file only touches the pages it fills.
-        guard
-            let base = mmap(nil, Self.chunkSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0),
-            base != MAP_FAILED
-        else {
-            throw Errno(rawValue: errno)
-        }
-        defer {
-            munmap(base, Self.chunkSize)
-        }
-        let buffer = UnsafeMutableRawBufferPointer(start: base, count: Self.chunkSize)
-
-        var offset = range.lowerBound
-        while offset < range.upperBound {
-            let count = min(Self.chunkSize, range.upperBound - offset)
-            guard try self.read(at: offset, into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<count])) == count else {
-                throw self.shortRead()
+        var chunk = try Self.mapped(Self.chunkSize)
+        try chunk.withUnsafeMutableBytes { buffer in
+            var offset = range.lowerBound
+            while offset < range.upperBound {
+                let count = min(Self.chunkSize, range.upperBound - offset)
+                guard try self.read(at: offset, into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<count])) == count else {
+                    throw self.shortRead()
+                }
+                try consume(UnsafeRawBufferPointer(rebasing: buffer[..<count]))
+                offset += count
             }
-            try consume(UnsafeRawBufferPointer(rebasing: buffer[..<count]))
-            offset += count
         }
-    }
-
-    /**
-     The POSIX failure behind a Foundation file error, so every reader and writer describes an I/O error
-     the same way and no file name is echoed inside the message. Any other error is returned unchanged.
-     */
-    static func posixError(_ error: Error) -> Error {
-        guard
-            let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError,
-            underlying.domain == NSPOSIXErrorDomain
-        else {
-            return error
-        }
-        return Errno(rawValue: Int32(underlying.code))
     }
 
     /**
      How a diagnostic describes an error: an I/O error as `strerror` says it, like a walk error, without the
-     "The operation couldn't be completed." Foundation puts before it; any other error by its own description.
+     "The operation couldn't be completed." that `Errno`'s own `localizedDescription` puts before it; any other error
+     by its own description.
      */
     static func message(for error: Error) -> String {
-        (self.posixError(error) as? Errno)?.description ?? error.localizedDescription
+        (error as? Errno)?.description ?? error.localizedDescription
     }
 
     // MARK: - Private
 
     /**
-     `count` zeroed bytes mapped from the kernel, unmapped when the data is released.
+     `count` zeroed bytes mapped from the kernel rather than taken from malloc, unmapped when the data is released:
+     freed, the pages go back at once, where emptied malloc regions stay resident across the hash threads, and a short
+     file only touches the pages it fills.
      */
     private static func mapped(_ count: Int) throws -> Data {
         guard
