@@ -232,14 +232,7 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
             XCTAssertEqual(error as? CDHashError, expected)
         }
-
-        let url = FileManager.default.temporaryDirectory / "fashion-invalid-code-signature-\(UUID())"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertThrowsError(try CDHash.hash(path: url.path())) { error in
+        XCTAssertThrowsError(try CDHash.hash(fixture: data)) { error in
             XCTAssertEqual(error as? CDHashError, expected)
         }
     }
@@ -252,14 +245,7 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertThrowsError(try slice.codeDirectoryHashes(exact: false).hashes) { error in
             XCTAssertEqual(error as? CDHashError, expected)
         }
-
-        let url = FileManager.default.temporaryDirectory / "fashion-invalid-superblob-\(UUID())"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertThrowsError(try CDHash.hash(path: url.path())) { error in
+        XCTAssertThrowsError(try CDHash.hash(fixture: data)) { error in
             XCTAssertEqual(error as? CDHashError, expected)
         }
     }
@@ -331,13 +317,7 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertFalse(directories.contains { $0.adhoc })
 
         // With several directories the hash type is part of each reported line.
-        let url = FileManager.default.temporaryDirectory / "fashion-multi-cd-\(UUID())"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertEqual(try CDHash.hash(path: url.path()).map(\.type), ["sha384", "sha256", "sha1"])
+        XCTAssertEqual(try CDHash.hash(fixture: data).map(\.type), ["sha384", "sha256", "sha1"])
     }
 
     func testCodeDirectoriesLoadLikeSecurity() throws {
@@ -470,13 +450,7 @@ final class AdhocCDHashTests: XCTestCase {
     // MARK: - CDHash integration
 
     func testCDHashTagsUnsignedSliceAdhoc() throws {
-        let url = FileManager.default.temporaryDirectory / "fashion-unsigned-\(UUID())"
-        try self.makeMachO().write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        let results = try CDHash.hash(path: url.path())
+        let results = try CDHash.hash(fixture: self.makeMachO())
         XCTAssertEqual(results.count, 2, "an unsigned thin slice yields both ad-hoc cdhashes")
 
         for result in results {

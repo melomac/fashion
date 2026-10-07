@@ -33,7 +33,15 @@ extension Universal {
 
     /// Whether `open` reads the file as a Mach-O, thin or universal.
     static func isMachO(path: String) throws -> Bool {
-        if case .notMachO = try self.open(path: path) {
+        try self.isMachO(File(path: path))
+    }
+
+    static func isMachO(data: Data) throws -> Bool {
+        try self.isMachO(File(data: data))
+    }
+
+    private static func isMachO(_ file: File) throws -> Bool {
+        if case .notMachO = try self.open(file) {
             return false
         }
         return true
@@ -74,6 +82,11 @@ extension SymHash {
 extension CDHash {
     static func hash(path: String, exact: Bool = false) throws -> [SliceResult] {
         try self.hash(File(path: path), path: path, exact: exact)
+    }
+
+    /// Every slice's cdhashes, as `hash(path:)` reports a file's; the name only appears in the log.
+    static func hash(fixture: Data) throws -> [SliceResult] {
+        try self.hash(File(data: fixture), path: "fixture")
     }
 
     /// The strongest cdhash of a thin fixture, embedded or ad-hoc; nil for anything else.
@@ -128,7 +141,7 @@ func fashionExecutable() throws -> URL {
 private final class BundleMarker {}
 
 /**
- The environment of a `fashion` child. Xcode's test runner sets OS_ACTIVITY_DT_MODE, which copies the child's os_log
+ The environment of a `fashion` child. Xcode's test runner sets `OS_ACTIVITY_DT_MODE`, which copies the child's `os_log`
  lines to its stderr: into what a test reads there, or into a pipe nobody reads, where logging the end of the run on
  SIGTERM would block.
  */

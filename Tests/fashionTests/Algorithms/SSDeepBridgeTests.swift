@@ -14,26 +14,16 @@ final class SSDeepBridgeTests: XCTestCase {
 
     func testHashFile() throws {
         let data = Data(repeating: 0x42, count: 4096)
-        let url = FileManager.default.temporaryDirectory / "fashion-ssdeep-\(UUID())"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
 
-        let result = try ByteHash.ssdeep.digest(File(path: url.path()))
+        let result = try ByteHash.ssdeep.digest(File(data: data))
         XCTAssertFalse(try XCTUnwrap(result).isEmpty)
     }
 
     func testHashDataMatchesHashFile() throws {
         // The streaming buffer path must produce the same digest as hashing the file directly.
         let data = Data((0 ..< 8192).map { UInt8($0 & 0xff) })
-        let url = FileManager.default.temporaryDirectory / "fashion-ssdeep-eq-\(UUID())"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
 
-        XCTAssertEqual(try ByteHash.ssdeep.digest(data), try ByteHash.ssdeep.digest(File(path: url.path())))
+        XCTAssertEqual(try ByteHash.ssdeep.digest(data), try ByteHash.ssdeep.digest(File(data: data)))
     }
 
     func testHashEmptyData() throws {

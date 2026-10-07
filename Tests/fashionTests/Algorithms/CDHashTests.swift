@@ -88,14 +88,7 @@ final class CDHashTests: XCTestCase {
     // MARK: - Non-Mach-O
 
     func testHashNonMachOReturnsEmpty() throws {
-        let url = FileManager.default.temporaryDirectory / "fashion-cdhash-\(UUID()).txt"
-        try? Data("Hello, World!".utf8).write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        let results = try CDHash.hash(path: url.path())
-        XCTAssertTrue(results.isEmpty)
+        XCTAssertTrue(try CDHash.hash(fixture: Data("Hello, World!".utf8)).isEmpty)
     }
 
     func testHashDataNonMachOReturnsNil() throws {

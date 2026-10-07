@@ -2,12 +2,6 @@
 import XCTest
 
 final class ByteHashTests: XCTestCase {
-    private func tmpFile(_ content: Data) throws -> URL {
-        let url = FileManager.default.temporaryDirectory / "fashion-bytehash-\(UUID())"
-        try content.write(to: url)
-        return url
-    }
-
     func testEveryAlgorithmButCDHashHashesBytes() {
         for algorithm in Algorithm.allCases {
             XCTAssertEqual(ByteHash(algorithm)?.rawValue, algorithm == .cdhash ? nil : algorithm.rawValue)
@@ -67,23 +61,15 @@ final class ByteHashTests: XCTestCase {
 
     func testFileMatchesBytesForEveryAlgorithm() throws {
         let data = Data("the quick brown fox jumps over the lazy dog".utf8)
-        let url = try self.tmpFile(data)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
+        let file = try File(data: data)
 
         for hash: ByteHash in [.md5, .sha1, .sha256, .sha384, .sha512, .git, .git256, .ssdeep] {
-            XCTAssertEqual(try hash.digest(File(path: url.path())), try hash.digest(data), "Mismatch for \(hash)")
+            XCTAssertEqual(try hash.digest(file), try hash.digest(data), "Mismatch for \(hash)")
         }
     }
 
     func testFileHashEmptyFile() throws {
-        let url = try self.tmpFile(Data())
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertEqual(try ByteHash.sha256.digest(File(path: url.path())), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        XCTAssertEqual(try ByteHash.sha256.digest(File(data: Data())), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
     }
 
     func testFileHashMissingFileThrows() {
@@ -94,30 +80,24 @@ final class ByteHashTests: XCTestCase {
     /// A file larger than a read chunk is hashed across several reads.
     func testFileHashAcrossChunks() throws {
         let data = Data((0 ..< File.chunkSize * 2 + 1024).map { UInt8($0 & 0xff) })
-        let url = try self.tmpFile(data)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
+        let file = try File(data: data)
 
         for hash: ByteHash in [.md5, .sha256, .sha512, .git, .ssdeep, .tlsh] {
-            XCTAssertEqual(try hash.digest(File(path: url.path())), try hash.digest(data), "Mismatch for \(hash)")
+            XCTAssertEqual(try hash.digest(file), try hash.digest(data), "Mismatch for \(hash)")
         }
     }
 
     func testRangeHashesOnlyThoseBytes() throws {
-        let url = try self.tmpFile(Data("xxhelloyy".utf8))
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
+        let file = try File(data: Data("xxhelloyy".utf8))
 
         for hash: ByteHash in [.md5, .sha256, .git, .ssdeep] {
-            XCTAssertEqual(try hash.digest(File(path: url.path()), range: 2 ..< 7), try hash.digest(Data("hello".utf8)), "Mismatch for \(hash)")
+            XCTAssertEqual(try hash.digest(file, range: 2 ..< 7), try hash.digest(Data("hello".utf8)), "Mismatch for \(hash)")
         }
     }
 
     func testShrunkFileThrows() throws {
         // A file that no longer holds the range by the time it is read fails closed, whatever the hash.
-        let url = try self.tmpFile(Data("hello".utf8))
+        let url = FileManager.default.temporaryDirectory / "fashion-shrinking-\(UUID())"
         defer {
             try? FileManager.default.removeItem(at: url)
         }

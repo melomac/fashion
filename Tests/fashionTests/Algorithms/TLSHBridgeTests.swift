@@ -20,12 +20,7 @@ final class TLSHBridgeTests: XCTestCase {
     }
 
     func testHashFile() throws {
-        let url = FileManager.default.temporaryDirectory / "fashion-tlsh-\(UUID())"
-        try self.data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-        let hash = try ByteHash.tlsh.digest(File(path: url.path()))
+        let hash = try ByteHash.tlsh.digest(File(data: self.data))
 
         XCTAssertNotNil(hash)
         XCTAssertFalse(try XCTUnwrap(hash?.isEmpty))

@@ -331,14 +331,8 @@ final class MachOTests: XCTestCase {
         data.append(Data(repeating: 0x41, count: 100))
         XCTAssertEqual(try Universal.fileEnd(data: data), clean)
 
-        let url = FileManager.default.temporaryDirectory / "fashion-fat-archive-\(UUID()).a"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertTrue(try CDHash.hash(path: url.path()).isEmpty)
-        XCTAssertTrue(try SymHash.compute(File(path: url.path()), algorithm: .md5, separator: ",", sortSymbols: true).isEmpty)
+        XCTAssertTrue(try CDHash.hash(fixture: data).isEmpty)
+        XCTAssertTrue(try SymHash.compute(File(data: data), algorithm: .md5, separator: ",", sortSymbols: true).isEmpty)
     }
 
     func testMalformedMachOInsideFatIsRejectedByConsumers() throws {
@@ -369,17 +363,11 @@ final class MachOTests: XCTestCase {
 
         XCTAssertNoThrow(try Universal.open(data: data))
 
-        let url = FileManager.default.temporaryDirectory / "fashion-fat-malformed-\(UUID())"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
         let expected = ParserError.invalidLoadCommandTable(size: 16, fileSize: slice.count)
-        XCTAssertThrowsError(try CDHash.hash(path: url.path())) { error in
+        XCTAssertThrowsError(try CDHash.hash(fixture: data)) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
-        XCTAssertThrowsError(try SymHash.compute(File(path: url.path()), algorithm: .md5, separator: ",", sortSymbols: true)) { error in
+        XCTAssertThrowsError(try SymHash.compute(File(data: data), algorithm: .md5, separator: ",", sortSymbols: true)) { error in
             XCTAssertEqual(error as? ParserError, expected)
         }
     }
@@ -435,13 +423,7 @@ final class MachOTests: XCTestCase {
     }
 
     func testOpenFromPath() throws {
-        let url = FileManager.default.temporaryDirectory / "fashion-macho-\(UUID())"
-        try self.makeThin64().write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        if case .thin = try Universal.open(path: url.path()) {
+        if case .thin = try Universal.open(data: self.makeThin64()) {
             // pass
         } else {
             XCTFail("Expected thin from path")
@@ -455,23 +437,11 @@ final class MachOTests: XCTestCase {
     // MARK: - isMachO (whether open reads a Mach-O)
 
     func testIsMachOTrueForThinBinary() throws {
-        let url = FileManager.default.temporaryDirectory / "fashion-ismacho-\(UUID())"
-        try self.makeThin64().write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertTrue(try Universal.isMachO(path: url.path()))
+        XCTAssertTrue(try Universal.isMachO(data: self.makeThin64()))
     }
 
     func testIsMachOFalseForNonMachO() throws {
-        let url = FileManager.default.temporaryDirectory / "fashion-ismacho-\(UUID()).txt"
-        try Data("not a mach-o, just text".utf8).write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertFalse(try Universal.isMachO(path: url.path()))
+        XCTAssertFalse(try Universal.isMachO(data: Data("not a mach-o, just text".utf8)))
     }
 
     func testIsMachOThrowsForMissingFile() {
@@ -479,13 +449,7 @@ final class MachOTests: XCTestCase {
     }
 
     func testIsMachOTrueForFatBinary() throws {
-        let url = FileManager.default.temporaryDirectory / "fashion-fat-\(UUID())"
-        try self.makeFat().write(to: url) // 1 architecture
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
-
-        XCTAssertTrue(try Universal.isMachO(path: url.path()))
+        XCTAssertTrue(try Universal.isMachO(data: self.makeFat())) // 1 architecture
     }
 
     func testUniversalSliceLimitMatchesDyld() throws {
@@ -530,13 +494,8 @@ final class MachOTests: XCTestCase {
         // 0xCAFEBABE shared magic, but the big-endian u32 at offset 4 is a Java major version (52), not an arch count.
         var data = Data([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])
         data.append(Data(repeating: 0, count: 64))
-        let url = FileManager.default.temporaryDirectory / "fashion-class-\(UUID()).class"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
 
-        XCTAssertFalse(try Universal.isMachO(path: url.path()))
+        XCTAssertFalse(try Universal.isMachO(data: data))
     }
 
     func testIsMachOFalseForBogusFatArchCount() throws {
@@ -544,13 +503,8 @@ final class MachOTests: XCTestCase {
         data.appendUInt32BE(FAT_MAGIC)
         data.appendUInt32BE(9999) // absurd architecture count — not a universal binary
         data.append(Data(repeating: 0, count: 64))
-        let url = FileManager.default.temporaryDirectory / "fashion-bogusfat-\(UUID())"
-        try data.write(to: url)
-        defer {
-            try? FileManager.default.removeItem(at: url)
-        }
 
-        XCTAssertFalse(try Universal.isMachO(path: url.path()))
+        XCTAssertFalse(try Universal.isMachO(data: data))
     }
 
     // MARK: - Load commands
