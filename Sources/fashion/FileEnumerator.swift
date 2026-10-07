@@ -2,6 +2,7 @@ import CMachOCompat
 import Darwin
 import Foundation
 import os
+import System
 
 /**
  A pull-based file-tree iterator over one or more root paths, using POSIX fts(3).
@@ -17,8 +18,6 @@ import os
 final class FileWalker: Sequence, IteratorProtocol {
     private let reporter: Reporter?
     private var fts: UnsafeMutablePointer<FTS>?
-    /// The root being walked, which an error fts reports without an entry is about.
-    private var root = ""
 
     private static let logger = Logger(subsystem: "fashion", category: "walk")
 
@@ -36,15 +35,15 @@ final class FileWalker: Sequence, IteratorProtocol {
             // longer than its path buffer (about 64 KiB). The roots the kernel could not look up either, PATH_MAX
             // bytes or more, are reported here instead, and the walk is retried with the others.
             for root in roots where root.utf8.count >= PATH_MAX {
-                reporter?.report(path: root, message: String(cString: strerror(ENAMETOOLONG)))
+                self.report(root, .fileNameTooLong)
             }
             roots.removeAll { $0.utf8.count >= PATH_MAX }
             self.fts = Self.open(roots, options: options, sorted: sorted)
         }
         if self.fts == nil {
-            let message = String(cString: strerror(errno))
+            let error = Errno(rawValue: errno)
             for root in roots {
-                reporter?.report(path: root, message: message)
+                self.report(root, error)
             }
         }
     }
@@ -65,12 +64,8 @@ final class FileWalker: Sequence, IteratorProtocol {
         }
 
         while true {
-            errno = 0
+            // The end of the walk: with FTS_NOCHDIR, fts_read fails only out of memory.
             guard let entry = fts_read(fts) else {
-                // The end of the walk, unless fts failed.
-                if errno != 0 {
-                    self.reporter?.report(path: self.root, message: String(cString: strerror(errno)))
-                }
                 fts_close(fts)
                 self.fts = nil
                 return nil
@@ -80,9 +75,6 @@ final class FileWalker: Sequence, IteratorProtocol {
                 String(cString: entry.pointee.fts_path)
             }
             let isRoot = entry.pointee.fts_level == FTS_ROOTLEVEL
-            if isRoot {
-                self.root = path
-            }
 
             switch Int32(entry.pointee.fts_info) {
             case FTS_F:
@@ -91,11 +83,11 @@ final class FileWalker: Sequence, IteratorProtocol {
                 }
                 // A name that is not UTF-8 (on NFS, say) would come back with replacement characters, as another path
                 // that might name another file: report it rather than hash something else.
-                self.reporter?.report(path: path, message: String(cString: strerror(EILSEQ)))
+                self.report(path, .illegalByteSequence)
 
             case FTS_SLNONE where isRoot:
                 // A root is followed: one whose target is missing does not exist.
-                self.reporter?.report(path: path, message: String(cString: strerror(ENOENT)))
+                self.report(path, .noSuchFileOrDirectory)
 
             case FTS_SL, FTS_SLNONE:
                 // FTS_LOGICAL: symlinks are followed, so these only appear for broken targets.
@@ -106,7 +98,7 @@ final class FileWalker: Sequence, IteratorProtocol {
                 Self.logger.info("Cycle detected, skipping: \(path, privacy: .public)")
 
             case FTS_DNR, FTS_ERR, FTS_NS:
-                self.reporter?.report(path: path, message: String(cString: strerror(entry.pointee.fts_errno)))
+                self.report(path, Errno(rawValue: entry.pointee.fts_errno))
 
             default:
                 // FTS_D (pre-order), FTS_DP (post-order), FTS_DOT, and non-regular files, named or found — skip.
@@ -116,6 +108,11 @@ final class FileWalker: Sequence, IteratorProtocol {
     }
 
     // MARK: - Private
+
+    /// Report `error` for `path`, as `strerror` describes it.
+    private func report(_ path: String, _ error: Errno) {
+        self.reporter?.report(path: path, message: error.description)
+    }
 
     /**
      `fts_open` over `roots`, or nil with `errno` set when it fails. It expects a null-terminated array of C strings,
