@@ -64,18 +64,21 @@ struct MachO {
 
     let filetype: UInt32
     private let sizeofcmds: Int
+    /// The most bytes one read takes for a header and its load commands (4 KiB), which hold both for most images.
+    static let headSize = 4096
     let loadCommands: [LoadCommand]
     /// Whether the commands fill the table the way `MachOBase::nextCommand` requires.
     private let tableIsValid: Bool
 
     /**
-     The image `length` bytes long at `offset` in `file` (the rest of the file by default). Nil for anything that is not
-     a thin Mach-O; throws for one too short for its header.
+     The image `length` bytes long at `offset` in `file` (the rest of the file by default), whose first bytes the caller
+     may have read already as `head`. Nil for anything that is not a thin Mach-O; throws for one too short for its
+     header.
      */
-    init?(lenient file: File, offset: Int = 0, length: Int? = nil) throws {
+    init?(lenient file: File, offset: Int = 0, length: Int? = nil, head given: Data? = nil) throws {
         let length = length ?? file.size - offset
-        // Enough for either header, and as little as a peek at the magic of a file that is not Mach-O.
-        let head = try file.read(at: offset, count: min(length, MemoryLayout<mach_header_64>.size))
+        // A peek at the magic of a file that is not Mach-O, and the header and load commands of most images.
+        let head = try given ?? file.read(at: offset, count: min(length, Self.headSize))
         guard let layout = Self.layout(of: head) else {
             return nil
         }
@@ -101,7 +104,7 @@ struct MachO {
 
         // The header and the load commands in one buffer, as `MachO::MachO` reads them, when the image holds them.
         let end = layout.headerSize + self.sizeofcmds
-        let table = end <= length ? try file.read(at: offset, count: end) : head
+        let table = try end <= length ? (end <= head.count ? head.prefix(end) : file.read(at: offset, count: end)) : head
         (self.loadCommands, self.tableIsValid) = Self.parseLoadCommands(data: table, headerSize: layout.headerSize, sizeofcmds: self.sizeofcmds, swap: layout.swap)
     }
 
@@ -113,8 +116,8 @@ struct MachO {
 
      Returns nil for data that is not a thin Mach-O at all.
      */
-    init?(_ file: File, offset: Int = 0, length: Int? = nil) throws {
-        guard let image = try MachO(lenient: file, offset: offset, length: length) else {
+    init?(_ file: File, offset: Int = 0, length: Int? = nil, head: Data? = nil) throws {
+        guard let image = try MachO(lenient: file, offset: offset, length: length, head: head) else {
             return nil
         }
         guard image.tableIsValid else {

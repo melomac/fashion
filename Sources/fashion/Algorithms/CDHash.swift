@@ -174,8 +174,9 @@ extension MachO {
             throw CDHashError.invalidCodeSignatureRange(offset: UInt32(offset), size: UInt32(size), fileSize: self.length)
         }
 
-        let header = try self.dataAt(offset, count: 8)
-        let (magic, length) = (header.bigEndianUInt32(at: 0), header.bigEndianUInt32(at: 4))
+        // One read serves the header and, for most signatures, the whole superblob.
+        let probe = try self.dataAt(offset, count: min(self.length - offset, 16384))
+        let (magic, length) = (probe.bigEndianUInt32(at: 0), probe.bigEndianUInt32(at: 4))
         guard magic == Self.csmagicEmbeddedSignature else {
             throw CDHashError.invalidCodeSignatureMagic(magic: magic)
         }
@@ -189,7 +190,7 @@ extension MachO {
             throw CDHashError.invalidCodeSignatureSuperblobLength(length: length, signatureSize: size)
         }
 
-        let superblob = try self.dataAt(offset, count: Int(length))
+        let superblob = Int(length) <= probe.count ? probe.prefix(Int(length)) : try self.dataAt(offset, count: Int(length))
         let count = superblob.bigEndianUInt32(at: 8)
         let indexEnd = 12 + 8 * Int(count)
         guard indexEnd <= superblob.count else {

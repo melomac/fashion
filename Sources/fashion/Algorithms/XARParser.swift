@@ -84,10 +84,11 @@ enum XARParser {
      inflated, it streams through zlib, so memory holds no more than the declared uncompressed size, itself bounded.
      */
     static func hashToc(_ file: File, algorithm: ByteHash, decompress: Bool) throws -> String? {
-        guard file.size >= 4, try file.read(at: 0, count: 4) == Data("xar!".utf8) else {
+        let head = try file.read(at: 0, count: min(file.size, 28))
+        guard head.prefix(4) == Data("xar!".utf8) else {
             return nil
         }
-        let header = try self.parseHeader(data: file.read(at: 0, count: min(file.size, 28)))
+        let header = try self.parseHeader(data: head)
 
         // Every length below is attacker-controlled; validate in wide (UInt64) arithmetic and only
         // convert to Int once a value is known to be in range, so a crafted header cannot trap.

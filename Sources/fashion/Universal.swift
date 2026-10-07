@@ -43,11 +43,12 @@ enum Universal {
             return .notMachO
         }
 
-        if let image = try MachO(file) {
+        // One read serves the magic, the header and load commands of a thin image, or the table of a universal file.
+        let head = try file.read(at: 0, count: min(file.size, MachO.headSize))
+        if let image = try MachO(file, head: head) {
             return .thin(image)
         }
 
-        let head = try file.read(at: 0, count: 8)
         switch head.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
         case FAT_MAGIC, FAT_CIGAM:
             return try self.parseFat(file, head: head, is64: false)
@@ -159,15 +160,14 @@ enum Universal {
             return .notMachO
         }
 
-        // fat_arch: cputype(4) cpusubtype(4) offset(4) size(4) align(4) = 20 bytes.
-        // fat_arch_64: cputype(4) cpusubtype(4) offset(8) size(8) align(4) reserved(4) = 32 bytes.
-        let entrySize = is64 ? 32 : 20
-        let tableSize = 8 + Int(nfatArch) * entrySize
+        let entrySize = is64 ? MemoryLayout<fat_arch_64>.size : MemoryLayout<fat_arch>.size
+        let tableSize = MemoryLayout<fat_header>.size + Int(nfatArch) * entrySize
         guard tableSize <= file.size else {
             throw ParserError.invalidFatArchitectureTable(count: nfatArch, fileSize: file.size)
         }
 
-        return try file.read(at: 0, count: tableSize).withUnsafeBytes { ptr in
+        let table = tableSize <= head.count ? head : try file.read(at: 0, count: tableSize)
+        return try table.withUnsafeBytes { ptr in
             var archs: [Architecture] = []
 
             for architectureIndex in 0 ..< Int(nfatArch) {
