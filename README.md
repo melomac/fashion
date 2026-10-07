@@ -12,12 +12,12 @@ The project natively supports:
 * [CDHash][] of Mach-O binaries — embedded when signed, AD-HOC synthesized when not
 * multithreading
 
-Multithreaded with `--jobs 0`, `fashion` is very fast and stays under 150 MB of memory:
+Multithreaded with `--jobs 0`, `fashion` is very fast and stays well under 150 MB of memory:
 
 | Machine             | Jobs | App count |   File count    | SHA-256 duration | TLSH duration |
 |:--------------------|:----:|:---------:|:---------------:|:----------------:|:-------------:|
-| Mac Studio M2 Ultra |  24  | 274 apps  | 1,268,656 files |  1 min 18 secs   | 1 min 46 secs |
-| MacBook Air M4      |  10  | 213 apps  |   812,343 files |        50 secs   | 1 min 40 secs |
+| Mac Studio M2 Ultra |  24  | 274 apps  | 1,268,657 files |   1 min 6 secs   | 1 min 25 secs |
+| MacBook Air M4      |  10  | 213 apps  |   813,217 files |        54 secs   | 1 min 42 secs |
 
 ## Install
 
@@ -71,15 +71,27 @@ $ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quie
 
 #### CDHash
 
-Compute the Code Directory hash of Mach-O binaries, one digest per code directory, strongest first as ranked by [XNU][].
-Dual-signed binaries emit one line per candidate, labeled with the hash type (`sha1`, `sha256`, `sha256t`, `sha384`, `sha512`).
-While we print the full hash, we can match any CDHashFull or truncated CDHash.
+The CodeDirectory Hash is how \*OS identifies an executable: the hash of the directory that holds a hash of every code page, so it changes with any byte of code.
+`fashion` prints the CDHash of Mach-O binaries, one line per code directory, in the kernel's preferred order ([XNU][]).
 
-Unsigned slices are not skipped: `fashion` synthesizes their **ad-hoc CodeDirectory hash** and labels the line `ADHOC`.
-This is the identity `syspolicyd` computes for unsigned code and notarization revocation, byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`.
-A signature whose code directories Security.framework rejects counts as none, as `codesign` calls it "not signed at all": the ad-hoc identity then covers the code up to the signature.
+A binary signed with two algorithms gets two lines, each labeled with its hash type: `sha1`, `sha256`, `sha256t`, `sha384`, `sha512`.
+We print the `CandidateCDHashFull`, and `--match` accepts it as well as the truncated 20-byte `CDHash` Apple's tools usually show.
 
-Mach-O files that are not code to `codesign` — objects, dSYMs, core dumps, kernel filesets — have no such identity and yield no line.
+When `/usr/libexec/syspolicyd` meets unsigned code, it has the Security framework sign it in memory and looks up a notarization ticket for the computed hash.
+
+`fashion` builds the same signature and prints its CDHash, labeled `ADHOC`:
+
+* the `ADHOC, sha256` line is, byte for byte, the hash `syspolicyd` looks up;
+* the `ADHOC, sha1` line is its legacy counterpart.
+
+A signature Security rejects counts as none, as `codesign` says "not signed at all": the file gets its `ADHOC` lines too, computed up to where the signature starts.
+
+Mach-O files that are not code to `codesign` — object files, dSYMs, core dumps, kernel filesets — have no identity of either kind and yield no line, signed or not.
+
+This is not documented, so we mirror the Security framework and `syspolicyd` code, decompiled with [IDA Pro](https://hex-rays.com/ida-pro/) driven through [ida-mcp](https://hex-rays.com/blog/hex-rays-ida-mcp-server).
+`fashion` keeps their structure and names so the two can be read side by side.
+
+Every rule is checked against `/usr/bin/codesign`: the tests compare `fashion`'s `ADHOC` lines with `codesign --detached -s - --identifier ADHOC` on real and crafted binaries, so a change in the Security framework shows up as a failing test rather than as a silent drift.
 
 ### Quiet flag
 
@@ -162,6 +174,7 @@ Enumeration is demand-driven, so the walk never runs far ahead of hashing.
 
 The `-L` / `--follow` flag follows symlinks while walking; by default they are skipped.
 A symlink named directly on the command line is always followed, like `find -H`.
+Only regular files are hashed: a FIFO, device or socket is skipped, whether named on the command line or met in a directory.
 
 ### Exit status
 
@@ -172,8 +185,9 @@ A symlink named directly on the command line is always followed, like `find -H`.
 |  0   | success — in match mode, at least one match was found |
 |  1   | match mode — no file matched                          |
 |  2   | one or more paths could not be enumerated or hashed   |
+|  64  | usage — invalid options, or an argument that is not UTF-8 |
 
-Per-path failures (a missing path, a permission-denied directory, an unreadable file, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`; they never abort the rest of the scan.
+Per-path failures (a missing path, a permission-denied directory, an unreadable file, one that changed or was replaced while it was hashed, a name that is not UTF-8, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`; they never abort the rest of the scan.
 
 ## Misc
 
