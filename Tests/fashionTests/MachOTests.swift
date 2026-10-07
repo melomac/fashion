@@ -296,7 +296,7 @@ final class MachOTests: XCTestCase {
             XCTAssertEqual(archs[0].cpuType, CPU_TYPE_ARM64)
             XCTAssertEqual(archs[0].offset, 4096)
             let slice = Universal.sliceData(fileData: data, arch: archs[0])
-            XCTAssertEqual(slice.count, Int(archs[0].size))
+            XCTAssertEqual(slice.count, archs[0].length)
         } else {
             XCTFail("Expected fat64 binary")
         }
@@ -948,10 +948,10 @@ final class MachOTests: XCTestCase {
         guard case let .fat(archs) = try Universal.open(data: fat) else {
             return XCTFail("Expected fat")
         }
-        let image = try XCTUnwrap(MachO(File(data: fat), offset: archs[0].range.lowerBound, length: archs[0].range.count))
+        let image = try XCTUnwrap(MachO(File(data: fat), offset: archs[0].offset, length: archs[0].length))
 
-        XCTAssertEqual(image.offset, archs[0].range.lowerBound)
-        XCTAssertEqual(image.length, archs[0].range.count)
+        XCTAssertEqual(image.offset, archs[0].offset)
+        XCTAssertEqual(image.length, archs[0].length)
         XCTAssertEqual(image.cpuType, CPU_TYPE_ARM64)
         // Load commands count from the image's start, wherever it lies in the file.
         XCTAssertEqual(image.loadCommands.first?.data.startIndex, MemoryLayout<mach_header_64>.size)

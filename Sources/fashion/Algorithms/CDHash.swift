@@ -75,7 +75,7 @@ enum CDHash {
             try archs.flatMap { arch -> [SliceResult] in
                 let name = arch.name
                 // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
-                guard let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count) else {
+                guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                     self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")
                     return []
                 }

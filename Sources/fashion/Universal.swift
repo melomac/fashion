@@ -13,18 +13,14 @@ enum Universal {
     case notMachO
 
     /**
-     One architecture of a universal file: its CPU and where it lies.
+     One architecture of a universal file: its CPU, and where it lies as a `MachO` opens it.
      */
     struct Architecture {
         let cpuType: cpu_type_t
         let cpuSubtype: cpu_subtype_t
-        let offset: UInt64
-        let size: UInt64
-
         /// Where the architecture lies in its file, which `parseFat` has checked it fits.
-        var range: Range<Int> {
-            Int(self.offset) ..< Int(self.offset + self.size)
-        }
+        let offset: Int
+        let length: Int
 
         /// Its name, as `codesign --arch` spells it (see `archName`), like Security's `Architecture::name`.
         var name: String {
@@ -125,7 +121,7 @@ enum Universal {
         case let .thin(image):
             image.logicalEnd()
         case let .fat(archs):
-            archs.map(\.range.upperBound).max() ?? file.size
+            archs.map { $0.offset + $0.length }.max() ?? file.size
         case .notMachO:
             file.size
         }
@@ -202,8 +198,8 @@ enum Universal {
                 archs.append(Architecture(
                     cpuType: cpu_type_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry, as: cpu_type_t.self)),
                     cpuSubtype: cpu_subtype_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 4, as: cpu_subtype_t.self)),
-                    offset: sliceOffset,
-                    size: sliceSize,
+                    offset: start,
+                    length: size,
                 ))
             }
 

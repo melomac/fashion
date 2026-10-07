@@ -12,7 +12,7 @@ enum SymHash {
             return try archs.compactMap { arch in
                 // A universal static library carries `ar` archives, which have no symbol table to hash.
                 guard
-                    let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count),
+                    let image = try MachO(file, offset: arch.offset, length: arch.length),
                     let digest = try self.hash(image, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols)
                 else {
                     return nil

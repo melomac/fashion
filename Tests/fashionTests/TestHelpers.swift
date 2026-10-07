@@ -41,7 +41,7 @@ extension Universal {
 
     /// One architecture of a universal fixture, copied out as if extracted.
     static func sliceData(fileData: Data, arch: Architecture) -> Data {
-        Data(fileData.bytes(in: arch.range))
+        Data(fileData.bytes(in: arch.offset ..< arch.offset + arch.length))
     }
 
     static func fileEnd(data: Data) throws -> Int {

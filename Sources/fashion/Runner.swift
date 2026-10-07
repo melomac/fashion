@@ -116,7 +116,10 @@ final class Console: @unchecked Sendable {
      */
     func status(_ head: String, path: String) {
         // Not from a background job, which would draw over the shell's prompt and what is being typed.
-        guard self.isLive, tcgetpgrp(STDOUT_FILENO) == getpgrp() else {
+        guard
+            self.isLive,
+            tcgetpgrp(STDOUT_FILENO) == getpgrp()
+        else {
             return
         }
         self.lock.withLock {
@@ -142,7 +145,10 @@ final class Console: @unchecked Sendable {
      holds the lock is writing a line, which erased the status line first.
      */
     func close() {
-        guard self.isLive, self.lock.try() else {
+        guard
+            self.isLive,
+            self.lock.try()
+        else {
             return
         }
         defer {
@@ -805,9 +811,9 @@ struct Digester {
         return try archs.map { arch in
             // Parse even without --exact: a malformed slice is an error either way. A slice that is not Mach-O at
             // all is hashed whole.
-            let image = try MachO(file, offset: arch.range.lowerBound, length: arch.range.count)
-            let length = image.map { self.exact ? $0.logicalEnd() : arch.range.count } ?? arch.range.count
-            return (arch.range.lowerBound ..< arch.range.lowerBound + length, arch.name)
+            let image = try MachO(file, offset: arch.offset, length: arch.length)
+            let length = image.map { self.exact ? $0.logicalEnd() : arch.length } ?? arch.length
+            return (arch.offset ..< arch.offset + length, arch.name)
         }
     }
 
