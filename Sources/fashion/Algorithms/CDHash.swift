@@ -126,18 +126,25 @@ extension MachO {
     /**
      The slice's cdhashes, or the reason it has none (`skipReason` is set exactly when `hashes` is empty).
 
+     A slice whose filetype `codesign` takes for a generic file rather than code (`MachORep::candidate`) has none,
+     signed or not: `codesign -d` calls such a file "not signed at all" whatever its `LC_CODE_SIGNATURE` holds.
+
      A signed slice yields every code directory Security loads from its signature, strongest first per `HashType.rank`: the
      head is the kernel-enforced cdhash.
 
-     An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1), unless its filetype is one
-     `codesign` signs as a generic file rather than as code. So does a signed slice whose code directories Security
-     rejects: `codesign` calls it "not signed at all" and signs it up to where its signature starts, the code limit of
-     `MachORep::signingLimit`. A signature Security cannot read at all is an error, as `codesign` cannot sign over it.
+     An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1). So does a signed slice whose code
+     directories Security rejects: `codesign` calls it "not signed at all" and signs it up to where its signature starts,
+     the code limit of `MachORep::signingLimit`. A signature Security cannot read at all is an error, as `codesign` cannot
+     sign over it.
 
      A slice of a universal file is judged on its own, as if extracted: `codesign` instead decides a whole 32-bit
      universal file from its first slice, and treats a 64-bit one (`lipo -fat64`) as a generic file outright.
      */
     func codeDirectoryHashes(exact: Bool) throws -> (hashes: [CodeDirectoryHash], skipReason: String?) {
+        guard Self.codeFiletypes.contains(self.filetype) else {
+            return ([], "\(self.filetypeName) is not code to codesign")
+        }
+
         let signature = try self.findCodeSignature()
         if let signature {
             let hashes = try Self.loadCodeDirectories(self.signingData(signature))
@@ -148,10 +155,6 @@ extension MachO {
             if !hashes.isEmpty {
                 return (hashes, nil)
             }
-        }
-
-        guard Self.codeFiletypes.contains(self.filetype) else {
-            return ([], "\(self.filetypeName) is not code to codesign")
         }
 
         return try (self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.length)), nil)

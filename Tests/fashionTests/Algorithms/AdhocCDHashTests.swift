@@ -65,11 +65,11 @@ final class AdhocCDHashTests: XCTestCase {
     }
 
     /// `makeMachO` with a 128-byte `__TEXT` and an `LC_CODE_SIGNATURE` pointing at `signature`, appended at offset 128.
-    private func makeSignedMachO(signature: Data, declaredSignatureOffset: UInt32 = 128) -> Data {
+    private func makeSignedMachO(signature: Data, filetype: UInt32 = UInt32(MH_EXECUTE), declaredSignatureOffset: UInt32 = 128) -> Data {
         var command = Data()
         [UInt32(LC_CODE_SIGNATURE), 16, declaredSignatureOffset, UInt32(signature.count)].forEach { command.appendUInt32($0) } // cmd, cmdsize, dataoff, datasize
 
-        return self.makeMachO(commands: [command], fileSize: 128) + signature
+        return self.makeMachO(filetype: filetype, commands: [command], fileSize: 128) + signature
     }
 
     /**
@@ -446,6 +446,18 @@ final class AdhocCDHashTests: XCTestCase {
             let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
             XCTAssertEqual(hashes.count, code.contains(filetype) ? 2 : 0, slice.filetypeName)
             XCTAssertEqual(skipReason == nil, code.contains(filetype), slice.filetypeName)
+        }
+    }
+
+    func testOnlyCodeFiletypesReportTheirSignature() throws {
+        // MachORep::candidate takes any other filetype for a generic file, so codesign -d calls it "not signed at all"
+        // whatever its LC_CODE_SIGNATURE holds: no cdhash, embedded or synthesized.
+        let signature = self.superblob(slots: [(0, self.codeDirectory(hashType: 2))])
+        for (filetype, isCode) in [(MH_EXECUTE, true), (MH_DYLIB, true), (MH_OBJECT, false), (MH_DSYM, false), (MH_FILESET, false)] {
+            let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: signature, filetype: UInt32(filetype))))
+            let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+            XCTAssertEqual(hashes.map(\.adhoc), isCode ? [false] : [], slice.filetypeName)
+            XCTAssertEqual(skipReason == nil, isCode, slice.filetypeName)
         }
     }
 
