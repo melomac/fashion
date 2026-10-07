@@ -164,8 +164,9 @@ extension MachO {
 
     /**
      The superblob `LC_CODE_SIGNATURE` points at, read like `MachORep::signingData`: `BlobCore::readBlob` requires its
-     magic and a length that fits the slice and, unless the command's size is zero, that size; then
-     `EmbeddedSignatureBlob::specific` requires every blob it indexes to lie inside it. Throws otherwise.
+     magic and, unless the command's size is zero, a length within that size; then `EmbeddedSignatureBlob::specific`
+     requires every blob it indexes to lie inside it. fashion also requires the length to fit the slice, where
+     `codesign -d` reads on into the next slice of a universal file. Throws otherwise.
      */
     private func signingData(_ signature: (offset: Int, size: Int)) throws -> Data {
         let (offset, size) = signature
