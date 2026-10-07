@@ -259,16 +259,8 @@ extension MachO {
     // MARK: - Ad-hoc synthesis
 
     /**
-     Synthesize the ad-hoc cdhashes of an unsigned slice: for each hash algorithm codesign uses, the digest
-     of the CodeDirectory that `codesign --detached -s - --identifier ADHOC --digest-algorithm=sha1,sha256`
-     builds, byte for byte. Each cdhash is that directory digested under its own hash type.
-
-     Returns the SHA-256 cdhash first (the kernel-enforced identity, matching `CandidateCDHashFull sha256`)
-     then the SHA-1 cdhash (`CandidateCDHashFull sha1`).
-
-     While we print the full hash, we can match the truncated 20-byte cdhash too. Code covers `codeLimit` bytes:
-     the whole slice, its logical extent under `exact`, or what precedes a signature Security rejects.
-
+     The ad-hoc cdhashes of an unsigned slice whose code ends at `codeLimit`, SHA-256 then SHA-1: the digests of the
+     directories `codesign --detached -s - --identifier ADHOC --digest-algorithm=sha1,sha256` builds, byte for byte.
      Throws where Security fails to sign: for a version or segment command it cannot read, or a directory too large.
      */
     private func adhocCDHashes(codeLimit: Int) throws -> [CodeDirectoryHash] {
@@ -714,11 +706,7 @@ private enum HashType: UInt8 {
 }
 
 private extension Data {
-    mutating func appendBigEndian(_ value: UInt32) {
-        Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
-    }
-
-    mutating func appendBigEndian(_ value: UInt64) {
+    mutating func appendBigEndian(_ value: some FixedWidthInteger) {
         Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
 

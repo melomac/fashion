@@ -106,8 +106,6 @@ enum XARParser {
             return try algorithm.digest(file, range: toc)
         }
 
-        // Defend against a decompression bomb: reject a declared uncompressed size beyond a generous
-        // ceiling before allocating the output buffer. Real XAR tables of contents are a few MB at most.
         guard header.uncompressedTocLength <= UInt64(self.maxUncompressedTocSize) else {
             throw XARError.tocTooLarge(size: header.uncompressedTocLength)
         }
@@ -126,14 +124,10 @@ enum XARParser {
     /**
      The `size` bytes the zlib stream at `range` of the file inflates to, as zlib's `uncompress` would decompress the
      range from memory: nil unless the stream ends within the range, having filled exactly `size` bytes. Bytes after the
-     end of the stream are ignored, and an empty input is refused. An empty output gets a 1-byte buffer, as in
-     `uncompress`, which reports nothing of what lands there.
+     end of the stream are ignored. An empty output gets a 1-byte buffer, as in `uncompress`, which reports nothing of
+     what lands there.
      */
     private static func inflate(_ file: File, range: Range<Int>, size: Int) throws -> Data? {
-        guard !range.isEmpty else {
-            return nil
-        }
-
         var stream = z_stream()
         guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
             return nil

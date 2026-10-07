@@ -40,15 +40,12 @@ extension ParserError: LocalizedError {
 }
 
 /**
- A single parsed thin Mach-O image, named after Security's `MachO`: a thin file, or one architecture of a universal one.
+ A single parsed thin Mach-O image, named after Security's `MachO`: a thin file, or one architecture of a universal one,
+ which `Universal` locates.
 
  Like Security's, it reads the header and the load commands once, at initialization, into a buffer whose offsets count
  from the image's start; the command lookups, code-signature, and logical-extent accessors all reuse that single pass,
  and anything else is read at its offset when asked for (`dataAt`, `stream`).
-
- `init?(_:offset:length:)` returns nil for anything that is not a thin Mach-O and throws for one Security refuses;
- `init?(lenient:offset:length:)` keeps whatever prefix of a damaged load-command table parses, for best-effort inspection.
- For a fat binary, open the container with `Universal` and read each architecture as its own `MachO`.
  */
 struct MachO {
     /// The file the image lies in.
@@ -72,8 +69,8 @@ struct MachO {
 
     /**
      The image `length` bytes long at `offset` in `file` (the rest of the file by default), whose first bytes the caller
-     may have read already as `head`. Nil for anything that is not a thin Mach-O; throws for one too short for its
-     header.
+     may have read already as `head`, keeping whatever prefix of a damaged load-command table parses. Nil for anything
+     that is not a thin Mach-O; throws for one too short for its header.
      */
     init?(lenient file: File, offset: Int = 0, length: Int? = nil, head given: Data? = nil) throws {
         let length = length ?? file.size - offset
@@ -109,12 +106,9 @@ struct MachO {
     }
 
     /**
-     Parse a thin Mach-O as Security's `MachO` constructor does, and throw where it does: for a header the image cannot
-     hold, for a load-command table that `sizeofcmds` does not hold (`ncmds` plays no part, as in
-     `MachOBase::nextCommand`), and for a segment or symbol table command too short for its structure before the image's
-     end (`MachO::validateStructure`).
-
-     Returns nil for data that is not a thin Mach-O at all.
+     Parse a thin Mach-O as Security's `MachO` constructor does, throwing for a load-command table `parseLoadCommands`
+     rejects and for a segment or symbol table command too short for its structure before the image's end
+     (`MachO::validateStructure`). Nil for data that is not a thin Mach-O at all.
      */
     init?(_ file: File, offset: Int = 0, length: Int? = nil, head: Data? = nil) throws {
         guard let image = try MachO(lenient: file, offset: offset, length: length, head: head) else {
@@ -228,8 +222,8 @@ struct MachO {
     /**
      Where the Mach-O image ends, as Security's `MachO` decides it for strict validation: at the end of the
      `__LINKEDIT` segment or of the `LC_SYMTAB` string table, whichever command comes first. Bytes past it are
-     appended to the image, which `codesign` rejects. `Package.swift` defines `SECURITY_STRICT_VALIDATION` unless
-     the environment sets it to `NO`.
+     appended to the image, which `codesign` rejects. `Package.swift` defines `SECURITY_STRICT_VALIDATION` unless the
+     environment sets it to `NO`, for the other ending below.
 
      The whole slice when it declares neither, or an end that lies past the slice.
      */
@@ -258,8 +252,6 @@ struct MachO {
     /**
      Where the Mach-O image ends: past the header, the load commands, and every byte its segments and link-edit tables
      reference, so a dSYM keeps the `__DWARF` segment that follows `__LINKEDIT`. Bytes past it are appended to the image.
-     Built with `SECURITY_STRICT_VALIDATION=NO` in the environment; otherwise the image ends where `codesign`'s
-     strict validation expects it to.
 
      The whole slice when a command references bytes past the slice, is too short for its structure, or might
      reference bytes not modeled here.

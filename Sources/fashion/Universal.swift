@@ -37,9 +37,9 @@ enum Universal {
      since a universal static library carries `ar` archives rather than Mach-O slices.
      */
     static func open(_ file: File) throws -> Universal {
-        // A file shorter than a 32-bit mach_header is not Mach-O code to Security (MachORep::candidate), so a
-        // magic-only stub (a truncated Java class, say) is an ordinary file.
-        guard file.size >= self.minimumSize else {
+        // MachORep::candidate reads a 32-bit mach_header before it considers a file Mach-O code at all, so a magic-only
+        // stub (a truncated Java class, say) is an ordinary file, which codesign signs as such.
+        guard file.size >= MemoryLayout<mach_header>.size else {
             return .notMachO
         }
 
@@ -137,19 +137,8 @@ enum Universal {
         "unknown(\(cpuType),\(cpuSubtype))"
     }
 
-    /**
-     The fewest bytes a Mach-O file holds: `MachORep::candidate` reads a 32-bit `mach_header` before it considers a file
-     Mach-O code at all, and `codesign` signs any shorter one as a generic file.
-     */
-    private static let minimumSize = MemoryLayout<mach_header>.size
-
-    /**
-     The most slices a universal file holds, dyld's `mach_o::Universal::kMaxSliceCount`.
-
-     Compiled Java class data shares the 0xCAFEBABE magic.
-     Universal binaries have a small, big-endian, architecture count.
-     */
-    static let maxSliceCount: UInt32 = 16
+    /// The most slices a universal file holds, dyld's `kMaxSliceCount`: a Java class, 0xCAFEBABE too, declares far more.
+    private static let maxSliceCount: UInt32 = 16
 
     private static func parseFat(_ file: File, head: Data, is64: Bool) throws -> Universal {
         let nfatArch: UInt32 = head.withUnsafeBytes { ptr in
