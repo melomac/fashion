@@ -134,6 +134,30 @@ private final class BundleMarker {}
  */
 let fashionEnvironment = ProcessInfo.processInfo.environment.filter { $0.key != "OS_ACTIVITY_DT_MODE" }
 
+/**
+ Run the built `fashion` on `arguments`, its output discarded: the exit status and the lines it wrote to stderr. Through
+ `sh`, which runs `script` with `$0` the binary and `$1`… the arguments, it can be handed bytes a Swift string cannot
+ hold.
+ */
+func runFashion(_ arguments: [String], sh script: String? = nil) throws -> (status: Int32, errors: [String]) {
+    let process = Process()
+    if let script {
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = try ["-c", script, fashionExecutable().path] + arguments
+    } else {
+        process.executableURL = try fashionExecutable()
+        process.arguments = arguments
+    }
+    process.environment = fashionEnvironment
+    process.standardOutput = FileHandle.nullDevice
+    let stderr = Pipe()
+    process.standardError = stderr
+    try process.run()
+    let output = stderr.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return (process.terminationStatus, String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init))
+}
+
 extension URL {
     /**
      Appends a path component using the `/` operator. Test convenience.

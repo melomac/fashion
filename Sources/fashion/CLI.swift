@@ -10,6 +10,7 @@ private enum OptionError: Error, Equatable {
     case decompressWithoutXarToc
     case negativeJobs
     case negativeScore
+    case argumentNotUTF8(Int)
 }
 
 extension OptionError: LocalizedError {
@@ -31,6 +32,8 @@ extension OptionError: LocalizedError {
             "--jobs must be zero or greater."
         case .negativeScore:
             "--score must be zero or greater."
+        case let .argumentNotUTF8(index):
+            "Argument \(index) is not valid UTF-8."
         }
     }
 }
@@ -179,6 +182,11 @@ struct Fashion: ParsableCommand {
         }
         if self.matchOptions.score < 0 {
             throw ValidationError(OptionError.negativeScore)
+        }
+        // CommandLine.arguments repairs bytes that are not UTF-8 to U+FFFD, which names another path (a name copied
+        // raw from an NFS or FAT volume, say): refuse to hash something else.
+        for index in 1 ..< Int(CommandLine.argc) where String(validatingCString: CommandLine.unsafeArgv[index]!) == nil {
+            throw ValidationError(OptionError.argumentNotUTF8(index))
         }
     }
 

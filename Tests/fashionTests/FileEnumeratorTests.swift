@@ -156,23 +156,6 @@ final class FileEnumeratorTests: XCTestCase {
         }
     }
 
-    /**
-     Run the built `fashion` on `arguments`: its exit status and the lines it wrote to stderr.
-     */
-    private func run(_ arguments: [String]) throws -> (status: Int32, errors: [String]) {
-        let process = Process()
-        process.executableURL = try fashionExecutable()
-        process.arguments = arguments
-        process.environment = fashionEnvironment
-        process.standardOutput = FileHandle.nullDevice
-        let stderr = Pipe()
-        process.standardError = stderr
-        try process.run()
-        let output = stderr.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return (process.terminationStatus, String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init))
-    }
-
     func testRootsReportTheirOwnErrors() throws {
         // Each root that cannot be walked is reported with what fts met there: a path in an unreadable directory is
         // not missing, a file named as a directory is not one, and a root symlink to nothing does not exist.
@@ -191,7 +174,7 @@ final class FileEnumeratorTests: XCTestCase {
         let roots = [(dir / "locked" / "f").path, (dir / "file").path + "/", (dir / "dangling").path, (dir / "missing").path]
         XCTAssertTrue(self.sortedWalk(roots).isEmpty)
 
-        let (status, errors) = try self.run(["--sort"] + roots)
+        let (status, errors) = try runFashion(["--sort"] + roots)
         XCTAssertEqual(status, 2)
         XCTAssertEqual(errors, [
             "fashion: \(dir.path)/dangling: No such file or directory",
@@ -218,11 +201,11 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertEqual(self.sortedWalk([long]), [])
 
         // Sorted, "/…" comes before "x/…": fts orders the roots it can walk.
-        var (status, errors) = try self.run(["--sort", tooLong, missing.path])
+        var (status, errors) = try runFashion(["--sort", tooLong, missing.path])
         XCTAssertEqual(status, 2)
         XCTAssertEqual(errors, ["fashion: \(missing.path): No such file or directory", "fashion: \(tooLong): File name too long"])
 
-        (status, errors) = try self.run(["--sort", file.path, long, tooLong])
+        (status, errors) = try runFashion(["--sort", file.path, long, tooLong])
         XCTAssertEqual(status, 2)
         XCTAssertEqual(errors, ["fashion: \(long): File name too long", "fashion: \(tooLong): File name too long"])
     }
@@ -237,7 +220,7 @@ final class FileEnumeratorTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let (status, errors) = try self.run([url.path])
+        let (status, errors) = try runFashion([url.path])
         XCTAssertEqual(status, 2)
         XCTAssertEqual(errors, ["fashion: \(url.path): Permission denied"])
     }
