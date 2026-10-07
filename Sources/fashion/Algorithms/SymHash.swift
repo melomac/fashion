@@ -32,8 +32,8 @@ enum SymHash {
     // MARK: - Symbol Table
 
     /**
-     The most bytes of external symbol names a symbol table may add up to (64 MiB). Overlapping names let a small crafted
-     table reach gigabytes; the largest of 4,806 large slices of real applications held 2.2 MiB.
+     The most bytes of external symbol names a symbol table may add up to (64 MiB): overlapping names let a small crafted
+     table reach gigabytes.
      */
     static let maxSymbolNamesLength = 64 << 20
 
@@ -66,12 +66,11 @@ enum SymHash {
      The names of the external undefined symbols in a symbol table, in table order: entries whose type is exactly
      `N_EXT`, with no `N_STAB` bits and the `N_UNDF` section type, and each name up to its NUL or the end of the table.
 
-     Neither table is held whole: real ones reach hundreds of MiB (an Affinity framework holds 200 MiB of strings).
-     The entries are read in chunks, then the string table in windows that start at the names wanted, skipping what lies
-     between them. Names may overlap in a string table, so one NUL can end several: they share one buffer, and their
-     total length is bounded by `maxSymbolNamesLength` rather than by the file, since overlapping names let a small
-     crafted table reach gigabytes. The names are checked in table order, as they would be one at a time: an index
-     past the string table is an error unless the names before it already went beyond the limit.
+     Neither table is held whole: the entries are read in chunks, and the string table in windows that start at the names
+     wanted, skipping what lies between them. Names may overlap in a string table, so one NUL can end several: they share
+     one buffer, bounded by `maxSymbolNamesLength` rather than by the file. The names are checked in table order, as they
+     would be one at a time: an index past the string table is an error unless the names before it already went beyond
+     the limit.
 
      The image is `length` bytes at `offset` in `file`, which its `symtab` offsets count from; `is64` and `swap` describe
      its header.
@@ -120,34 +119,38 @@ enum SymHash {
             }
         }
 
-        // Each wanted name opens where it starts and closes, with every other one open, at the next NUL.
-        var starts = Set(indexes).sorted()[...]
-        var names: [Int: Data] = [:]
+        // Each wanted name opens where it starts and closes, with every other one open, at the next NUL. The symbols
+        // are visited in the order of their names in the table, which several may share.
+        var names = [Data](repeating: Data(), count: indexes.count)
+        var order = indexes.indices.sorted { indexes[$0] < indexes[$1] }[...]
         var open: [Int] = []
         var pending = Data()
         var pendingStart = 0
-        var windowStart = starts.first ?? tableSize
+        var windowStart = order.first.map { indexes[$0] } ?? tableSize
         windows: while windowStart < tableSize {
-            let window = try file.read(at: offset + tableOffset + windowStart, count: min(File.chunkSize, tableSize - windowStart))
+            // A window reaches 16 KiB past the last name wanted, where the names of real tables end; a longer name
+            // reads on from where the window ends.
+            let count = min(File.chunkSize, tableSize - windowStart, order.last.map { indexes[$0] - windowStart + 16384 } ?? File.chunkSize)
+            let window = try file.read(at: offset + tableOffset + windowStart, count: count)
             let windowEnd = windowStart + window.count
             var at = windowStart
             while at < windowEnd {
                 if open.isEmpty {
-                    guard let start = starts.first else {
+                    guard let symbol = order.first else {
                         break windows
                     }
-                    at = start
+                    at = indexes[symbol]
                     guard at < windowEnd else {
                         break
                     }
                     pending = Data()
                     pendingStart = at
                 }
-                while starts.first == at {
-                    open.append(starts.removeFirst())
+                while let symbol = order.first, indexes[symbol] == at {
+                    open.append(order.removeFirst())
                 }
 
-                let stop = min(windowEnd, starts.first ?? windowEnd)
+                let stop = min(windowEnd, order.first.map { indexes[$0] } ?? windowEnd)
                 let nul = window[(at - windowStart) ..< (stop - windowStart)].firstIndex(of: 0)
                 let end = nul.map { windowStart + $0 } ?? stop
                 pending.append(window[(at - windowStart) ..< (end - windowStart)])
@@ -156,8 +159,8 @@ enum SymHash {
                 }
                 at = end
                 if nul != nil {
-                    for start in open {
-                        names[start] = pending[(start - pendingStart)...]
+                    for symbol in open {
+                        names[symbol] = pending[(indexes[symbol] - pendingStart)...]
                     }
                     open.removeAll()
                     at += 1
@@ -166,18 +169,18 @@ enum SymHash {
             windowStart = at
         }
         // Names still open run to the end of the table.
-        for start in open {
-            names[start] = pending[(start - pendingStart)...]
+        for symbol in open {
+            names[symbol] = pending[(indexes[symbol] - pendingStart)...]
         }
 
-        let length = indexes.reduce(0) { $0 + names[$1]!.count }
-        guard length <= self.maxSymbolNamesLength else {
+        let total = names.reduce(0) { $0 + $1.count }
+        guard total <= self.maxSymbolNamesLength else {
             throw ParserError.symbolNamesTooLong(limit: self.maxSymbolNamesLength)
         }
         if let badIndex {
             throw badIndex
         }
-        return indexes.map { names[$0]! }
+        return names
     }
 
     // MARK: - Private
