@@ -2,40 +2,39 @@ import CTLSH
 import Foundation
 
 /**
- Bridge to libtlsh for fuzzy hashing (Trend Micro Locality Sensitive Hash).
+ Bridge to libtlsh (Trend Micro Locality Sensitive Hash), fed through `TLSHHasher`.
 
- The upstream C++ library (trendmicro/tlsh) has two related issues with large files:
+ fashion feeds libtlsh at most `maximumDataSize` bytes of a file (`ByteHash.maximumLength`), where a naive caller
+ would feed it the whole file. Two things in the library make a longer input undefined:
 
- 1. The total data length accumulator is an unsigned int (32-bit) in `tlsh_impl.h` line 160, which wraps past ~4 GiB.
+ - `TlshImpl` counts its input in a 32-bit `data_len` (`tlsh_impl.h`), which every `update` advances: past 4 GiB it
+   wraps, and the digest then describes a length the data does not have.
+ - `final` turns that length into the digest's L value with `l_capturing` (`tlsh_util.cpp`), a binary search over the
+   170-entry `topval` table, whose last entry is 4,224,281,216 (3.93 GiB): a longer input makes the search read past
+   the table, undefined behaviour in C++, before the counter even wraps.
 
- 2. The Lvalue is computed by `l_capturing()` (`tlsh_util.cpp` line 4877), a binary search over a hardcoded lookup table (topval[170])
-   The last entry is topval[169] = 4,224,281,216 (~3.93 GiB).
-   Data lengths beyond this cause an out-of-bounds read — undefined behavior in C++.
+ Trend Micro left the C++ library as it is and defined the TLSH of a longer input as that of its first
+ `maximumDataSize` bytes (trendmicro/tlsh#99), the Java port's `TlshUtil.MAX_DATA_LENGTH` since TLSH 4.6.0. fashion
+ applies that definition whatever libtlsh it is built against: the cap changes no digest under it, and two files
+ that differ only past it share a digest, as they do in Java, rather than have none that is defined.
 
- Trend Micro acknowledged the issue (GitHub issue #99, version 4.6.0) and defined the TLSH of a file as the TLSH of its first ~4 GiB.
- The Java port enforces this via `MAX_DATA_LENGTH` = topval[169]; `ByteHash.maximumLength` applies the same cap.
-
- The cap is applied unconditionally (fail-closed): capping never changes a result for the common
- sub-4 GiB case and can only ever truncate a pathologically large input, so it is always safe — unlike
- gating it on a runtime version string, which would silently re-expose the C++ undefined behavior if the
- string ever changed.
+ Two more things are this build's rather than the library's. The digest is the 70-digit `T1` form of a 128-bucket,
+ 1-byte-checksum build (`BUCKETS_128` and `CHECKSUM_1B` in Package.swift, see `tlsh_version.h`), the form the `tlsh`
+ tool prints. And libtlsh makes no digest for an input under its `MIN_DATA_LENGTH` of 50 bytes, or with too little
+ variety: `TLSHHasher.finalize` reports that as nil, not as the empty string `getHash` returns.
  */
 enum TLSHBridge {
     /**
-     Minimum data size for TLSH computation.
-     */
-    static let minimumDataSize = 50
+     Maximum data size fed to libtlsh.
 
-    /**
-     Maximum data size fed to libtlsh when linked against a T1 build.
-
-     This is topval[169] from `tlsh_util.cpp` — the last entry in the `l_capturing()` lookup table.
-     Beyond this value, the binary search in `l_capturing()` reads out of bounds (UB in C++).
+     This is `topval[169]` from `tlsh_util.cpp` — the last entry in the `l_capturing()` lookup table.
+     Beyond this value, the binary search in `l_capturing()` reads out of bounds (UB in C++), before `data_len`, the
+     32-bit counter in `tlsh_impl.h`, would even wrap past 4 GiB.
      The Java port enforces the same limit as `TlshUtil.MAX_DATA_LENGTH`.
 
-     See:
-     https://github.com/trendmicro/tlsh/blob/master/src/tlsh_util.cpp#L4872
-     https://github.com/trendmicro/tlsh/blob/master/include/tlsh_impl.h#L160
+     See, at the submodule's commit:
+     https://github.com/trendmicro/tlsh/blob/ebdec8fde93a4ac359437f4f3796c78d3ae433bf/src/tlsh_util.cpp#L4872
+     https://github.com/trendmicro/tlsh/blob/ebdec8fde93a4ac359437f4f3796c78d3ae433bf/include/tlsh_impl.h#L163
      */
     static let maximumDataSize: UInt64 = 4_224_281_216
 
@@ -74,20 +73,6 @@ enum TLSHBridge {
     }
 
     /**
-     Close a running hash and return its upper-case `T1` digest, or nil when libtlsh produced none.
-     */
-    fileprivate static func digest(of context: tlsh_t?) -> String? {
-        tlsh_final(context)
-
-        guard let cString = tlsh_get_hash(context, 1) else {
-            return nil
-        }
-
-        let hash = String(cString: cString)
-        return hash.isEmpty ? nil : hash.uppercased()
-    }
-
-    /**
      The 70 hex digits of a digest as this build makes them (128 buckets, a 1-byte checksum), after an optional `T1`
      prefix; nil for any other string. `tlsh_from_str` reads the digits it needs and refuses only a 71st one, so it would
      take a digest followed by anything else.
@@ -110,7 +95,6 @@ enum TLSHBridge {
  */
 final class TLSHHasher: ByteHasher {
     private let context = tlsh_new()
-    private var length = 0
 
     deinit {
         tlsh_free(self.context)
@@ -121,16 +105,18 @@ final class TLSHHasher: ByteHasher {
             return
         }
         tlsh_update(self.context, base, UInt32(bytes.count))
-        self.length += bytes.count
     }
 
     /**
-     The digest, or nil below `TLSHBridge.minimumDataSize` bytes or when libtlsh makes none.
+     The upper-case `T1` digest, or nil when libtlsh makes none: for an input under `MIN_DATA_LENGTH` (50 bytes) or
+     too uniform for one.
      */
     func finalize() -> String? {
-        guard self.length >= TLSHBridge.minimumDataSize else {
+        tlsh_final(self.context)
+        guard let cString = tlsh_get_hash(self.context, 1) else {
             return nil
         }
-        return TLSHBridge.digest(of: self.context)
+        let hash = String(cString: cString)
+        return hash.isEmpty ? nil : hash.uppercased()
     }
 }
