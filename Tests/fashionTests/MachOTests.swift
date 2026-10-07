@@ -717,6 +717,30 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    func testSegmentNamesCompareAsBytes() throws {
+        // Security compares segname with strncmp: "__LIN\u{212A}EDIT", a Kelvin sign for the K, equals "__LINKEDIT" as
+        // a Swift string but is another segment to codesign, which neither stops checking commands at it nor ends the
+        // image there.
+        let name = Data("__LIN\u{212A}EDIT".utf8)
+        var kelvin = self.command(LC_SEGMENT_64, size: 72)
+        kelvin.replaceSubrange(8 ..< 8 + name.count, with: name)
+        kelvin.replaceSubrange(48 ..< 56, with: withUnsafeBytes(of: UInt64(200).littleEndian) { Data($0) }) // filesize
+
+        let commands = kelvin + self.command(LC_SEGMENT_64, size: 16)
+        XCTAssertThrowsError(try MachO(self.thinHeader(ncmds: 2, sizeofcmds: UInt32(commands.count), commands: commands))) { error in
+            XCTAssertEqual(error as? ParserError, .truncatedLoadCommand(cmd: UInt32(LC_SEGMENT_64), size: 16, expectedSize: 72))
+        }
+
+        var image = self.thinHeader(ncmds: 1, sizeofcmds: 72, commands: kelvin)
+        image.append(Data(repeating: 0xab, count: 300 - image.count))
+        XCTAssertNil(try XCTUnwrap(MachO(image)).findSegment("__LINKEDIT"))
+#if SECURITY_STRICT_VALIDATION
+        XCTAssertEqual(MachO.logicalEnd(data: image), 300)
+#else
+        XCTAssertEqual(MachO.logicalEnd(data: image), 200)
+#endif
+    }
+
     func testSliceRejectsZeroSizeCommand() {
         // A command header declaring cmdsize 0 can never advance the parser; it must not count as a command.
         var zeroSized = Data()

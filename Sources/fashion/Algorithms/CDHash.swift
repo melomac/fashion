@@ -350,7 +350,7 @@ extension MachO {
 
         for index in 0 ..< Int(count) {
             let at = headerSize + index * sectionSize
-            guard Self.name(of: text.data.dropFirst(at).prefix(16)) == "__info_plist" else {
+            guard Self.field(text.data.dropFirst(at).prefix(16), is: "__info_plist") else {
                 continue
             }
 

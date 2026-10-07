@@ -433,11 +433,11 @@ final class CDHashTests: XCTestCase {
         try Data("<plist/>".utf8).write(to: input)
         var data = try Data(contentsOf: self.compile("built", in: dir, ["-arch", "arm64", "-Wl,-sectcreate,__TEXT,__info_plist,\(input.path())"]))
 
-        let text = try XCTUnwrap(MachO.loadCommands(data: data).first { $0.segmentName == "__TEXT" })
+        let text = try XCTUnwrap(MachO.loadCommands(data: data).first { $0.isSegment(named: "__TEXT") })
         let sections = text.data.startIndex + MemoryLayout<segment_command_64>.size
         let count = try Int(text.load(segment_command_64.self).nsects)
         let at = try XCTUnwrap((0 ..< count).map { sections + $0 * MemoryLayout<section_64>.size }.first { at in
-            MachO.name(of: data[at ..< at + 16]) == "__info_plist"
+            MachO.field(data[at ..< at + 16], is: "__info_plist")
         })
         let offset = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: section_64.self) }.offset
         let sizeAt = at + MemoryLayout<section_64>.offset(of: \.size)!

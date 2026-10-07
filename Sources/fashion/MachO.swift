@@ -134,7 +134,7 @@ struct MachO {
             default:
                 continue
             }
-            if command.cmd == UInt32(LC_SYMTAB) || command.segmentName == "__LINKEDIT" {
+            if command.cmd == UInt32(LC_SYMTAB) || command.isSegment(named: "__LINKEDIT") {
                 break
             }
         }
@@ -177,7 +177,7 @@ struct MachO {
     func findSegment(_ name: String) throws -> LoadCommand? {
         for command in self.loadCommands where [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(command.cmd) {
             _ = try command.load(segment_command.self)
-            if command.segmentName == name {
+            if command.isSegment(named: name) {
                 return command
             }
         }
@@ -232,7 +232,7 @@ struct MachO {
      */
     func logicalEnd() -> Int {
         for command in self.loadCommands {
-            let isLinkedit = command.segmentName == "__LINKEDIT"
+            let isLinkedit = command.isSegment(named: "__LINKEDIT")
             let range: (offset: UInt64, size: UInt64)? = switch command.cmd {
             case UInt32(LC_SEGMENT) where isLinkedit:
                 command.payload(as: segment_command.self).map { (UInt64(self.sw($0.fileoff)), UInt64(self.sw($0.filesize))) }
@@ -402,10 +402,11 @@ struct MachO {
     }
 
     /**
-     The NUL-padded name in a 16-byte `segname` / `sectname` field.
+     Whether a NUL-padded 16-byte `segname` / `sectname` field holds `name`, byte for byte as Security's `strncmp`
+     compares them: a name that only reads alike, with a Kelvin sign for the K of `__LINKEDIT`, is another name.
      */
-    static func name(of field: some Collection<UInt8>) -> String {
-        String(decoding: field.prefix { $0 != 0 }, as: UTF8.self)
+    static func field(_ field: some Collection<UInt8>, is name: String) -> Bool {
+        field.prefix { $0 != 0 }.elementsEqual(name.utf8)
     }
 
     /**
@@ -510,9 +511,9 @@ extension MachO.LoadCommand {
     }
 
     /**
-     The name of an `LC_SEGMENT` or `LC_SEGMENT_64` (`segname` sits at the same offset in both), nil for any other command.
+     Whether the command is an `LC_SEGMENT` or `LC_SEGMENT_64` named `name` (`segname` sits at the same offset in both).
      */
-    var segmentName: String? {
-        [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(self.cmd) ? MachO.name(of: self.data.dropFirst(8).prefix(16)) : nil
+    func isSegment(named name: String) -> Bool {
+        [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(self.cmd) && MachO.field(self.data.dropFirst(8).prefix(16), is: name)
     }
 }
