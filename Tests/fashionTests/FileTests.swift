@@ -36,12 +36,34 @@ final class FileTests: XCTestCase {
         XCTAssertEqual(try file.read(at: 1000, count: 0), Data())
     }
 
-    func testReadPastTheEndThrows() throws {
-        // Like a file that shrank since it was opened: the bytes checked against its size are no longer there.
-        let file = try File(data: Data(repeating: 0xab, count: 1000))
+    func testReadReportsAFileThatShrank() throws {
+        // The bytes checked against the size at open are no longer there: the sizes then and now say so.
+        let url = FileManager.default.temporaryDirectory / "fashion-shrinking-\(UUID())"
+        try Data(repeating: 0xab, count: 1000).write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let file = try File(path: url.path())
+        XCTAssertEqual(truncate(url.path(), 990), 0)
 
-        XCTAssertThrowsError(try file.read(at: 990, count: 20)) { error in
-            XCTAssertEqual(error as? FileError, .sizeChanged(expected: 20, actual: 10))
+        XCTAssertThrowsError(try file.read(at: 980, count: 20)) { error in
+            XCTAssertEqual(error as? FileError, .sizeChanged(opened: 1000, now: 990))
+        }
+    }
+
+    func testReadReportsAFileReplaced() throws {
+        // The one opened was cut short, and the path names another file by the time the read comes up short.
+        let url = FileManager.default.temporaryDirectory / "fashion-replaced-\(UUID())"
+        try Data(repeating: 0xab, count: 1000).write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let file = try File(path: url.path())
+        XCTAssertEqual(truncate(url.path(), 10), 0)
+        try Data(repeating: 0xcd, count: 1000).write(to: url, options: .atomic)
+
+        XCTAssertThrowsError(try file.read(at: 0, count: 1000)) { error in
+            XCTAssertEqual(error as? FileError, .replaced)
         }
     }
 
@@ -50,7 +72,7 @@ final class FileTests: XCTestCase {
         let file = try File(data: content)
 
         var collected = Data()
-        XCTAssertEqual(try file.stream(0 ..< content.count) { collected.append(contentsOf: $0) }, content.count)
+        try file.stream(0 ..< content.count) { collected.append(contentsOf: $0) }
         XCTAssertEqual(collected, content)
     }
 
@@ -58,14 +80,22 @@ final class FileTests: XCTestCase {
         let file = try File(data: Data((0 ..< 1000).map { UInt8($0 & 0xff) }))
 
         var collected = Data()
-        XCTAssertEqual(try file.stream(10 ..< 110) { collected.append(contentsOf: $0) }, 100)
+        try file.stream(10 ..< 110) { collected.append(contentsOf: $0) }
         XCTAssertEqual(collected, Data((10 ..< 110).map { UInt8($0) }))
     }
 
-    func testStreamStopsAtTheEnd() throws {
-        let file = try File(data: Data(repeating: 0xab, count: 1000))
+    func testStreamReportsAFileThatShrank() throws {
+        let url = FileManager.default.temporaryDirectory / "fashion-shrinking-\(UUID())"
+        try Data(repeating: 0xab, count: 1000).write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let file = try File(path: url.path())
+        XCTAssertEqual(truncate(url.path(), 900), 0)
 
-        XCTAssertEqual(try file.stream(900 ..< 1900) { _ in }, 100)
+        XCTAssertThrowsError(try file.stream(0 ..< 1000) { _ in }) { error in
+            XCTAssertEqual(error as? FileError, .sizeChanged(opened: 1000, now: 900))
+        }
     }
 
     func testMessagesLeaveOutFoundationsPrefix() {
@@ -73,6 +103,6 @@ final class FileTests: XCTestCase {
         XCTAssertEqual(File.message(for: Errno.permissionDenied), "Permission denied")
         let wrapped = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError, userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))])
         XCTAssertEqual(File.message(for: wrapped), "Permission denied")
-        XCTAssertEqual(File.message(for: FileError.sizeChanged(expected: 2, actual: 1)), "File changed size while hashing (expected 2 bytes, read 1)")
+        XCTAssertEqual(File.message(for: FileError.sizeChanged(opened: 2, now: 1)), "File changed size while hashing (2 bytes when opened, 1 now)")
     }
 }

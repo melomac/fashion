@@ -2,15 +2,20 @@ import Foundation
 import System
 
 enum FileError: Error, Equatable {
-    case sizeChanged(expected: Int, actual: Int)
+    /// A read came up short: the file is `now` bytes long, `opened` when it was opened.
+    case sizeChanged(opened: Int, now: Int)
+    /// A read came up short, and the path names another file now, or none.
+    case replaced
     case notRegularFile
 }
 
 extension FileError: LocalizedError {
     var errorDescription: String? {
         switch self {
-        case let .sizeChanged(expected, actual):
-            "File changed size while hashing (expected \(String(expected, pluralizing: "byte")), read \(actual))"
+        case let .sizeChanged(opened, now):
+            "File changed size while hashing (\(String(opened, pluralizing: "byte")) when opened, \(now) now)"
+        case .replaced:
+            "File replaced while hashing"
         case .notRegularFile:
             "Not a regular file"
         }
@@ -31,7 +36,10 @@ final class File {
 
     /// The size when the file was opened: every range read from it is checked against this size.
     let size: Int
+    private let path: String
     private let fd: FileDescriptor
+    /// The device and inode opened, which the path may no longer name by the time a read comes up short.
+    private let identity: (dev_t, ino_t)
 
     /**
      Open the regular file at `path`. The walk found one there, but the path may name something else by the time it is
@@ -54,8 +62,10 @@ final class File {
         _ = fcntl(fd.rawValue, F_SETFL, 0)
         _ = fcntl(fd.rawValue, F_NOCACHE, 1)
 
+        self.path = path
         self.fd = fd
         self.size = Int(info.st_size)
+        self.identity = (info.st_dev, info.st_ino)
     }
 
     deinit {
@@ -76,17 +86,16 @@ final class File {
             try self.read(at: offset, into: buffer)
         }
         guard filled == count else {
-            throw FileError.sizeChanged(expected: count, actual: filled)
+            throw self.shortRead()
         }
         return data
     }
 
     /**
      Stream `range` through `consume` in chunks, the way Security's `CodeDirectory::Builder` reads the code of one
-     architecture from the descriptor at its offset. Returns the count read, short of the range only when the file ends
-     first.
+     architecture from the descriptor at its offset. Throws when the file no longer holds the range.
      */
-    func stream(_ range: Range<Int>, _ consume: (UnsafeRawBufferPointer) throws -> Void) throws -> Int {
+    func stream(_ range: Range<Int>, _ consume: (UnsafeRawBufferPointer) throws -> Void) throws {
         // The buffer is mapped from the kernel rather than taken from malloc: hash threads freeing a 1 MiB block per
         // file left about 100 MiB of emptied malloc regions resident, while unmapping returns the pages at once, and a
         // short file only touches the pages it fills.
@@ -103,14 +112,13 @@ final class File {
 
         var offset = range.lowerBound
         while offset < range.upperBound {
-            let filled = try self.read(at: offset, into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<min(Self.chunkSize, range.upperBound - offset)]))
-            if filled == 0 {
-                break
+            let count = min(Self.chunkSize, range.upperBound - offset)
+            guard try self.read(at: offset, into: UnsafeMutableRawBufferPointer(rebasing: buffer[..<count])) == count else {
+                throw self.shortRead()
             }
-            try consume(UnsafeRawBufferPointer(rebasing: buffer[..<filled]))
-            offset += filled
+            try consume(UnsafeRawBufferPointer(rebasing: buffer[..<count]))
+            offset += count
         }
-        return offset - range.lowerBound
     }
 
     /**
@@ -148,6 +156,18 @@ final class File {
             throw Errno(rawValue: errno)
         }
         return Data(bytesNoCopy: base, count: count, deallocator: .unmap)
+    }
+
+    /**
+     The error for a read that came up short of the size the file had when it was opened: the path has been replaced
+     (it names another file now, or none), or the file itself changed size.
+     */
+    private func shortRead() -> FileError {
+        var now = stat()
+        guard stat(self.path, &now) == 0, (now.st_dev, now.st_ino) == self.identity else {
+            return .replaced
+        }
+        return .sizeChanged(opened: self.size, now: Int(now.st_size))
     }
 
     /**

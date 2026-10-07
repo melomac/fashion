@@ -61,10 +61,7 @@ enum ByteHash: String {
         let range = range ?? 0 ..< file.size
         let length = min(range.count, self.maximumLength)
         var hasher = try self.hasher(length: length)
-        let count = try file.stream(range.lowerBound ..< range.lowerBound + length) { hasher.update($0) }
-        guard count == length else {
-            throw FileError.sizeChanged(expected: length, actual: count)
-        }
+        try file.stream(range.lowerBound ..< range.lowerBound + length) { hasher.update($0) }
         return try hasher.finalize()
     }
 

@@ -115,28 +115,31 @@ final class ByteHashTests: XCTestCase {
         }
     }
 
-    func testRangePastTheEndThrows() throws {
-        // Like a file that shrank between finding a range and reading it: fewer bytes are read than the range holds.
+    func testShrunkFileThrows() throws {
+        // A file that no longer holds the range by the time it is read fails closed, whatever the hash.
         let url = try self.tmpFile(Data("hello".utf8))
         defer {
             try? FileManager.default.removeItem(at: url)
         }
 
         for hash: ByteHash in [.md5, .sha256, .git, .ssdeep, .tlsh] {
-            XCTAssertThrowsError(try hash.digest(File(path: url.path()), range: 0 ..< 999)) { error in
-                XCTAssertEqual(error as? FileError, .sizeChanged(expected: 999, actual: 5))
+            try Data("hello".utf8).write(to: url)
+            let file = try File(path: url.path())
+            XCTAssertEqual(truncate(url.path(), 2), 0)
+            XCTAssertThrowsError(try hash.digest(file)) { error in
+                XCTAssertEqual(error as? FileError, .sizeChanged(opened: 5, now: 2), "\(hash)")
             }
         }
     }
 
     func testSizeChangedDescriptionAgreesWithCount() {
         XCTAssertEqual(
-            FileError.sizeChanged(expected: 1, actual: 2).localizedDescription,
-            "File changed size while hashing (expected 1 byte, read 2)",
+            FileError.sizeChanged(opened: 1, now: 2).localizedDescription,
+            "File changed size while hashing (1 byte when opened, 2 now)",
         )
         XCTAssertEqual(
-            FileError.sizeChanged(expected: 2, actual: 1).localizedDescription,
-            "File changed size while hashing (expected 2 bytes, read 1)",
+            FileError.sizeChanged(opened: 2, now: 1).localizedDescription,
+            "File changed size while hashing (2 bytes when opened, 1 now)",
         )
     }
 }

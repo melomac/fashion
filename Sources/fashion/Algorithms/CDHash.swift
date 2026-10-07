@@ -578,7 +578,7 @@ private struct CodeDirectoryBuilder {
         // Pages are hashed as the code streams through; one cut by the end of a chunk waits for the rest of it.
         let pageSize = 1 << Int(self.pageSizeLog)
         var partial = Data()
-        let count = try image.stream(0 ..< self.codeLimit) { chunk in
+        try image.stream(0 ..< self.codeLimit) { chunk in
             var chunk = chunk
             if !partial.isEmpty {
                 let fill = min(pageSize - partial.count, chunk.count)
@@ -595,9 +595,6 @@ private struct CodeDirectoryBuilder {
                 chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(pageSize))
             }
             partial.append(contentsOf: chunk)
-        }
-        guard count == self.codeLimit else {
-            throw FileError.sizeChanged(expected: self.codeLimit, actual: count)
         }
         // The last page, shorter than the others.
         if !partial.isEmpty {

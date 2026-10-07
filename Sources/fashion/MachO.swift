@@ -150,9 +150,9 @@ struct MachO {
     }
 
     /**
-     Stream `range` of the image through `consume`; returns the count read, short only when the file ends first.
+     Stream `range` of the image through `consume`; throws when the file no longer holds it.
      */
-    func stream(_ range: Range<Int>, _ consume: (UnsafeRawBufferPointer) throws -> Void) throws -> Int {
+    func stream(_ range: Range<Int>, _ consume: (UnsafeRawBufferPointer) throws -> Void) throws {
         try self.file.stream(self.offset + range.lowerBound ..< self.offset + range.upperBound, consume)
     }
 
