@@ -57,6 +57,10 @@ Even worse, on Java, the code was using a signed integer (~2GB).
 
 `fashion` follows Trend Micro recommendations and backports the Java fix from TLSH 4.6.0 to define the TLSH of a file as the TLSH of its first ~4GB.
 
+A TLSH distance counts file length: padding, such as appended null bytes, adds to it even when the content is the same.
+`--xlen` leaves the length out of `--match`, as the `tlsh` tool's `-xlen` does: a 50 KB binary padded with zeros to 2.9 MB is then 1 away from itself instead of 505.
+`--exact` trims a Mach-O to its logical extent instead, but cannot trim a digest computed elsewhere; ssdeep is not affected by zeros.
+
 #### Git hash
 
 The `git` and `git256` algo compute the hash of a [Git](https://git-scm.com/) blob object.

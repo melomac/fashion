@@ -20,6 +20,16 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(self.error(["--score=-1"]), "--score must be zero or greater.")
     }
 
+    func testXlenNeedsTLSHMatch() {
+        // --xlen only changes how TLSH digests are compared: anywhere else it would be silently ignored.
+        let digest = "T13D338D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
+        let refused = "--xlen requires --algo tlsh and --match."
+        XCTAssertEqual(self.error(["x", "--xlen"]), refused)
+        XCTAssertEqual(self.error(["x", "--algo", "tlsh", "--xlen"]), refused)
+        XCTAssertEqual(self.error(["x", "--algo", "ssdeep", "--match", "3:a:b", "--xlen"]), refused)
+        XCTAssertNil(self.error(["x", "--algo", "tlsh", "--match", digest, "--xlen"]))
+    }
+
     func testArgumentsMustBeUTF8() throws {
         // CommandLine.arguments repairs bytes that are not UTF-8 to U+FFFD, another path that may name another file:
         // the run is refused before anything is hashed. A Japanese name is UTF-8 like any other.

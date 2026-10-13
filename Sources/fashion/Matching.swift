@@ -8,14 +8,15 @@ enum Matching {
     static let minPrefixHexLength = 8
 
     /**
-     Check if a digest matches any of the target digests for the given algorithm.
+     Check if a digest matches any of the target digests for the given algorithm. With `xlen`, TLSH digests are compared
+     without the file length they record.
      */
-    static func check(digest: String, against targets: [String], algorithm: Algorithm, threshold: Int) -> MatchResult? {
+    static func check(digest: String, against targets: [String], algorithm: Algorithm, threshold: Int, xlen: Bool = false) -> MatchResult? {
         switch algorithm {
         case .ssdeep:
             self.checkSSDeep(digest: digest, targets: targets, threshold: threshold)
         case .tlsh:
-            self.checkTLSH(digest: digest, targets: targets, threshold: threshold)
+            self.checkTLSH(digest: digest, targets: targets, threshold: threshold, xlen: xlen)
         case .cdhash:
             self.checkPrefix(digest: digest, targets: targets)
         default:
@@ -75,11 +76,11 @@ enum Matching {
         return matched ? MatchResult(score: bestScore) : nil
     }
 
-    private static func checkTLSH(digest: String, targets: [String], threshold: Int) -> MatchResult? {
+    private static func checkTLSH(digest: String, targets: [String], threshold: Int, xlen: Bool) -> MatchResult? {
         var bestScore = Int.max
         var matched = false
         for target in targets {
-            let distance = TLSHBridge.diff(digest, target)
+            let distance = TLSHBridge.diff(digest, target, length: !xlen)
             if distance >= 0, distance <= threshold {
                 matched = true
                 if distance < bestScore {

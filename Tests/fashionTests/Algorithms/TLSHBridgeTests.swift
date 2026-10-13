@@ -34,6 +34,19 @@ final class TLSHBridgeTests: XCTestCase {
         XCTAssertEqual(distance, 0)
     }
 
+    func testDiffWithoutLength() {
+        // A 50,704-byte Mach-O, then the same file padded with zeros to 2,952,771 bytes: only the length and the checksum
+        // differ, 42 length steps of 12 and 1. Without the length, as the tlsh tool's -xlen, the checksum is all that is
+        // left.
+        let exact = "T13D338D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
+        let padded = "T1B2D58D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
+        XCTAssertEqual(TLSHBridge.diff(exact, padded), 505)
+        XCTAssertEqual(TLSHBridge.diff(exact, padded, length: false), 1)
+
+        XCTAssertNil(Matching.check(digest: padded, against: [exact], algorithm: .tlsh, threshold: 40))
+        XCTAssertEqual(Matching.check(digest: padded, against: [exact], algorithm: .tlsh, threshold: 40, xlen: true)?.score, 1)
+    }
+
     func testDiffInvalidHashes() {
         let distance = TLSHBridge.diff("invalid", "alsobad")
 

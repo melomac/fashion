@@ -46,8 +46,11 @@ enum TLSHBridge {
     /**
      Compute distance between two TLSH hashes. Lower = more similar. Returns -1 on error, including for a string that is
      not a whole digest.
+
+     Without `length`, the file lengths the digests record are left out, like the tlsh tool's `-xlen`: a file padded
+     with zeros is then as close as its content.
      */
-    static func diff(_ hash1: String, _ hash2: String) -> Int {
+    static func diff(_ hash1: String, _ hash2: String, length: Bool = true) -> Int {
         guard
             let h1 = self.digits(of: hash1),
             let h2 = self.digits(of: hash2)
@@ -69,7 +72,7 @@ enum TLSHBridge {
             return -1
         }
 
-        return Int(tlsh_total_diff(t1, t2, 1))
+        return Int(tlsh_total_diff(t1, t2, length ? 1 : 0))
     }
 
     /**

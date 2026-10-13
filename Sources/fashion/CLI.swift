@@ -10,6 +10,7 @@ private enum OptionError: Error, Equatable {
     case decompressWithoutXarToc
     case negativeJobs
     case negativeScore
+    case xlenWithoutTLSHMatch
     case argumentNotUTF8(Int)
 }
 
@@ -32,6 +33,8 @@ extension OptionError: LocalizedError {
             "--jobs must be zero or greater."
         case .negativeScore:
             "--score must be zero or greater."
+        case .xlenWithoutTLSHMatch:
+            "--xlen requires --algo tlsh and --match."
         case let .argumentNotUTF8(index):
             "Argument \(index) is not valid UTF-8."
         }
@@ -176,6 +179,9 @@ struct Fashion: ParsableCommand {
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
             throw ValidationError(OptionError.decompressWithoutXarToc)
         }
+        if self.matchOptions.xlen, self.resolvedAlgorithm != .tlsh || self.matchOptions.match.isEmpty {
+            throw ValidationError(OptionError.xlenWithoutTLSHMatch)
+        }
         // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
         if self.jobs < 0 {
             throw ValidationError(OptionError.negativeJobs)
@@ -208,6 +214,9 @@ struct MatchOptions: ParsableArguments {
 
     @Option(name: .shortAndLong, help: "Minimum similarity (ssdeep) or maximum distance (TLSH) threshold.")
     var score: Int = 40
+
+    @Flag(help: "Compare TLSH digests without the file length they record, like the tlsh tool's -xlen.")
+    var xlen = false
 }
 
 struct SymbolOptions: ParsableArguments {

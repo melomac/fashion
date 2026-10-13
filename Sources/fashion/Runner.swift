@@ -680,6 +680,8 @@ struct Digester {
     let score: Int
     let quiet: Bool
     let exact: Bool
+    /// Whether TLSH digests are compared without the file length they record.
+    let xlen: Bool
 
     init(_ command: Fashion) {
         self.algorithm = command.resolvedAlgorithm
@@ -687,6 +689,7 @@ struct Digester {
         self.score = command.resolvedScore
         self.quiet = command.quiet
         self.exact = command.exact
+        self.xlen = command.matchOptions.xlen
 
         // `--algo cdhash` is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
         guard let hash = ByteHash(self.algorithm) else {
@@ -728,7 +731,7 @@ struct Digester {
 
         var lines: [String] = []
         for result in results {
-            guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score) else {
+            guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score, xlen: self.xlen) else {
                 continue
             }
             if self.quiet {
