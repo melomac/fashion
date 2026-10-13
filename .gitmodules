@@ -1,6 +1,7 @@
 [submodule "submodules/ssdeep"]
 	path = submodules/ssdeep
-	url = https://github.com/ssdeep-project/ssdeep
+	url = https://github.com/melomac/ssdeep
+	branch = shorten-64-to-32
 [submodule "submodules/tlsh"]
 	path = submodules/tlsh
 	url = https://github.com/trendmicro/tlsh
