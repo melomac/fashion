@@ -175,6 +175,24 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(Digester.tint(for: FileError.replaced).sgr, "33")
     }
 
+    func testTLSHCaveatsDoNotFail() throws {
+        // A file or slice TLSH makes no digest of is named on stderr, after the slice it is, and the run still succeeds:
+        // the universal file has a digest, its mostly zero slice none.
+        let tiny = try self.write(Data("tiny file\n".utf8), name: "tlsh-tiny")
+        let fat = try self.write(self.fat(wrapping: self.machO()), name: "tlsh-fat")
+        defer {
+            try? FileManager.default.removeItem(at: tiny)
+            try? FileManager.default.removeItem(at: fat)
+        }
+
+        let (status, errors) = try runFashion(["--algo", "tlsh", "--slices", "-j", "1", tiny.path, fat.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [
+            "fashion: \(tiny.path): TLSH cannot hash: input too small (10 bytes, minimum 50)",
+            "fashion: \(fat.path) (arm64): TLSH cannot hash: not enough variation in input",
+        ])
+    }
+
     func testSlicesHashInPlace() throws {
         // A slice is read from the file at its offset, never copied: a copy made every slice a hash thread held
         // resident at once, gigabytes over /Applications. One larger than any earlier peak of the process shows it.

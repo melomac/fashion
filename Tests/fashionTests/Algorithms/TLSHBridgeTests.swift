@@ -12,6 +12,33 @@ final class TLSHBridgeTests: XCTestCase {
         )
     }
 
+    func testCaveats() throws {
+        // libtlsh says nothing of a digest it does not make: fashion names why, after the TLSH tools' own errors.
+        var caveats: [String] = []
+        XCTAssertNil(try ByteHash.tlsh.digest(Data(repeating: 0x41, count: 10)) { caveats.append($0) })
+        XCTAssertNil(try ByteHash.tlsh.digest(Data([0x41])) { caveats.append($0) })
+        XCTAssertNil(try ByteHash.tlsh.digest(File(data: Data())) { caveats.append($0) })
+        XCTAssertNil(try ByteHash.tlsh.digest(Data(repeating: 0, count: 4096)) { caveats.append($0) })
+        XCTAssertNotNil(try ByteHash.tlsh.digest(self.data) { caveats.append($0) })
+        XCTAssertNotNil(try ByteHash.sha256.digest(Data()) { caveats.append($0) })
+        XCTAssertEqual(caveats, [
+            "TLSH cannot hash: input too small (10 bytes, minimum 50)",
+            "TLSH cannot hash: input too small (1 byte, minimum 50)",
+            "TLSH cannot hash: input too small (0 bytes, minimum 50)",
+            "TLSH cannot hash: not enough variation in input",
+        ])
+    }
+
+    func testCaveatPastLengthLimit() throws {
+        // Past its length limit TLSH hashes the first maximumDataSize bytes, too many to feed a test: the caveat is asked
+        // for directly.
+        let limit = Int(TLSHBridge.maximumDataSize)
+        let digest = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
+        XCTAssertNil(TLSHBridge.caveat(length: limit, digest: digest))
+        XCTAssertEqual(TLSHBridge.caveat(length: limit + 1, digest: digest), "TLSH hashed the first 4224281216 bytes only, it's a known issue: https://github.com/trendmicro/tlsh/issues/84")
+        XCTAssertEqual(TLSHBridge.caveat(length: limit + 1, digest: nil), "TLSH cannot hash: not enough variation in the first 4224281216 bytes")
+    }
+
     func testHashDataLargeEnough() throws {
         let hash = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
 

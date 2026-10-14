@@ -407,6 +407,17 @@ final class Reporter: @unchecked Sendable {
         self.diagnose(path: path, message: message, tint: .error)
     }
 
+    /**
+     Report what an algorithm left out of a file's digest, or why it made none: the input TLSH defines no digest of, or
+     what lies past its length limit. Not a failure but the algorithm's definition: uncounted, though yellow like any
+     other diagnostic.
+     */
+    func inform(path: String, message: String) {
+        logger.info("\(path, privacy: .public): \(message, privacy: .public)")
+
+        self.diagnose(path: path, message: message, tint: .error)
+    }
+
     private func diagnose(path: String, message: String, tint: Tint) {
         let displayPath = OutputFormatter.formatPath(path)
         let displayMessage = OutputFormatter.formatDiagnostic(message)
@@ -853,15 +864,19 @@ struct Digester {
     private func digests(_ path: String, reporter: Reporter) throws -> [DigestResult] {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed.
         let file = try File(path: path)
+        // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about.
+        let caveat = { (arch: String?, message: String) in
+            reporter.inform(path: arch.map { "\(path) (\($0))" } ?? path, message: message)
+        }
         return switch self.mode {
         case let .file(hash):
-            try self.fileDigest(file, hash: hash).map { [DigestResult(digest: $0)] } ?? []
+            try self.fileDigest(file, hash: hash, caveat: { caveat(nil, $0) }).map { [DigestResult(digest: $0)] } ?? []
         case let .slices(hash):
-            try self.sliceDigests(file, hash: hash)
+            try self.sliceDigests(file, hash: hash, caveat: caveat)
         case let .symhash(hash, separator, sortSymbols):
-            try SymHash.compute(file, algorithm: hash, separator: separator, sortSymbols: sortSymbols)
+            try SymHash.compute(file, algorithm: hash, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
         case let .xarToc(hash, decompress):
-            try XARParser.hashToc(file, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
+            try XARParser.hashToc(file, algorithm: hash, decompress: decompress, caveat: { caveat(nil, $0) }).map { [DigestResult(digest: $0)] } ?? []
         case .cdhash:
             try self.cdHashDigests(file, path: path, reporter: reporter)
         }
@@ -897,13 +912,13 @@ struct Digester {
     /**
      The whole-file digest, then one per architecture of a universal binary, each trimmed when `--exact` is set.
      */
-    private func sliceDigests(_ file: File, hash: ByteHash) throws -> [DigestResult] {
+    private func sliceDigests(_ file: File, hash: ByteHash, caveat: (_ arch: String?, _ message: String) -> Void) throws -> [DigestResult] {
         // Read the container first, so a malformed one fails before any hashing.
         let slices = try self.sliceRanges(file)
 
-        var results = try self.fileDigest(file, hash: hash).map { [DigestResult(digest: $0)] } ?? []
+        var results = try self.fileDigest(file, hash: hash, caveat: { caveat(nil, $0) }).map { [DigestResult(digest: $0)] } ?? []
         for slice in slices {
-            if let digest = try hash.digest(file, range: slice.range) {
+            if let digest = try hash.digest(file, range: slice.range, caveat: { caveat(slice.arch, $0) }) {
                 results.append(DigestResult(digest: digest, label: slice.arch))
             }
         }
@@ -933,10 +948,10 @@ struct Digester {
      The digest of the whole file or, with `--exact`, of a Mach-O's logical content only: `fileEnd` reads just the
      headers.
      */
-    private func fileDigest(_ file: File, hash: ByteHash) throws -> String? {
+    private func fileDigest(_ file: File, hash: ByteHash, caveat: (String) -> Void) throws -> String? {
         guard self.exact else {
-            return try hash.digest(file)
+            return try hash.digest(file, caveat: caveat)
         }
-        return try hash.digest(file, range: 0 ..< Universal.fileEnd(file))
+        return try hash.digest(file, range: 0 ..< Universal.fileEnd(file), caveat: caveat)
     }
 }

@@ -14,14 +14,14 @@ import Foundation
    the table, undefined behaviour in C++, before the counter even wraps.
 
  Trend Micro left the C++ library as it is and defined the TLSH of a longer input as that of its first
- `maximumDataSize` bytes (trendmicro/tlsh#99), the Java port's `TlshUtil.MAX_DATA_LENGTH` since TLSH 4.6.0. fashion
+ `maximumDataSize` bytes (trendmicro/tlsh#88), the Java port's `TlshUtil.MAX_DATA_LENGTH` since TLSH 4.6.0. fashion
  applies that definition whatever libtlsh it is built against: the cap changes no digest under it, and two files
- that differ only past it share a digest, as they do in Java, rather than have none that is defined.
+ that differ only past it share a digest, where the Java port, which refuses more, makes none.
 
  Two more things are this build's rather than the library's. The digest is the 70-digit `T1` form of a 128-bucket,
  1-byte-checksum build (`BUCKETS_128` and `CHECKSUM_1B` in Package.swift, see `tlsh_version.h`), the form the `tlsh`
  tool prints. And libtlsh makes no digest for an input under its `MIN_DATA_LENGTH` of 50 bytes, or with too little
- variety: `TLSHHasher.finalize` reports that as nil, not as the empty string `getHash` returns.
+ variety: `TLSHHasher.finalize` reports that as nil, not as the empty string `getHash` returns, and `caveat` says which.
  */
 enum TLSHBridge {
     /**
@@ -32,9 +32,12 @@ enum TLSHBridge {
      32-bit counter in `tlsh_impl.h`, would even wrap past 4 GiB.
      The Java port enforces the same limit as `TlshUtil.MAX_DATA_LENGTH`.
 
-     See, at the submodule's commit:
-     https://github.com/trendmicro/tlsh/blob/ebdec8fde93a4ac359437f4f3796c78d3ae433bf/src/tlsh_util.cpp#L4872
-     https://github.com/trendmicro/tlsh/blob/ebdec8fde93a4ac359437f4f3796c78d3ae433bf/include/tlsh_impl.h#L163
+     - the bug, a file past 2 GiB crashing the Java port and "too small" for the tlsh tool:
+       https://github.com/trendmicro/tlsh/issues/84
+     - the Java fix of TLSH 4.6.0 (branch `bugfix_issue_99`), counting up to this limit and refusing any more:
+       https://github.com/trendmicro/tlsh/pull/100
+     - the decision, "TLSH is the TLSH of the first 4GB of a file":
+       https://github.com/trendmicro/tlsh/issues/88#issuecomment-870946795
      */
     static let maximumDataSize: UInt64 = 4_224_281_216
 
@@ -42,6 +45,34 @@ enum TLSHBridge {
      Expected digest version prefix.
      */
     static let digestPrefix = "T1"
+
+    /**
+     The bug an input past `maximumDataSize` runs into (trendmicro/tlsh#84), named when one is hashed; Trend Micro
+     settled on the cap in trendmicro/tlsh#88.
+     */
+    static let maximumDataSizeIssue = "https://github.com/trendmicro/tlsh/issues/84"
+
+    /**
+     What the digest of `length` bytes leaves out, which libtlsh never says: every byte when it made no `digest`, too
+     few for its `MIN_DATA_LENGTH` or with too little variation, or those past `maximumDataSize`. Nil when the digest
+     is of every byte.
+
+     Worded after the TLSH tools: the tlsh tool's "cannot hash" and "file too small", the Python port's "less than 50 of
+     input" and "not enough variation in input", the Java port's "Can only compute length portion of TLSH for data
+     lengths up to 4224281216 bytes".
+     */
+    static func caveat(length: Int, digest: String?) -> String? {
+        let hashed = min(length, Int(self.maximumDataSize))
+        guard digest != nil else {
+            // `TlshImpl::final` checks the length first, then that more than half of its buckets are filled.
+            let minimum = Int(tlsh_min_data_length())
+            if hashed < minimum {
+                return "TLSH cannot hash: input too small (\(String(hashed, pluralizing: "byte")), minimum \(minimum))"
+            }
+            return "TLSH cannot hash: not enough variation in \(hashed < length ? "the first \(hashed) bytes" : "input")"
+        }
+        return hashed < length ? "TLSH hashed the first \(hashed) bytes only, it's a known issue: \(self.maximumDataSizeIssue)" : nil
+    }
 
     /**
      Compute distance between two TLSH hashes. Lower = more similar. Returns -1 on error, including for a string that is

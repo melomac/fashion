@@ -4,23 +4,24 @@ import MachO
 /// Extract external undefined symbols from Mach-O binaries and compute a hash.
 enum SymHash {
     /**
-     The symhash of a thin Mach-O, or of each architecture of a universal one, labeled with its name.
+     The symhash of a thin Mach-O, or of each architecture of a universal one, labeled with its name. `caveat` hears
+     what TLSH leaves out of a symbol list, with the name of its architecture.
      */
-    static func compute(_ file: File, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> [DigestResult] {
+    static func compute(_ file: File, algorithm: ByteHash, separator: String, sortSymbols: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> [DigestResult] {
         switch try Universal.open(file) {
         case let .fat(archs):
             return try archs.compactMap { arch in
                 // A universal static library carries `ar` archives, which have no symbol table to hash.
                 guard
                     let image = try MachO(file, offset: arch.offset, length: arch.length),
-                    let digest = try self.hash(image, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols)
+                    let digest = try self.hash(image, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(arch.name, $0) })
                 else {
                     return nil
                 }
                 return DigestResult(digest: digest, label: arch.name)
             }
         case let .thin(image):
-            guard let digest = try self.hash(image, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols) else {
+            guard let digest = try self.hash(image, algorithm: algorithm, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(nil, $0) }) else {
                 return []
             }
             return [DigestResult(digest: digest)]
@@ -188,7 +189,7 @@ enum SymHash {
     /**
      The symhash of one image, or nil when it carries no symbol table.
      */
-    private static func hash(_ image: MachO, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> String? {
+    private static func hash(_ image: MachO, algorithm: ByteHash, separator: String, sortSymbols: Bool, caveat: (String) -> Void) throws -> String? {
         guard
             let command = image.findCommand(UInt32(LC_SYMTAB)),
             let symtab = try self.parseSymtab(command: command, swap: image.swap)
@@ -210,6 +211,6 @@ enum SymHash {
             joinedData.append(name)
         }
 
-        return try algorithm.digest(joinedData)
+        return try algorithm.digest(joinedData, caveat: caveat)
     }
 }

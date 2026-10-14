@@ -31,4 +31,8 @@ int tlsh_from_str(tlsh_t t, const char* str) {
     return static_cast<Tlsh*>(t)->fromTlshStr(str);
 }
 
+unsigned int tlsh_min_data_length(void) {
+    return MIN_DATA_LENGTH;
+}
+
 }

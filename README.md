@@ -57,6 +57,10 @@ Trend Micro library counts the total data length using an `unsigned int data_len
 Even worse, on Java, the code was using a signed integer (~2GB).
 
 `fashion` follows Trend Micro recommendations and backports the Java fix from TLSH 4.6.0 to define the TLSH of a file as the TLSH of its first ~4GB.
+The `tlsh` tool reads a file's size into a 32-bit `int` instead: it calls a file "too small" when that size modulo 4 GiB is 2 GiB or more, and hashes only that many bytes of any other.
+
+`fashion` names on standard error each file TLSH cannot hash: under 50 bytes, with too little variation, and greater than ~4GB ([discussion](https://github.com/trendmicro/tlsh/issues/84)).
+Neither changes the exit status.
 
 A TLSH distance counts file length: padding, such as appended null bytes, adds to it even when the content is the same.
 `--xlen` leaves the length out of `--match`, as the `tlsh` tool's `-xlen` does: a 50 KB binary padded with zeros to 2.9 MB is then 1 away from itself instead of 505.
@@ -192,7 +196,7 @@ On a terminal, `fashion` colors lines by what they tell:
   * a TLSH distance from 300, where [false positives][TLSH paper] pass 79%, is gray whatever the threshold, unless `--xlen` leaves out the length those rates count;
   * an ssdeep match is never gray, its false positives staying under 0.1% at any score;
 * red: a file `fashion` could not parse, its Mach-O, signature or XAR malformed;
-* yellow: anything else `fashion` reports on standard error, a file that could not be read or a signature that does not hold;
+* yellow: anything else `fashion` reports on standard error, a file that could not be read, a signature that does not hold, or a file TLSH can't hash;
 * dimmed: `ADHOC` lines, synthesized for unsigned code.
 
 `NO_COLOR` turns it off.

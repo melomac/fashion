@@ -56,23 +56,36 @@ enum ByteHash: String {
 
      The length is the size the file had when it was opened, and a file that no longer holds it by the time it is read
      fails closed: git writes the length into its digest, and ssdeep chooses its block size from it.
+
+     `caveat` hears what TLSH leaves out: every byte when it makes no digest, or those past its `maximumLength`.
      */
-    func digest(_ file: File, range: Range<Int>? = nil) throws -> String? {
+    func digest(_ file: File, range: Range<Int>? = nil, caveat: (String) -> Void = { _ in }) throws -> String? {
         let range = range ?? 0 ..< file.size
         let length = min(range.count, self.maximumLength)
         var hasher = try self.hasher(length: length)
         try file.stream(range.lowerBound ..< range.lowerBound + length) { hasher.update($0) }
-        return try hasher.finalize()
+        return try self.finalize(&hasher, length: range.count, caveat: caveat)
     }
 
     /**
      The digest of bytes in memory: a list of symbol names, or a XAR table of contents.
      */
-    func digest(_ data: Data) throws -> String? {
+    func digest(_ data: Data, caveat: (String) -> Void = { _ in }) throws -> String? {
         let bytes = data.prefix(self.maximumLength)
         var hasher = try self.hasher(length: bytes.count)
         bytes.withUnsafeBytes { hasher.update($0) }
-        return try hasher.finalize()
+        return try self.finalize(&hasher, length: data.count, caveat: caveat)
+    }
+
+    /**
+     The digest of `length` bytes, of which `hasher` was fed at most `maximumLength`.
+     */
+    private func finalize(_ hasher: inout any ByteHasher, length: Int, caveat: (String) -> Void) throws -> String? {
+        let digest = try hasher.finalize()
+        if self == .tlsh, let message = TLSHBridge.caveat(length: length, digest: digest) {
+            caveat(message)
+        }
+        return digest
     }
 }
 
@@ -85,7 +98,7 @@ protocol ByteHasher {
     mutating func update(_ bytes: UnsafeRawBufferPointer)
 
     /**
-     The printable digest, or nil when the algorithm makes none for so few bytes (TLSH).
+     The printable digest, or nil when the algorithm makes none for so few bytes, or so little variation (TLSH).
      */
     mutating func finalize() throws -> String?
 }
