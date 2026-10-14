@@ -7,6 +7,17 @@ final class ConsoleTests: XCTestCase {
         XCTAssertEqual(Console.printable("abc  /tmp/x\u{1B}[1A\u{07}\u{08}\u{7F}\u{9B}2K"), "abc  /tmp/x?[1A????2K")
     }
 
+    func testTintedWrapsTheLine() {
+        XCTAssertEqual(Console.tinted("abc  /tmp/x", .adhoc), "\u{1B}[2mabc  /tmp/x\u{1B}[0m")
+        XCTAssertEqual(Console.tinted("abc  /tmp/x", .none), "abc  /tmp/x")
+    }
+
+    func testMatchTintFadesWithDistance() {
+        // Full green when identical, then darker greens by quarters of the way to the threshold.
+        let ramp = [0, 0.01, 0.25, 0.26, 0.5, 0.51, 0.75, 0.76, 1].map { Tint.match(distance: $0).sgr }
+        XCTAssertEqual(ramp, ["38;5;46", "38;5;40", "38;5;40", "38;5;34", "38;5;34", "38;5;28", "38;5;28", "38;5;22", "38;5;22"])
+    }
+
     func testPrintableKeepsOrdinaryText() {
         let line = "abc  /tmp/r\u{E9}sum\u{E9} \u{65E5}\u{672C} e\u{301}"
         XCTAssertEqual(Console.printable(line), line)

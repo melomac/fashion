@@ -1,16 +1,16 @@
 # fashion
 
-Swift command-line interface to traverse a file hierarchy and compute or match popular hash digests.
-The project natively supports:
+`fashion` is a Swift command-line interface to traverse a file hierarchy and compute or match popular hash digests.
+The project is hosted on [Codeberg](https://codeberg.org/melomac/fashion), mirrored on [Github](https://github.com/melomac/fashion), and natively supports:
 
-* [CryptoKit](https://developer.apple.com/documentation/cryptokit/ "Perform cryptographic operations securely and efficiently.") hash functions: [SHA-2][] (SHA256 by default), insecure [SHA-1][] and [MD5][]
+* [CryptoKit](https://developer.apple.com/documentation/cryptokit/ "Perform cryptographic operations securely and efficiently.") hash functions: [SHA-2][] (SHA-256 by default), insecure [SHA-1][] and [MD5][]
 * fuzzy hash functions: [ssdeep][] and [TLSH][] as submodules with Swift C bridging
 * searching for multiple digests with any algo and a similarity / distance score for fuzzy hash
-* [git-hash-object][]
-* [symhash][] with any algo, separator and optional sort (Mach-O binaries)
+- [symhash][] of Mach-O binaries, with any algo, separator and optional sort
+- [CDHash][] of Mach-O binaries — embedded when signed, AD-HOC synthesized when not
 * [XAR][] archives (macOS packages) table of contents checksum with any algo and optional decompress (zlib)
-* [CDHash][] of Mach-O binaries — embedded when signed, AD-HOC synthesized when not
-* multithreading
+* [git-hash-object][]
+- multithreading
 
 Multithreaded with `--jobs 0`, `fashion` is very fast and stays well under 150 MB of memory:
 
@@ -26,7 +26,7 @@ A signed and notarized binary is available via Homebrew 🍻
 ```bash
 brew tap melomac/tap https://codeberg.org/melomac/homebrew-tap
 brew trust melomac/tap
-brew install fashion
+brew install melomac/tap/fashion
 ```
 
 ## Features
@@ -40,10 +40,11 @@ Project algorithm choices are driven by interoperability with existing tools and
 [MD5]: https://en.wikipedia.org/wiki/MD5 "Wikipedia: MD5"
 [ssdeep]: https://github.com/ssdeep-project/ssdeep "GitHub: ssdeep-project/ssdeep"
 [TLSH]: https://github.com/trendmicro/tlsh "GitHub: trendmicro/tlsh"
-[Git-Hash-object]: https://git-scm.com/docs/git-hash-object "Git: hash-object"
+[TLSH paper]: https://github.com/trendmicro/tlsh/blob/master/TLSH_CTC_final.pdf "TLSH - A Locality Sensitive Hash, Tables I and II"
 [SymHash]: https://www.anomali.com/blog/symhash "SymHash: An ImpHash for Mach-O"
-[XAR]: https://github.com/apple-oss-distributions/xar/ "GitHub: apple-oss-distributions/xar"
 [CDHash]: https://developer.apple.com/documentation/technotes/tn3126-inside-code-signing-hashes "TN3126: Inside Code Signing: Hashes"
+[XAR]: https://github.com/apple-oss-distributions/xar/ "GitHub: apple-oss-distributions/xar"
+[Git-Hash-object]: https://git-scm.com/docs/git-hash-object "Git: hash-object"
 [XNU]: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/ubc_subr.c "XNU: hashPriorities in ubc_subr.c"
 
 #### Insecure MD5 and SHA1
@@ -78,17 +79,19 @@ $ git log --raw --all --format='%h %s' --find-object=$(fashion --algo git --quie
 The CodeDirectory Hash is how \*OS identifies an executable: the hash of the directory that holds a hash of every code page, so it changes with any byte of code.
 `fashion` prints the CDHash of Mach-O binaries, one line per code directory, in the kernel's preferred order ([XNU][]).
 
-A binary signed with two algorithms gets two lines, each labeled with its hash type: `sha1`, `sha256`, `sha256t`, `sha384`, `sha512`.
-We print the `CandidateCDHashFull`, and `--match` accepts it as well as the truncated 20-byte `CDHash` Apple's tools usually show.
+A binary signed with multiple algorithms gets multiple lines, each labeled with its hash type: `sha1`, `sha256`, `sha256t`, `sha384`, `sha512`.
+We print the untrunacted `CandidateCDHashFull`, and `--match` accepts it as well as the truncated 20-byte `CDHash` Apple's tools usually show.
 
 When `/usr/libexec/syspolicyd` meets unsigned code, it has the Security framework sign it in memory and looks up a notarization ticket for the computed hash.
-
 `fashion` builds the same signature and prints its CDHash, labeled `ADHOC`:
 
 * the `ADHOC, sha256` line is, byte for byte, the hash `syspolicyd` looks up;
 * the `ADHOC, sha1` line is its legacy counterpart.
 
 A signature Security rejects counts as none, as `codesign` says "not signed at all": the file gets its `ADHOC` lines too, computed up to where the signature starts.
+
+Each signed slice's code is checked against its signature, as `codesign --verify` does, which reads every page of it.
+A slice whose signature does not hold is named on standard error, without changing the exit status: "signature rejected, hashed as unsigned", or "invalid signature (code or signature have been modified)" when a byte of code changed since signing.
 
 Mach-O files that are not code to `codesign` — object files, dSYMs, core dumps, kernel filesets — have no identity of either kind and yield no line, signed or not.
 
@@ -180,15 +183,29 @@ The `-L` / `--follow` flag follows symlinks while walking; by default they are s
 A symlink named directly on the command line is always followed, like `find -H`.
 Only regular files are hashed: a FIFO, device or socket is skipped, whether named on the command line or met in a directory.
 
+### Colors
+
+On a terminal, `fashion` colors lines by what they tell:
+
+* green:
+  * a fuzzy match, full green when identical, darker greens as the distance grows toward the `--score` threshold;
+  * a TLSH distance from 300, where [false positives][TLSH paper] pass 79%, is gray whatever the threshold, unless `--xlen` leaves out the length those rates count;
+  * an ssdeep match is never gray, its false positives staying under 0.1% at any score;
+* red: a file `fashion` could not parse, its Mach-O, signature or XAR malformed;
+* yellow: anything else `fashion` reports on standard error, a file that could not be read or a signature that does not hold;
+* dimmed: `ADHOC` lines, synthesized for unsigned code.
+
+`NO_COLOR` turns it off.
+
 ### Exit status
 
 `fashion` follows the grep/codesign convention so it can be scripted:
 
-| Code | Description                                           |
-|:----:|:------------------------------------------------------|
-|  0   | success — in match mode, at least one match was found |
-|  1   | match mode — no file matched                          |
-|  2   | one or more paths could not be enumerated or hashed   |
+| Code | Description                                               |
+|:----:|:----------------------------------------------------------|
+|  0   | success — in match mode, at least one match was found     |
+|  1   | match mode — no file matched                              |
+|  2   | one or more paths could not be enumerated or hashed       |
 |  64  | usage — invalid options, or an argument that is not UTF-8 |
 
 Per-path failures (a missing path, a permission-denied directory, an unreadable file, one that changed or was replaced while it was hashed, a name that is not UTF-8, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`; they never abort the rest of the scan.
@@ -224,5 +241,5 @@ So here we are: Swift, native, concurrent, with C and C++ dependencies bridged a
 
 ### License
 
-`fashion` is licensed under the [GNU General Public License version 3](LICENSE).
-The binary includes third-party code from [ssdeep][] (GPL-2.0-or-later) and [TLSH][] (used under BSD-3-Clause): [NOTICE](NOTICE) carries their copyright notices and license terms.
+`fashion` is licensed under the [GNU General Public License version 3](https://codeberg.org/melomac/fashion/src/LICENSE).
+The binary includes third-party code from [ssdeep][] (GPL-2.0-or-later) and [TLSH][] (used under BSD-3-Clause): [NOTICE](https://codeberg.org/melomac/fashion/src/NOTICE) carries their copyright notices and license terms.

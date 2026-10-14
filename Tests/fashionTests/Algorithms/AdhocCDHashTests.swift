@@ -376,7 +376,20 @@ final class AdhocCDHashTests: XCTestCase {
             let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
             XCTAssertNil(skipReason, name)
             XCTAssertEqual(hashes.map(\.adhoc), [true, true], name)
+            // Unlike an unsigned slice's, its ad-hoc cdhashes stand for a signature that does not hold.
+            XCTAssertEqual(hashes.map(\.invalid), [true, true], name)
         }
+    }
+
+    func testRejectedSignatureIsWarnedAbout() throws {
+        // Named on stderr even into a pipe, as Security's rejection reads no code, without failing the run.
+        let url = FileManager.default.temporaryDirectory / "fashion-rejected-\(UUID())"
+        try self.makeSignedMachO(signature: self.superblob(slots: [])).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let (status, errors) = try runFashion(["--algo", "cdhash", url.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, ["fashion: \(url.path): signature rejected, hashed as unsigned"])
     }
 
     // MARK: - Ad-hoc synthesis (unsigned slice)
@@ -387,6 +400,7 @@ final class AdhocCDHashTests: XCTestCase {
 
         // An unsigned slice yields both synthesized ad-hoc cdhashes: SHA-256 first, then SHA-1.
         XCTAssertEqual(directories.count, 2)
+        XCTAssertFalse(directories.contains(where: \.invalid))
 
         let sha256 = try XCTUnwrap(directories.first)
         XCTAssertTrue(sha256.adhoc, "An unsigned slice yields the synthesized ad-hoc cdhash")

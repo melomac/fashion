@@ -1,5 +1,6 @@
 @testable import fashion
 import MachO
+import System
 import XCTest
 
 /**
@@ -140,8 +141,38 @@ final class RunnerTests: XCTestCase {
         }
 
         let digester = try Digester(Fashion.parse([url.path, "--slices", "--exact", "--quiet"]))
-        let lines = digester.lines(for: url.path, reporter: Reporter(console: Console()))
+        let lines = digester.lines(for: url.path, reporter: Reporter(console: Console())).map(\.text)
         XCTAssertEqual(lines, try [ByteHash.sha256.digest(fat), ByteHash.sha256.digest(slice)])
+    }
+
+    func testFuzzyMatchTint() throws {
+        // Greens by quarters of the way to --score: with 40, a TLSH distance of 0 is full green, then darker each 10.
+        func sgr(_ arguments: [String], _ scores: [Int]) throws -> [String?] {
+            let digester = try Digester(Fashion.parse(["x"] + arguments))
+            return scores.map { digester.matchTint($0).sgr }
+        }
+        let greens = ["38;5;46", "38;5;40", "38;5;34", "38;5;28", "38;5;22"]
+        XCTAssertEqual(try sgr(["--algo", "tlsh"], [0, 10, 20, 30, 40]), greens)
+        XCTAssertEqual(try sgr(["--algo", "ssdeep"], [100, 85, 70, 55, 40]), greens)
+        // From a TLSH distance of 300 a match is gray, whatever the threshold, and the greens stop there.
+        XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "1000"], [0, 150, 299, 300, 1000]), ["38;5;46", "38;5;34", "38;5;22", "38;5;245", "38;5;245"])
+        // Those false positives count the length: without it, the greens run to the threshold.
+        XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "1000", "--match", "T1", "--xlen"], [300, 1000]), ["38;5;34", "38;5;22"])
+        // A threshold of 100 (ssdeep) or 0 (TLSH) only matches the identical.
+        XCTAssertEqual(try sgr(["--algo", "ssdeep", "--score", "100"], [100]), ["38;5;46"])
+        XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "0"], [0]), ["38;5;46"])
+    }
+
+    func testMalformedFileIsRed() {
+        // A Mach-O whose load commands run past its end does not parse: red. A file that cannot be read, or changed, is
+        // yellow.
+        var data = Data()
+        [MH_MAGIC_64, UInt32(bitPattern: CPU_TYPE_ARM64), 0, UInt32(MH_EXECUTE), 1, 0x1000, 0, 0].forEach { data.appendUInt32($0) }
+        XCTAssertThrowsError(try Universal.open(data: data)) { error in
+            XCTAssertEqual(Digester.tint(for: error).sgr, "31")
+        }
+        XCTAssertEqual(Digester.tint(for: Errno.permissionDenied).sgr, "33")
+        XCTAssertEqual(Digester.tint(for: FileError.replaced).sgr, "33")
     }
 
     func testSlicesHashInPlace() throws {

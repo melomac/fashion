@@ -46,7 +46,8 @@ import System
    output.showStatus() ------------------------------>| Console                        |
    "N files · M waiting ·                             |  pipe or file: write as is     |
     hashing …<path>"                                  |  terminal: erase the status    |
-                                                      |  line, controls shown as ?     |
+                                                      |  line, controls shown as ?,    |
+                                                      |  each line in its tint         |
                                                       +--------------------------------+
                                                                        |
                                                                        v
@@ -68,6 +69,7 @@ private let logger = Logger(subsystem: "fashion", category: "runner")
 struct DigestResult {
     let digest: String
     var label: String?
+    var tint = Tint.none
 
     /**
      The path as printed: `path (label)`, or the bare path for the whole file.
@@ -77,12 +79,58 @@ struct DigestResult {
     }
 }
 
+/**
+ A line to print, and how it shows on a terminal.
+ */
+struct Line {
+    let text: String
+    var tint = Tint.none
+}
+
+/**
+ How a line shows on a terminal, by what it tells.
+ */
+enum Tint {
+    case none
+    /// A fuzzy match by its distance, from 0 when identical to 1 at the threshold (see `Digester.matchTint(_:)`).
+    case match(distance: Double)
+    /// Gray: a fuzzy match too distant to mean much, whatever the threshold.
+    case weak
+    /// Red: a file whose own bytes are malformed, on stderr.
+    case malformed
+    /// Yellow: any other diagnostic on stderr.
+    case error
+    /// Dimmed: a synthesized ad-hoc cdhash.
+    case adhoc
+
+    /// The SGR parameters that set it.
+    var sgr: String? {
+        switch self {
+        case .none: nil
+        case .malformed: "31"
+        case .error: "33"
+        case .adhoc: "2"
+        case let .match(distance):
+            // Full green only when identical, then darker greens by quarters of the way to the threshold.
+            switch distance {
+            case ...0: "38;5;46" // #00ff00
+            case ...0.25: "38;5;40" // #00d700
+            case ...0.5: "38;5;34" // #00af00
+            case ...0.75: "38;5;28" // #008700
+            default: "38;5;22" // #005f00
+            }
+        case .weak: "38;5;245"
+        }
+    }
+}
+
 // MARK: - Console
 
 /**
  The terminal side of a run: lines to stdout and stderr and, when stdout is a terminal, a status line under the output.
  The status line is erased before any other write and when the run ends, so it never ends up in a pipe, a file or the
- terminal's scrollback. On a terminal, control characters in a line show as "?" (see `printable(_:)`).
+ terminal's scrollback. On a terminal, control characters in a line show as "?" (see `printable(_:)`), and a line shows
+ in its tint unless `TERM=dumb` or `NO_COLOR` is set (https://no-color.org).
 
  Off a terminal there is no status line, and lines go straight out: the callers' own locks keep them whole, and nothing
  here makes a signal handler or a diagnostic wait for a stdout write blocked by a reader that stopped reading.
@@ -92,6 +140,7 @@ final class Console: @unchecked Sendable {
     let isLive = isatty(STDOUT_FILENO) == 1 && ProcessInfo.processInfo.environment["TERM"] != "dumb"
     private let stdoutIsTerminal = isatty(STDOUT_FILENO) == 1
     private let stderrIsTerminal = isatty(STDERR_FILENO) == 1
+    private let tints = ProcessInfo.processInfo.environment["TERM"] != "dumb" && ProcessInfo.processInfo.environment["NO_COLOR", default: ""].isEmpty
     private let lock = NSLock()
     private var shown = false
     private var closed = false
@@ -99,16 +148,16 @@ final class Console: @unchecked Sendable {
     /**
      Write a line to stdout; throws on a write error.
      */
-    func out(_ line: String) throws {
-        try self.write(self.stdoutIsTerminal ? Self.printable(line) : line, to: .standardOutput)
+    func out(_ line: String, tint: Tint = .none) throws {
+        try self.write(self.stdoutIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none) : line, to: .standardOutput)
     }
 
     /**
      Write a line to stderr. A write error must not abort the scan; a closed stderr pipe still ends it through the
      trapped SIGPIPE.
      */
-    func err(_ line: String) {
-        try? self.write(self.stderrIsTerminal ? Self.printable(line) : line, to: .standardError)
+    func err(_ line: String, tint: Tint = .none) {
+        try? self.write(self.stderrIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none) : line, to: .standardError)
     }
 
     /**
@@ -172,6 +221,13 @@ final class Console: @unchecked Sendable {
     }
 
     /**
+     A printable line in its tint, which ends with the line.
+     */
+    static func tinted(_ line: String, _ tint: Tint) -> String {
+        tint.sgr.map { "\u{1B}[\($0)m\(line)\u{1B}[0m" } ?? line
+    }
+
+    /**
      On a terminal, erase the status line first, under the lock so it cannot be redrawn in the middle of the line.
      */
     private func write(_ line: String, to fd: FileDescriptor) throws {
@@ -209,7 +265,7 @@ final class Output: @unchecked Sendable {
     private let console: Console
     private let reporter: Reporter
     private let trap: SignalTrap?
-    private var held: [Int: [String]] = [:]
+    private var held: [Int: [Line]] = [:]
     private var hashing: [Int: String] = [:]
     private var next = 0
     private var printed = false
@@ -244,7 +300,7 @@ final class Output: @unchecked Sendable {
     /**
      Print the lines of the file handed out at `index`.
      */
-    func finished(_ index: Int, lines: [String]) {
+    func finished(_ index: Int, lines: [Line]) {
         self.lock.withLock {
             self.hashing[index] = nil
             // Unsorted, a finished file is simply the next to print.
@@ -274,10 +330,10 @@ final class Output: @unchecked Sendable {
     /**
      Caller holds the lock, so lines from concurrent hash threads never interleave.
      */
-    private func write(_ line: String) {
+    private func write(_ line: Line) {
         self.printed = true
         do {
-            try self.console.out(line)
+            try self.console.out(line.text, tint: line.tint)
         } catch {
             if error as? Errno == .brokenPipe {
                 // The reader went away (`| head`): if the trap holds SIGPIPE, this logs the end and dies of it
@@ -289,7 +345,7 @@ final class Output: @unchecked Sendable {
             // and exit like coreutils, rather than crash on the uncaught error.
             let description = OutputFormatter.formatDiagnostic(File.message(for: error))
             self.reporter.end("Stopped by write error: \(description)")
-            self.console.err("fashion: write error: \(description)")
+            self.console.err("fashion: write error: \(description)", tint: .error)
 
             exit(2)
         }
@@ -301,7 +357,7 @@ final class Output: @unchecked Sendable {
 /**
  Thread-safe bookkeeping for one run, callable from the walking and hash threads as well as signal handlers:
  - diagnostics go to both stderr (for the user and scripts) and the unified log (for a persistent, queryable record),
-   and are counted so the process can exit non-zero when any path could not be enumerated or hashed;
+   and failures are counted so the process can exit non-zero when any path could not be enumerated or hashed;
  - files are counted as hash threads finish them, for the status line, the progress report on SIGINFO and the end of
    the run, which is logged exactly once whether the run completes or is interrupted;
  - the progress report and the end of the run carry the peak memory footprint, which the kernel tracks on its own.
@@ -332,16 +388,30 @@ final class Reporter: @unchecked Sendable {
         self.lock.withLock { self.errors }
     }
 
-    func report(path: String, message: String) {
+    func report(path: String, message: String, tint: Tint = .error) {
         logger.error("\(path, privacy: .public): \(message, privacy: .public)")
 
-        let displayPath = OutputFormatter.formatPath(path)
-        let displayMessage = OutputFormatter.formatDiagnostic(message)
         self.lock.withLock {
             self.errors += 1
         }
+        self.diagnose(path: path, message: message, tint: tint)
+    }
+
+    /**
+     Report a file that was hashed but deserves a second look, like a failure but uncounted: it leaves the exit status
+     alone.
+     */
+    func warn(path: String, message: String) {
+        logger.notice("\(path, privacy: .public): \(message, privacy: .public)")
+
+        self.diagnose(path: path, message: message, tint: .error)
+    }
+
+    private func diagnose(path: String, message: String, tint: Tint) {
+        let displayPath = OutputFormatter.formatPath(path)
+        let displayMessage = OutputFormatter.formatDiagnostic(message)
         self.lineLock.withLock {
-            self.console.err("fashion: \(displayPath): \(displayMessage)")
+            self.console.err("fashion: \(displayPath): \(displayMessage)", tint: tint)
         }
     }
 
@@ -712,37 +782,67 @@ struct Digester {
     /**
      The lines to print for one file: every digest or, in match mode, every matching one. A quiet match names the file
      once, and so does a symhash search, which reports files rather than slices (the slices of one binary usually share
-     a symhash). A file that cannot be hashed is reported and prints nothing.
+     a symhash). A fuzzy match is tinted by its distance. A file that cannot be hashed is reported, in red when it is
+     malformed, and prints nothing.
      */
-    func lines(for path: String, reporter: Reporter) -> [String] {
+    func lines(for path: String, reporter: Reporter) -> [Line] {
         let results: [DigestResult]
         do {
-            results = try self.digests(path)
+            results = try self.digests(path, reporter: reporter)
         } catch {
-            reporter.report(path: path, message: File.message(for: error))
+            reporter.report(path: path, message: File.message(for: error), tint: Self.tint(for: error))
             return []
         }
 
         guard !self.targets.isEmpty else {
             return results.map { result in
-                self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: self.algorithm)
+                Line(text: self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: self.algorithm), tint: result.tint)
             }
         }
 
-        var lines: [String] = []
+        var lines: [Line] = []
         for result in results {
             guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score, xlen: self.xlen) else {
                 continue
             }
+            let tint = match.score.map { self.matchTint($0) } ?? result.tint
             if self.quiet {
-                return [OutputFormatter.formatPath(path)]
+                return [Line(text: OutputFormatter.formatPath(path), tint: tint)]
             }
             if case .symhash = self.mode {
-                return [OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm)]
+                return [Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm), tint: tint)]
             }
-            lines.append(OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: self.algorithm))
+            lines.append(Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: self.algorithm), tint: tint))
         }
         return lines
+    }
+
+    /**
+     A fuzzy match's green, by its distance from identical toward the `--score` threshold: an ssdeep similarity falls from
+     100, a TLSH distance rises from 0. A TLSH distance has no upper bound, so from 300, where the TLSH paper's false
+     positives pass 79% (Table II), a match is gray whatever the threshold, and the greens stop there. Those rates count
+     the length, so with `--xlen` the greens run to the threshold. An ssdeep match is never gray: the same paper keeps its
+     false positives under 0.1% at any score (Table I).
+     */
+    func matchTint(_ score: Int) -> Tint {
+        if self.algorithm == .ssdeep {
+            return .match(distance: Double(100 - score) / Double(max(100 - self.score, 1)))
+        }
+        if self.xlen {
+            return .match(distance: Double(score) / Double(max(self.score, 1)))
+        }
+        guard score < 300 else {
+            return .weak
+        }
+        return .match(distance: Double(score) / Double(max(min(self.score, 300), 1)))
+    }
+
+    /**
+     Red for a file whose own bytes are malformed: its Mach-O, signature or XAR does not parse, or goes past a limit only
+     a crafted file reaches. Yellow for any other failure: the file could not be read, or changed while it was hashed.
+     */
+    static func tint(for error: Error) -> Tint {
+        error is ParserError || error is CDHashError || error is XARParser.XARError ? .malformed : .error
     }
 
     // MARK: - Digests
@@ -750,7 +850,7 @@ struct Digester {
     /**
      The digests of one file in the selected mode.
      */
-    private func digests(_ path: String) throws -> [DigestResult] {
+    private func digests(_ path: String, reporter: Reporter) throws -> [DigestResult] {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed.
         let file = try File(path: path)
         return switch self.mode {
@@ -763,16 +863,25 @@ struct Digester {
         case let .xarToc(hash, decompress):
             try XARParser.hashToc(file, algorithm: hash, decompress: decompress).map { [DigestResult(digest: $0)] } ?? []
         case .cdhash:
-            try self.cdHashDigests(file, path: path)
+            try self.cdHashDigests(file, path: path, reporter: reporter)
         }
     }
 
     /**
      One digest per code directory of each slice, `--exact` trimming an unsigned slice to its logical extent before
-     synthesizing its ad-hoc cdhash.
+     synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is warned about once, however many of
+     its directories fail.
      */
-    private func cdHashDigests(_ file: File, path: String) throws -> [DigestResult] {
-        try CDHash.hash(file, path: path, exact: self.exact).map { result in
+    private func cdHashDigests(_ file: File, path: String, reporter: Reporter) throws -> [DigestResult] {
+        let results = try CDHash.hash(file, path: path, exact: self.exact)
+        var warned: Set<String> = []
+        for result in results where result.invalid && warned.insert(result.arch ?? "").inserted {
+            // Security rejects the signature, so the slice is hashed as unsigned, or its code changed since signing.
+            let reason = result.adhoc ? "signature rejected, hashed as unsigned" : "invalid signature (code or signature have been modified)"
+            reporter.warn(path: result.arch.map { "\(path) (\($0))" } ?? path, message: reason)
+        }
+
+        return results.map { result in
             // An unsigned slice is labeled ADHOC; its hash type (sha256 / sha1) is appended to tell the two
             // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous.
             let tag: String? = if result.adhoc {
@@ -781,7 +890,7 @@ struct Digester {
                 result.type
             }
             let label = [result.arch, tag].compactMap(\.self).joined(separator: ", ")
-            return DigestResult(digest: result.hash, label: label.isEmpty ? nil : label)
+            return DigestResult(digest: result.hash, label: label.isEmpty ? nil : label, tint: result.adhoc ? .adhoc : .none)
         }
     }
 

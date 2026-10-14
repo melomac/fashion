@@ -114,6 +114,38 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    // MARK: - Verification
+
+    func testModifiedCodeIsFlagged() throws {
+        // A byte of code flipped after signing leaves the signature, and so the cdhash, as it was, but the code no longer
+        // hashes to its directory: codesign --verify reports "code or signature have been modified" for that slice only,
+        // and fashion names it on stderr, even into a pipe, without failing the run.
+        var data = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
+        let slice: (offset: Int, length: Int, arch: String?) = switch try Universal.open(data: data) {
+        case let .fat(archs): try XCTUnwrap(archs.last.map { ($0.offset, $0.length, $0.name) })
+        default: (0, data.count, nil)
+        }
+        data[slice.offset + slice.length / 4] ^= 0xff
+        let tampered = try self.temporaryDirectory() / "ls"
+        try data.write(to: tampered)
+
+        let results = try CDHash.hash(path: tampered.path)
+        XCTAssertEqual(results.map(\.hash), try CDHash.hash(path: "/bin/ls").map(\.hash))
+        XCTAssertFalse(try CDHash.hash(path: "/bin/ls").contains(where: \.invalid))
+        for result in results {
+            XCTAssertEqual(result.invalid, result.arch == slice.arch, result.arch ?? "thin")
+        }
+
+        let (status, errors) = try runFashion(["--algo", "cdhash", tampered.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, ["fashion: \(tampered.path)\(slice.arch.map { " (\($0))" } ?? ""): invalid signature (code or signature have been modified)"])
+
+        let archArgs = slice.arch.map { ["--arch", $0] } ?? []
+        XCTAssertThrowsError(try codesign(["--verify"] + archArgs + [tampered.path])) { error in
+            XCTAssertTrue((error as? CodesignFailure)?.output.contains("code or signature have been modified") == true, "\(error)")
+        }
+    }
+
     // MARK: - Matching integration
 
     func testExactMatchWorks() throws {

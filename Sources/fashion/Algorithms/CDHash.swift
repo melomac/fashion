@@ -58,6 +58,9 @@ enum CDHash {
         let type: String?
         /// True when the slice is unsigned and the hash was synthesized.
         let adhoc: Bool
+        /// True when the slice's signature does not hold: Security rejects it, so the hash is synthesized, or the code no
+        /// longer hashes to this directory.
+        let invalid: Bool
     }
 
     /**
@@ -68,6 +71,8 @@ enum CDHash {
 
      With `exact`, an unsigned slice is trimmed to its logical extent before synthesis,
      so appended trailing garbage does not change its ad-hoc cdhash.
+
+     Each embedded code directory is checked against the code it signs, which reads the whole slice.
      */
     static func hash(_ file: File, path: String, exact: Bool = false) throws -> [SliceResult] {
         switch try Universal.open(file) {
@@ -101,7 +106,7 @@ enum CDHash {
         let ambiguous = directories.count > 1
 
         return directories.map { cd in
-            SliceResult(hash: cd.hash, arch: arch, type: ambiguous ? cd.type : nil, adhoc: cd.adhoc)
+            SliceResult(hash: cd.hash, arch: arch, type: ambiguous ? cd.type : nil, adhoc: cd.adhoc, invalid: cd.invalid)
         }
     }
 
@@ -121,6 +126,8 @@ extension MachO {
         /// The hash type's name (see `HashType`): `sha1` or `sha256` for a synthesized ad-hoc directory.
         let type: String
         let adhoc: Bool
+        /// See `CDHash.SliceResult.invalid`.
+        let invalid: Bool
     }
 
     /**
@@ -130,12 +137,12 @@ extension MachO {
      signed or not: `codesign -d` calls such a file "not signed at all" whatever its `LC_CODE_SIGNATURE` holds.
 
      A signed slice yields every code directory Security loads from its signature, strongest first per `HashType.rank`: the
-     head is the kernel-enforced cdhash.
+     head is the kernel-enforced cdhash. Each of them is checked against the code (`validateExecutable`).
 
      An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1). So does a signed slice whose code
-     directories Security rejects: `codesign` calls it "not signed at all" and signs it up to where its signature starts,
-     the code limit of `MachORep::signingLimit`. A signature Security cannot read at all is an error, as `codesign` cannot
-     sign over it.
+     directories Security rejects, marked invalid: `codesign` calls it "not signed at all" and signs it up to where its
+     signature starts, the code limit of `MachORep::signingLimit`. A signature Security cannot read at all is an error, as
+     `codesign` cannot sign over it.
 
      A slice of a universal file is judged on its own, as if extracted: `codesign` instead decides a whole 32-bit
      universal file from its first slice, and treats a 64-bit one (`lipo -fat64`) as a generic file outright.
@@ -150,14 +157,14 @@ extension MachO {
             let hashes = try Self.loadCodeDirectories(self.signingData(signature))
                 .sorted { $0.hashType.rank > $1.hashType.rank }
                 .map { cd in
-                    CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false)
+                    try CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !self.validateExecutable(cd))
                 }
             if !hashes.isEmpty {
                 return (hashes, nil)
             }
         }
 
-        return try (self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.length)), nil)
+        return try (self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.length), invalid: signature != nil), nil)
     }
 
     // MARK: - Embedded signature
@@ -256,14 +263,35 @@ extension MachO {
         return nil
     }
 
+    /**
+     Whether the code still hashes to `cd`'s code slots, like `SecStaticCode::validateExecutable`: each page up to the
+     code limit, the last one shorter, against its slot. False when a byte of code changed since signing, which
+     `codesign --verify` reports as "code or signature have been modified", or when the slice ends before the code limit.
+     */
+    private func validateExecutable(_ cd: EmbeddedCodeDirectory) throws -> Bool {
+        guard cd.codeLimit <= UInt64(self.length) else {
+            return false
+        }
+
+        var slot = 0
+        var valid = true
+        try self.forEachPage(upTo: Int(cd.codeLimit), pageSize: Int(min(cd.pageSize, cd.codeLimit))) { page in
+            // The rest of the code is still read, but no longer hashed.
+            valid = valid && cd.validateSlot(page, slot)
+            slot += 1
+        }
+        return valid
+    }
+
     // MARK: - Ad-hoc synthesis
 
     /**
      The ad-hoc cdhashes of an unsigned slice whose code ends at `codeLimit`, SHA-256 then SHA-1: the digests of the
      directories `codesign --detached -s - --identifier ADHOC --digest-algorithm=sha1,sha256` builds, byte for byte.
      Throws where Security fails to sign: for a version or segment command it cannot read, or a directory too large.
+     `invalid` when they stand in for a signature Security rejects.
      */
-    private func adhocCDHashes(codeLimit: Int) throws -> [CodeDirectoryHash] {
+    private func adhocCDHashes(codeLimit: Int, invalid: Bool) throws -> [CodeDirectoryHash] {
         // Security's Signer::populate: fill a CodeDirectory::Builder with what MachORep reports.
         let execSeg = try self.execSeg()
         let builder = try CodeDirectoryBuilder(
@@ -276,7 +304,37 @@ extension MachO {
         )
 
         return try builder.build(code: self).map { hashType, cd in
-            CodeDirectoryHash(hash: hashType.digest(cd).hexString, type: hashType.name, adhoc: true)
+            CodeDirectoryHash(hash: hashType.digest(cd).hexString, type: hashType.name, adhoc: true, invalid: invalid)
+        }
+    }
+
+    /**
+     Stream the first `limit` bytes of the image through `body` a page at a time, the last page shorter: what each code
+     slot hashes. A page cut by the end of a chunk waits for the rest of it.
+     */
+    fileprivate func forEachPage(upTo limit: Int, pageSize: Int, _ body: (UnsafeRawBufferPointer) -> Void) throws {
+        var partial = Data()
+        try self.stream(0 ..< limit) { chunk in
+            var chunk = chunk
+            if !partial.isEmpty {
+                let fill = min(pageSize - partial.count, chunk.count)
+                partial.append(contentsOf: chunk.prefix(fill))
+                chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(fill))
+                guard partial.count == pageSize else {
+                    return
+                }
+                partial.withUnsafeBytes(body)
+                partial.removeAll(keepingCapacity: true)
+            }
+            while chunk.count >= pageSize {
+                body(UnsafeRawBufferPointer(rebasing: chunk.prefix(pageSize)))
+                chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(pageSize))
+            }
+            partial.append(contentsOf: chunk)
+        }
+        // The last page, shorter than the others.
+        if !partial.isEmpty {
+            partial.withUnsafeBytes(body)
         }
     }
 
@@ -414,6 +472,12 @@ extension MachO {
 private struct EmbeddedCodeDirectory {
     let data: Data
     let hashType: HashType
+    /// Where code slot 0 starts.
+    let hashOffset: Int
+    /// The bytes of code the code slots cover, from the start of the slice.
+    let codeLimit: UInt64
+    /// The bytes of code each code slot covers, the last one fewer: all of them when the directory is not paged.
+    let pageSize: UInt64
 
     /**
      A code directory Security accepts, with the checks `SecStaticCode::loadCodeDirectories` makes: its header holds
@@ -514,6 +578,19 @@ private struct EmbeddedCodeDirectory {
 
         self.data = blob
         self.hashType = hashType
+        self.hashOffset = hashOffset
+        self.codeLimit = codeLimit
+        self.pageSize = pageSizeLog != 0 ? 1 &<< UInt64(pageSizeLog) : codeLimit
+    }
+
+    /**
+     Whether `page` hashes to code slot `slot`, like `CodeDirectory::validateSlot`: a truncated hash type compares its
+     slot's width of the digest.
+     */
+    func validateSlot(_ page: UnsafeRawBufferPointer, _ slot: Int) -> Bool {
+        let size = self.hashType.slotSize
+        let offset = self.hashOffset + slot * size
+        return self.hashType.digest(page).prefix(size) == self.data.bytes(in: offset ..< offset + size)
     }
 }
 
@@ -562,36 +639,10 @@ private struct CodeDirectoryBuilder {
     func build(code image: MachO) throws -> [(hashType: HashType, directory: Data)] {
         let hashTypes: [HashType] = [.sha256, .sha1]
         var directories = try hashTypes.map { try self.directory(hashType: $0) }
-        func hashPage(_ page: UnsafeRawBufferPointer) {
+        try image.forEachPage(upTo: self.codeLimit, pageSize: 1 << Int(self.pageSizeLog)) { page in
             for index in hashTypes.indices {
                 directories[index].append(hashTypes[index].digest(page))
             }
-        }
-
-        // Pages are hashed as the code streams through; one cut by the end of a chunk waits for the rest of it.
-        let pageSize = 1 << Int(self.pageSizeLog)
-        var partial = Data()
-        try image.stream(0 ..< self.codeLimit) { chunk in
-            var chunk = chunk
-            if !partial.isEmpty {
-                let fill = min(pageSize - partial.count, chunk.count)
-                partial.append(contentsOf: chunk.prefix(fill))
-                chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(fill))
-                guard partial.count == pageSize else {
-                    return
-                }
-                partial.withUnsafeBytes(hashPage)
-                partial.removeAll(keepingCapacity: true)
-            }
-            while chunk.count >= pageSize {
-                hashPage(UnsafeRawBufferPointer(rebasing: chunk.prefix(pageSize)))
-                chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(pageSize))
-            }
-            partial.append(contentsOf: chunk)
-        }
-        // The last page, shorter than the others.
-        if !partial.isEmpty {
-            partial.withUnsafeBytes(hashPage)
         }
 
         return Array(zip(hashTypes, directories))
