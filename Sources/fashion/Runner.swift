@@ -22,7 +22,7 @@ import System
  +--------------------------+       +---------+       +--------------------------------+
  | FileWalker (fts)         |  put  |         |  take | output.started(index, path)    |
  | unsorted: as found       |------>| (index, |------>| digester.lines(for: path)      |
- | --sort: roots in byte    |       |  path)  |       |   digests(path), by mode:      |
+ | --sort: roots in natural |       |  path)  |       |   digests(path), by mode:      |
  | order, each directory    |       |         |       |     symhash | xar-toc |        |
  | by fashion_fts_compare   |       +---------+       |     cdhash | slices | file     |
  | walk errors -> Reporter  |                         |   -> [DigestResult]            |

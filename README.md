@@ -179,7 +179,8 @@ Built with `SECURITY_STRICT_VALIDATION=NO` in the environment, `--exact` keeps e
 The `-j` / `--jobs` flag controls parallel workers.
 Set `-j 0` to use all available CPU cores.
 
-The `--sort` flag prints files in the byte order of their paths, whatever the number of jobs: the walk sorts each directory as it reads it, so hashing starts right away, and a file's lines wait until every file before it has printed.
+The `--sort` flag prints files in the natural order of paths: a run of digits sorts as a number, so `file-2` comes before `file-10`, and any other byte as itself, so the order holds in every locale.
+The walk sorts each directory as it reads it, so hashing starts right away, and a file's lines wait until every file before it has printed.
 
 Enumeration is demand-driven, so the walk never runs far ahead of hashing.
 

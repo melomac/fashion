@@ -10,10 +10,6 @@ final class FileEnumeratorTests: XCTestCase {
         Array(FileWalker(paths: paths, follow: false, sorted: true))
     }
 
-    private func byteSorted(_ paths: [String]) -> [String] {
-        paths.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
-    }
-
     func testSortedWalkSkipsFifo() throws {
         // A directly-named FIFO is not a file to hash: the walk skips it.
         let url = FileManager.default.temporaryDirectory / "fashion-fifo-\(UUID())"
@@ -75,7 +71,7 @@ final class FileEnumeratorTests: XCTestCase {
         let streamed = Array(FileWalker(paths: [dir.path], follow: false))
 
         XCTAssertEqual(sorted.count, 4)
-        XCTAssertEqual(self.byteSorted(streamed), sorted)
+        XCTAssertEqual(naturallySorted(streamed), sorted)
     }
 
     func testStreamingWalkReportsErrorsAndSkipsFifo() throws {
@@ -124,7 +120,7 @@ final class FileEnumeratorTests: XCTestCase {
         return dir
     }
 
-    func testSortedWalkMatchesSortingFullPathBytes() throws {
+    func testSortedWalkMatchesSortingFullPaths() throws {
         let dir = try self.makeSortTree()
         defer {
             try? FileManager.default.removeItem(at: dir)
@@ -132,7 +128,7 @@ final class FileEnumeratorTests: XCTestCase {
 
         let walked = Array(FileWalker(paths: [dir.path], follow: false))
         XCTAssertEqual(walked.count, 14)
-        XCTAssertEqual(self.sortedWalk([dir.path]), self.byteSorted(walked))
+        XCTAssertEqual(self.sortedWalk([dir.path]), naturallySorted(walked))
     }
 
     func testSortedWalkOrdersRoots() throws {
@@ -145,7 +141,7 @@ final class FileEnumeratorTests: XCTestCase {
         let roots = [(dir / "b").path, (dir / "a-b").path, (dir / "a").path, (dir / "Z").path]
         let walked = roots.flatMap { Array(FileWalker(paths: [$0], follow: false)) }
         XCTAssertEqual(walked.count, 1 + 1 + 4 + 1)
-        XCTAssertEqual(self.sortedWalk(roots), self.byteSorted(walked))
+        XCTAssertEqual(self.sortedWalk(roots), naturallySorted(walked))
 
         // A root inside another is walked after it, not merged into it.
         XCTAssertEqual(self.sortedWalk([(dir / "a").path, dir.path]), self.sortedWalk([dir.path]) + self.sortedWalk([(dir / "a").path]))
@@ -154,6 +150,40 @@ final class FileEnumeratorTests: XCTestCase {
         for roots in [nested, nested.reversed()] {
             XCTAssertEqual(self.sortedWalk(roots), self.sortedWalk([nested[0]]) + self.sortedWalk([nested[1]]))
         }
+    }
+
+    /**
+     A tree whose names hold numbers, and its files in the order `--sort` lists them: numbers by value, past what 64 bits
+     hold, and equal ones with more leading zeros first, even where the rest of the path would order them the other way
+     (`r01/z` before `r1/b`).
+     */
+    private func makeNumberTree() throws -> (dir: URL, sorted: [String]) {
+        let dir = FileManager.default.temporaryDirectory / "fashion-numbers-\(UUID())"
+        let names = [
+            "img", "img-1G", "img-2G", "img-10G", "img-12G", "img.dst/bin/img",
+            "r01/z", "r1-x", "r1/b", "r10/a",
+            "v007", "v07", "v7", "v9", "v18446744073709551615", "v18446744073709551616",
+        ]
+        for name in names {
+            let url = dir / name
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: url)
+        }
+        return (dir, names.map { (dir / $0).path })
+    }
+
+    func testSortedWalkOrdersNumbersByValue() throws {
+        let (dir, sorted) = try self.makeNumberTree()
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        XCTAssertEqual(self.sortedWalk([dir.path]), sorted)
+        XCTAssertEqual(naturallySorted(Array(FileWalker(paths: [dir.path], follow: false))), sorted)
+
+        // Roots order the same way, whichever way they are given.
+        let roots = ["img-10G", "img.dst", "img-2G", "img", "img-1G", "img-12G"].map { (dir / $0).path }
+        XCTAssertEqual(self.sortedWalk(roots), Array(sorted[..<6]))
     }
 
     func testRootsReportTheirOwnErrors() throws {

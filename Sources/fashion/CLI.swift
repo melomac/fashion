@@ -104,7 +104,7 @@ struct Fashion: ParsableCommand {
     @Flag(help: "Hash the exact Mach-O image, ignoring appended bytes.")
     var exact = false
 
-    @Flag(inversion: .prefixedNo, help: "Sort file paths before processing.")
+    @Flag(inversion: .prefixedNo, help: "Sort file paths, numbers by value.")
     var sort = false
 
     // MARK: - Grouped Options

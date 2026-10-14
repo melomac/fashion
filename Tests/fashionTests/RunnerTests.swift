@@ -88,7 +88,7 @@ final class RunnerTests: XCTestCase {
         let sequential = try run(jobs: 1)
         XCTAssertEqual(sequential.count, 300)
         let paths = sequential.map { String($0.split(separator: "  ", maxSplits: 1)[1]) }
-        XCTAssertEqual(paths, paths.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) })
+        XCTAssertEqual(paths, naturallySorted(paths))
         XCTAssertEqual(try run(jobs: 8), sequential)
     }
 

@@ -9,9 +9,9 @@ import System
 
  Enumeration is pull-based (`next()`), so the walk stays a short queue ahead of the (slower) hashing stage instead of
  running the whole tree ahead of it. Every root goes to one fts walk, which reports each one that cannot be walked with
- its own error. Sorted, it lists files in the byte order of their paths as it goes: fts orders the roots and each
- directory as it reads it (see `fashion_fts_compare`). Roots nested in one another are walked one after the other, not
- merged.
+ its own error. Sorted, it lists files in the natural order of their paths as it goes, numbers by value: fts orders the
+ roots and each directory as it reads it (see `fashion_fts_compare`). Roots nested in one another are walked one after
+ the other, not merged.
 
  Not thread-safe: `next()` must be called serially (the walking thread does exactly this).
  */

@@ -171,6 +171,49 @@ func runFashion(_ arguments: [String], sh script: String? = nil) throws -> (stat
     return (process.terminationStatus, String(decoding: output, as: UTF8.self).split(separator: "\n").map(String.init))
 }
 
+/**
+ `paths` in the natural order `--sort` lists files in, written apart from `fashion_fts_compare`: each path is cut into
+ runs of ASCII digits and single other bytes, and two paths compare at the first run they differ in, two numbers by
+ value, then the one with more leading zeros first, and anything else by its first byte.
+ */
+func naturallySorted(_ paths: [String]) -> [String] {
+    func isDigit(_ byte: UInt8) -> Bool {
+        (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte)
+    }
+
+    func runs(_ path: String) -> [[UInt8]] {
+        var runs: [[UInt8]] = []
+        for byte in path.utf8 {
+            if isDigit(byte), let last = runs.last?.last, isDigit(last) {
+                runs[runs.count - 1].append(byte)
+            } else {
+                runs.append([byte])
+            }
+        }
+        return runs
+    }
+
+    func precedes(_ lhs: [[UInt8]], _ rhs: [[UInt8]]) -> Bool {
+        for (left, right) in zip(lhs, rhs) where left != right {
+            guard isDigit(left[0]), isDigit(right[0]) else {
+                return left[0] < right[0]
+            }
+            let leftDigits = left.drop { $0 == UInt8(ascii: "0") }
+            let rightDigits = right.drop { $0 == UInt8(ascii: "0") }
+            if leftDigits.count != rightDigits.count {
+                return leftDigits.count < rightDigits.count
+            }
+            if leftDigits != rightDigits {
+                return leftDigits.lexicographicallyPrecedes(rightDigits)
+            }
+            return left.count > right.count
+        }
+        return lhs.count < rhs.count
+    }
+
+    return paths.map { ($0, runs($0)) }.sorted { precedes($0.1, $1.1) }.map(\.0)
+}
+
 extension URL {
     /**
      Appends a path component using the `/` operator. Test convenience.
