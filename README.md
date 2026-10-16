@@ -66,7 +66,7 @@ Even worse, on Java, the code was using a signed integer (~2GB).
 The `tlsh` tool reads a file's size into a 32-bit `int` instead: it calls a file "too small" when that size modulo 4 GiB is 2 GiB or more, and hashes only that many bytes of any other.
 
 `fashion` names on standard error each file TLSH cannot hash: under 50 bytes, with too little variation, and greater than ~4GB ([discussion](https://github.com/trendmicro/tlsh/issues/84)).
-Neither changes the exit status.
+Neither changes the exit status, and `--quiet` leaves them out.
 
 A TLSH distance counts file length: padding, such as appended null bytes, adds to it even when the content is the same.
 `--xlen` leaves the length out of `--match`, as the `tlsh` tool's `-xlen` does: a 50 KB binary padded with zeros to 2.9 MB is then 1 away from itself instead of 505.
@@ -90,7 +90,7 @@ The CodeDirectory Hash is how \*OS identifies an executable: the hash of the dir
 `fashion` prints the CDHash of Mach-O binaries, one line per code directory, in the kernel's preferred order ([XNU][]).
 
 A binary signed with multiple algorithms gets multiple lines, each labeled with its hash type: `sha1`, `sha256`, `sha256t`, `sha384`, `sha512`.
-We print the untrunacted `CandidateCDHashFull`, and `--match` accepts it as well as the truncated 20-byte `CDHash` Apple's tools usually show.
+We print the untruncated `CandidateCDHashFull`, and `--match` accepts it as well as the truncated 20-byte `CDHash` Apple's tools usually show.
 
 When `/usr/libexec/syspolicyd` meets unsigned code, it has the Security framework sign it in memory and looks up a notarization ticket for the computed hash.
 `fashion` builds the same signature and prints its CDHash, labeled `ADHOC`:
@@ -101,7 +101,7 @@ When `/usr/libexec/syspolicyd` meets unsigned code, it has the Security framewor
 A signature Security rejects counts as none, as `codesign` says "not signed at all": the file gets its `ADHOC` lines too, computed up to where the signature starts.
 
 Each signed slice's code is checked against its signature, as `codesign --verify` does, which reads every page of it.
-A slice whose signature does not hold is named on standard error, without changing the exit status: "signature rejected, hashed as unsigned", or "invalid signature (code or signature have been modified)" when a byte of code changed since signing.
+A slice whose signature does not hold is labeled `INVALID`, and named on standard error without changing the exit status: "signature rejected, hashed as unsigned", or "invalid signature (code or signature have been modified)" when a byte of code changed since signing.
 
 Mach-O files that are not code to `codesign` — object files, dSYMs, core dumps, kernel filesets — have no identity of either kind and yield no line, signed or not.
 
@@ -206,6 +206,7 @@ On a terminal, `fashion` colors lines by what they tell:
 * **Yellow**: anything else `fashion` reports on standard error: a file that can't be read, a signature that doesn't hold, or a file TLSH can't hash;
 * **Dimmed**: `ADHOC` lines, synthesized for unsigned code.
 
+A terminal with 16 colors, by `TERM` and `COLORTERM`, gets its own green, dimmed as soon as a match is not full.
 Set `NO_COLOR` to turn this off.
 
 ### Exit status

@@ -149,7 +149,7 @@ final class RunnerTests: XCTestCase {
         // Greens by quarters of the way to --score: with 40, a TLSH distance of 0 is full green, then darker each 10.
         func sgr(_ arguments: [String], _ scores: [Int]) throws -> [String?] {
             let digester = try Digester(Fashion.parse(["x"] + arguments))
-            return scores.map { digester.matchTint($0).sgr }
+            return scores.map { digester.matchTint($0).sgr() }
         }
         let greens = ["38;5;46", "38;5;40", "38;5;34", "38;5;28", "38;5;22"]
         XCTAssertEqual(try sgr(["--algo", "tlsh"], [0, 10, 20, 30, 40]), greens)
@@ -162,8 +162,8 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try sgr(["--algo", "ssdeep", "--score", "100"], [100]), ["38;5;46"])
         XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "0"], [0]), ["38;5;46"])
         // An exact match has no score: full green, with any algorithm.
-        XCTAssertEqual(try Digester(Fashion.parse(["x"])).matchTint(nil).sgr, "38;5;46")
-        XCTAssertEqual(try Digester(Fashion.parse(["x", "--algo", "cdhash"])).matchTint(nil).sgr, "38;5;46")
+        XCTAssertEqual(try Digester(Fashion.parse(["x"])).matchTint(nil).sgr(), "38;5;46")
+        XCTAssertEqual(try Digester(Fashion.parse(["x", "--algo", "cdhash"])).matchTint(nil).sgr(), "38;5;46")
     }
 
     func testExactMatchIsGreen() throws {
@@ -195,10 +195,10 @@ final class RunnerTests: XCTestCase {
         var data = Data()
         [MH_MAGIC_64, UInt32(bitPattern: CPU_TYPE_ARM64), 0, UInt32(MH_EXECUTE), 1, 0x1000, 0, 0].forEach { data.appendUInt32($0) }
         XCTAssertThrowsError(try Universal.open(data: data)) { error in
-            XCTAssertEqual(Digester.tint(for: error).sgr, "31")
+            XCTAssertEqual(Digester.tint(for: error).sgr(), "31")
         }
-        XCTAssertEqual(Digester.tint(for: Errno.permissionDenied).sgr, "33")
-        XCTAssertEqual(Digester.tint(for: FileError.replaced).sgr, "33")
+        XCTAssertEqual(Digester.tint(for: Errno.permissionDenied).sgr(), "33")
+        XCTAssertEqual(Digester.tint(for: FileError.replaced).sgr(), "33")
     }
 
     func testTLSHCaveatsDoNotFail() throws {
@@ -217,6 +217,8 @@ final class RunnerTests: XCTestCase {
             "fashion: \(tiny.path): TLSH cannot hash: input too small (10 bytes, minimum 50)",
             "fashion: \(fat.path) (arm64): TLSH cannot hash: not enough variation in input",
         ])
+        // --quiet keeps them off stderr.
+        XCTAssertEqual(try runFashion(["--algo", "tlsh", "--slices", "-j", "1", "-q", tiny.path, fat.path]).errors, [])
     }
 
     func testSlicesHashInPlace() throws {

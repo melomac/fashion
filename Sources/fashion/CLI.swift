@@ -101,7 +101,7 @@ struct Fashion: ParsableCommand {
     @Flag(name: [.customShort("L"), .long], help: "Follow symlinks.")
     var follow = false
 
-    @Flag(name: .shortAndLong, help: "Quiet output.")
+    @Flag(name: .shortAndLong, help: "Quiet output: digests alone, or matched paths, and no TLSH caveat.")
     var quiet = false
 
     @Flag(help: "Hash individual Mach-O architectures.")

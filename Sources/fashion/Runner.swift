@@ -103,8 +103,9 @@ enum Tint: Equatable {
     /// Dimmed: a synthesized ad-hoc cdhash.
     case adhoc
 
-    /// The SGR parameters that set it.
-    var sgr: String? {
+    /// The SGR parameters that set it: with 256 colors, greens by shade and a gray; with 16, the terminal's own green,
+    /// dimmed past identical, and bright black for gray.
+    func sgr(colors256: Bool = true) -> String? {
         switch self {
         case .none: nil
         case .malformed: "31"
@@ -113,13 +114,13 @@ enum Tint: Equatable {
         case let .match(distance):
             // Full green only when identical, then darker greens by quarters of the way to the threshold.
             switch distance {
-            case ...0: "38;5;46" // #00ff00
-            case ...0.25: "38;5;40" // #00d700
-            case ...0.5: "38;5;34" // #00af00
-            case ...0.75: "38;5;28" // #008700
-            default: "38;5;22" // #005f00
+            case ...0: colors256 ? "38;5;46" : "32" // #00ff00
+            case ...0.25: colors256 ? "38;5;40" : "2;32" // #00d700
+            case ...0.5: colors256 ? "38;5;34" : "2;32" // #00af00
+            case ...0.75: colors256 ? "38;5;28" : "2;32" // #008700
+            default: colors256 ? "38;5;22" : "2;32" // #005f00
             }
-        case .weak: "38;5;245"
+        case .weak: colors256 ? "38;5;245" : "90"
         }
     }
 }
@@ -132,17 +133,21 @@ enum Tint: Equatable {
  terminal's scrollback.
 
  On a terminal, control characters in a line show as "?" (see `printable(_:)`), and a line shows in its tint unless
- `TERM=dumb` or `NO_COLOR` is set (https://no-color.org).
+ `TERM=dumb` or `NO_COLOR` is set (https://no-color.org): in 256 colors when `TERM` (xterm-256color, xterm-direct) or
+ `COLORTERM` claims them, in 16 otherwise.
 
  Off a terminal there is no status line, and lines go straight out: the callers' own locks keep them whole, and nothing
  here makes a signal handler or a diagnostic wait for a stdout write blocked by a reader that stopped reading.
  */
 final class Console: @unchecked Sendable {
     /// Whether stdout is a terminal that can show the status line (not Emacs-style `TERM=dumb`).
-    let isLive = isatty(STDOUT_FILENO) == 1 && ProcessInfo.processInfo.environment["TERM"] != "dumb"
+    private static let environment = ProcessInfo.processInfo.environment
+    private static let dumb = Console.environment["TERM"] == "dumb"
+    let isLive = isatty(STDOUT_FILENO) == 1 && !Console.dumb
     private let stdoutIsTerminal = isatty(STDOUT_FILENO) == 1
     private let stderrIsTerminal = isatty(STDERR_FILENO) == 1
-    private let tints = ProcessInfo.processInfo.environment["TERM"] != "dumb" && ProcessInfo.processInfo.environment["NO_COLOR", default: ""].isEmpty
+    private let tints = !Console.dumb && Console.environment["NO_COLOR", default: ""].isEmpty
+    private let colors256 = ["256color", "direct"].contains { Console.environment["TERM", default: ""].contains($0) } || Console.environment["COLORTERM"] != nil
     private let lock = NSLock()
     private var shown = false
     private var closed = false
@@ -151,7 +156,7 @@ final class Console: @unchecked Sendable {
      Write a line to stdout; throws on a write error.
      */
     func out(_ line: String, tint: Tint = .none) throws {
-        try self.write(self.stdoutIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none) : line, to: .standardOutput)
+        try self.write(self.stdoutIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none, colors256: self.colors256) : line, to: .standardOutput)
     }
 
     /**
@@ -159,7 +164,7 @@ final class Console: @unchecked Sendable {
      trapped SIGPIPE.
      */
     func err(_ line: String, tint: Tint = .none) {
-        try? self.write(self.stderrIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none) : line, to: .standardError)
+        try? self.write(self.stderrIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none, colors256: self.colors256) : line, to: .standardError)
     }
 
     /**
@@ -225,8 +230,8 @@ final class Console: @unchecked Sendable {
     /**
      A printable line in its tint, which ends with the line.
      */
-    static func tinted(_ line: String, _ tint: Tint) -> String {
-        tint.sgr.map { "\u{1B}[\($0)m\(line)\u{1B}[0m" } ?? line
+    static func tinted(_ line: String, _ tint: Tint, colors256: Bool = true) -> String {
+        tint.sgr(colors256: colors256).map { "\u{1B}[\($0)m\(line)\u{1B}[0m" } ?? line
     }
 
     /**
@@ -872,8 +877,12 @@ struct Digester {
     private func digests(_ path: String, reporter: Reporter) throws -> [DigestResult] {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed.
         let file = try File(path: path)
-        // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about.
+        // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless
+        // --quiet keeps the lines alone.
         let caveat = { (arch: String?, message: String) in
+            guard !self.quiet else {
+                return
+            }
             reporter.inform(path: arch.map { "\(path) (\($0))" } ?? path, message: message)
         }
         return switch self.mode {
@@ -892,8 +901,8 @@ struct Digester {
 
     /**
      One digest per code directory of each slice, `--exact` trimming an unsigned slice to its logical extent before
-     synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is warned about once, however many of
-     its directories fail.
+     synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is labeled INVALID, and warned about
+     once, however many of its directories fail.
      */
     private func cdHashDigests(_ file: File, path: String, reporter: Reporter) throws -> [DigestResult] {
         let results = try CDHash.hash(file, path: path, exact: self.exact)
@@ -906,13 +915,14 @@ struct Digester {
 
         return results.map { result in
             // An unsigned slice is labeled ADHOC; its hash type (sha256 / sha1) is appended to tell the two
-            // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous.
+            // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous. A signature that does
+            // not hold is labeled INVALID, so the line tells what stderr does.
             let tag: String? = if result.adhoc {
                 result.type.map { "ADHOC, \($0)" } ?? "ADHOC"
             } else {
                 result.type
             }
-            let label = [result.arch, tag].compactMap(\.self).joined(separator: ", ")
+            let label = [result.arch, result.invalid ? "INVALID" : nil, tag].compactMap(\.self).joined(separator: ", ")
             return DigestResult(digest: result.hash, label: label.isEmpty ? nil : label, tint: result.adhoc ? .adhoc : .none)
         }
     }

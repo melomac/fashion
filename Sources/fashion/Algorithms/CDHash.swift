@@ -72,7 +72,8 @@ enum CDHash {
      With `exact`, an unsigned slice is trimmed to its logical extent before synthesis,
      so appended trailing garbage does not change its ad-hoc cdhash.
 
-     Each embedded code directory is checked against the code it signs, which reads the whole slice.
+     Each embedded code directory is checked against the code it signs, which reads the slice once, no further than the
+     first slot that fails.
      */
     static func hash(_ file: File, path: String, exact: Bool = false) throws -> [SliceResult] {
         switch try Universal.open(file) {
@@ -137,7 +138,7 @@ extension MachO {
      signed or not: `codesign -d` calls such a file "not signed at all" whatever its `LC_CODE_SIGNATURE` holds.
 
      A signed slice yields every code directory Security loads from its signature, strongest first per `HashType.rank`: the
-     head is the kernel-enforced cdhash. Each of them is checked against the code (`validateExecutable`).
+     head is the kernel-enforced cdhash. Each of them is checked against the code (`validateExecutables`).
 
      An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1). So does a signed slice whose code
      directories Security rejects, marked invalid: `codesign` calls it "not signed at all" and signs it up to where its
@@ -154,11 +155,11 @@ extension MachO {
 
         let signature = try self.findCodeSignature()
         if let signature {
-            let hashes = try Self.loadCodeDirectories(self.signingData(signature))
+            let directories = try Self.loadCodeDirectories(self.signingData(signature))
                 .sorted { $0.hashType.rank > $1.hashType.rank }
-                .map { cd in
-                    try CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !self.validateExecutable(cd))
-                }
+            let hashes = try zip(directories, self.validateExecutables(directories)).map { cd, valid in
+                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !valid)
+            }
             if !hashes.isEmpty {
                 return (hashes, nil)
             }
@@ -264,23 +265,27 @@ extension MachO {
     }
 
     /**
-     Whether the code still hashes to `cd`'s code slots, like `SecStaticCode::validateExecutable`: each page up to the
-     code limit, the last one shorter, against its slot. False when a byte of code changed since signing, which
-     `codesign --verify` reports as "code or signature have been modified", or when the slice ends before the code limit.
+     Whether the code still hashes to each directory's code slots, like `SecStaticCode::validateExecutable`: each page
+     up to the code limit, the last one shorter, against its slot. False when a byte of code changed since signing,
+     which `codesign --verify` reports as "code or signature have been modified", or when the slice ends before the code
+     limit. The slice streams once for all the directories, each page through its hasher as it arrives, however large
+     the directory declares its pages, and no further than the last slot still to check. A scattered directory, whose
+     slots map to the pages its scatter vector places, is not checked.
      */
-    private func validateExecutable(_ cd: EmbeddedCodeDirectory) throws -> Bool {
-        guard cd.codeLimit <= UInt64(self.length) else {
-            return false
-        }
-
-        var slot = 0
-        var valid = true
-        try self.forEachPage(upTo: Int(cd.codeLimit), pageSize: Int(min(cd.pageSize, cd.codeLimit))) { page in
-            // The rest of the code is still read, but no longer hashed.
-            valid = valid && cd.validateSlot(page, slot)
-            slot += 1
-        }
-        return valid
+    private func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [Bool] {
+        var validators = directories.map { SlotValidator($0, length: self.length) }
+        let limit = validators.filter(\.checking).map(\.limit).max() ?? 0
+        do {
+            try self.stream(0 ..< limit) { chunk in
+                for index in validators.indices {
+                    validators[index].update(chunk)
+                }
+                guard validators.contains(where: \.checking) else {
+                    throw SlotValidator.Done()
+                }
+            }
+        } catch is SlotValidator.Done {}
+        return validators.map(\.valid)
     }
 
     // MARK: - Ad-hoc synthesis
@@ -478,6 +483,8 @@ private struct EmbeddedCodeDirectory {
     let codeLimit: UInt64
     /// The bytes of code each code slot covers, the last one fewer: all of them when the directory is not paged.
     let pageSize: UInt64
+    /// Whether a scatter vector places the pages its code slots cover.
+    let scattered: Bool
 
     /**
      A code directory Security accepts, with the checks `SecStaticCode::loadCodeDirectories` makes: its header holds
@@ -581,16 +588,71 @@ private struct EmbeddedCodeDirectory {
         self.hashOffset = hashOffset
         self.codeLimit = codeLimit
         self.pageSize = pageSizeLog != 0 ? 1 &<< UInt64(pageSizeLog) : codeLimit
+        self.scattered = scatterOffset != 0
     }
 
     /**
-     Whether `page` hashes to code slot `slot`, like `CodeDirectory::validateSlot`: a truncated hash type compares its
-     slot's width of the digest.
+     Whether `digest`, of a page, is code slot `slot`'s, like `CodeDirectory::validateSlot`: a truncated hash type
+     compares its slot's width of it.
      */
-    func validateSlot(_ page: UnsafeRawBufferPointer, _ slot: Int) -> Bool {
+    func validateSlot(_ digest: Data, _ slot: Int) -> Bool {
         let size = self.hashType.slotSize
         let offset = self.hashOffset + slot * size
-        return self.hashType.digest(page).prefix(size) == self.data.bytes(in: offset ..< offset + size)
+        return digest.prefix(size) == self.data.bytes(in: offset ..< offset + size)
+    }
+}
+
+/**
+ One code directory's slots checked as the code streams by: each page hashed as its bytes arrive, the last one shorter,
+ against its slot, until one fails or the code limit is reached. A directory the slice cannot hold fails outright; a
+ scattered one is taken as it is.
+ */
+private struct SlotValidator {
+    /// Thrown through the stream once no slot is left to check.
+    struct Done: Error {}
+
+    private let directory: EmbeddedCodeDirectory
+    /// The bytes of code to check: the code limit, or none.
+    let limit: Int
+    private let pageSize: Int
+    private var hasher: any HashFunction
+    private var slot = 0
+    /// Bytes of code fed so far, and of the current page.
+    private var offset = 0
+    private var filled = 0
+    private(set) var valid: Bool
+
+    init(_ directory: EmbeddedCodeDirectory, length: Int) {
+        let valid = directory.codeLimit <= UInt64(length)
+        self.directory = directory
+        self.hasher = directory.hashType.hasher()
+        self.valid = valid
+        self.limit = valid && !directory.scattered ? Int(directory.codeLimit) : 0
+        self.pageSize = valid ? Int(min(directory.pageSize, directory.codeLimit)) : 0
+    }
+
+    /// Whether a slot is left to check.
+    var checking: Bool {
+        self.valid && self.offset < self.limit
+    }
+
+    /// Feed the code from `offset` on.
+    mutating func update(_ chunk: UnsafeRawBufferPointer) {
+        var chunk = chunk
+        while self.checking, !chunk.isEmpty {
+            let page = min(self.pageSize, self.limit - (self.offset - self.filled))
+            let count = min(page - self.filled, chunk.count)
+            self.hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: chunk.prefix(count)))
+            chunk = UnsafeRawBufferPointer(rebasing: chunk.dropFirst(count))
+            self.offset += count
+            self.filled += count
+            if self.filled == page {
+                self.valid = self.directory.validateSlot(Data(self.hasher.finalize()), self.slot)
+                self.hasher = self.directory.hashType.hasher()
+                self.slot += 1
+                self.filled = 0
+            }
+        }
     }
 }
 
@@ -752,6 +814,16 @@ private enum HashType: UInt8 {
         case .sha256, .sha256Truncated: Data(SHA256.hash(data: data))
         case .sha384: Data(SHA384.hash(data: data))
         case .sha512: Data(SHA512.hash(data: data))
+        }
+    }
+
+    /// A hasher for a page fed as it arrives, whose digest `validateSlot` compares.
+    func hasher() -> any HashFunction {
+        switch self {
+        case .sha1: Insecure.SHA1()
+        case .sha256, .sha256Truncated: SHA256()
+        case .sha384: SHA384()
+        case .sha512: SHA512()
         }
     }
 }
