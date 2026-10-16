@@ -9,6 +9,7 @@ private enum OptionError: Error, Equatable {
     case exactWithIncompatibleMode
     case decompressWithoutXarToc
     case negativeJobs
+    case jobsWithAllJobs
     case negativeScore
     case xlenWithoutTLSHMatch
     case argumentNotUTF8(Int)
@@ -31,6 +32,8 @@ extension OptionError: LocalizedError {
             "--decompress requires --xar-toc."
         case .negativeJobs:
             "--jobs must be zero or greater."
+        case .jobsWithAllJobs:
+            "-J and --jobs are mutually exclusive."
         case .negativeScore:
             "--score must be zero or greater."
         case .xlenWithoutTLSHMatch:
@@ -89,8 +92,11 @@ struct Fashion: ParsableCommand {
     @Option(name: .shortAndLong, help: "Hash algorithm")
     var algo: Algorithm?
 
-    @Option(name: .shortAndLong, help: "Number of concurrent workers (0 = all CPUs).")
-    var jobs: Int = 1
+    @Option(name: .shortAndLong, help: "Number of concurrent workers (default: 1, 0 = all CPUs).")
+    var jobs: Int?
+
+    @Flag(name: .customShort("J"), help: "All CPUs, as --jobs 0.")
+    var allJobs = false
 
     @Flag(name: [.customShort("L"), .long], help: "Follow symlinks.")
     var follow = false
@@ -134,7 +140,8 @@ struct Fashion: ParsableCommand {
 
     var resolvedJobs: Int {
         let processors = ProcessInfo.processInfo.activeProcessorCount
-        return self.jobs == 0 ? processors : min(self.jobs, processors)
+        let jobs = self.allJobs ? 0 : self.jobs ?? 1
+        return jobs == 0 ? processors : min(jobs, processors)
     }
 
     var resolvedSeparator: String {
@@ -183,8 +190,11 @@ struct Fashion: ParsableCommand {
             throw ValidationError(OptionError.xlenWithoutTLSHMatch)
         }
         // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
-        if self.jobs < 0 {
+        if let jobs = self.jobs, jobs < 0 {
             throw ValidationError(OptionError.negativeJobs)
+        }
+        if self.allJobs, self.jobs != nil {
+            throw ValidationError(OptionError.jobsWithAllJobs)
         }
         if self.matchOptions.score < 0 {
             throw ValidationError(OptionError.negativeScore)

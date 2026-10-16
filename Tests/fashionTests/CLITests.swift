@@ -50,8 +50,13 @@ final class CLITests: XCTestCase {
 
     func testJobsResolveToTheProcessors() throws {
         let processors = ProcessInfo.processInfo.activeProcessorCount
+        XCTAssertEqual(try Fashion.parse([]).resolvedJobs, 1)
         XCTAssertEqual(try Fashion.parse(["--jobs=0"]).resolvedJobs, processors)
         XCTAssertEqual(try Fashion.parse(["--jobs=1"]).resolvedJobs, 1)
         XCTAssertEqual(try Fashion.parse(["--jobs=\(processors + 1)"]).resolvedJobs, processors)
+        // -J is --jobs 0, and says so rather than letting one silently win over the other.
+        XCTAssertEqual(try Fashion.parse(["-J"]).resolvedJobs, processors)
+        XCTAssertEqual(self.error(["-J", "--jobs=0"]), "-J and --jobs are mutually exclusive.")
+        XCTAssertEqual(self.error(["-J", "-j", "4"]), "-J and --jobs are mutually exclusive.")
     }
 }
