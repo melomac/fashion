@@ -90,9 +90,9 @@ struct Line {
 /**
  How a line shows on a terminal, by what it tells.
  */
-enum Tint {
+enum Tint: Equatable {
     case none
-    /// A fuzzy match by its distance, from 0 when identical to 1 at the threshold (see `Digester.matchTint(_:)`).
+    /// Green: a match by its distance, 0 when identical, as any exact match is, to 1 at the threshold (see `Digester.matchTint(_:)`).
     case match(distance: Double)
     /// Gray: a fuzzy match too distant to mean much, whatever the threshold.
     case weak
@@ -127,10 +127,12 @@ enum Tint {
 // MARK: - Console
 
 /**
- The terminal side of a run: lines to stdout and stderr and, when stdout is a terminal, a status line under the output.
+ The terminal side of a run: lines to stdout and stderr. When stdout is a terminal, a status line under the output.
  The status line is erased before any other write and when the run ends, so it never ends up in a pipe, a file or the
- terminal's scrollback. On a terminal, control characters in a line show as "?" (see `printable(_:)`), and a line shows
- in its tint unless `TERM=dumb` or `NO_COLOR` is set (https://no-color.org).
+ terminal's scrollback.
+
+ On a terminal, control characters in a line show as "?" (see `printable(_:)`), and a line shows in its tint unless
+ `TERM=dumb` or `NO_COLOR` is set (https://no-color.org).
 
  Off a terminal there is no status line, and lines go straight out: the callers' own locks keep them whole, and nothing
  here makes a signal handler or a diagnostic wait for a stdout write blocked by a reader that stopped reading.
@@ -793,8 +795,8 @@ struct Digester {
     /**
      The lines to print for one file: every digest or, in match mode, every matching one. A quiet match names the file
      once, and so does a symhash search, which reports files rather than slices (the slices of one binary usually share
-     a symhash). A fuzzy match is tinted by its distance. A file that cannot be hashed is reported, in red when it is
-     malformed, and prints nothing.
+     a symhash). A match is green, a fuzzy one by its distance. A file that cannot be hashed is reported, in red when it
+     is malformed, and prints nothing.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
         let results: [DigestResult]
@@ -816,7 +818,7 @@ struct Digester {
             guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score, xlen: self.xlen) else {
                 continue
             }
-            let tint = match.score.map { self.matchTint($0) } ?? result.tint
+            let tint = self.matchTint(match.score)
             if self.quiet {
                 return [Line(text: OutputFormatter.formatPath(path), tint: tint)]
             }
@@ -829,13 +831,19 @@ struct Digester {
     }
 
     /**
-     A fuzzy match's green, by its distance from identical toward the `--score` threshold: an ssdeep similarity falls from
-     100, a TLSH distance rises from 0. A TLSH distance has no upper bound, so from 300, where the TLSH paper's false
-     positives pass 79% (Table II), a match is gray whatever the threshold, and the greens stop there. Those rates count
-     the length, so with `--xlen` the greens run to the threshold. An ssdeep match is never gray: the same paper keeps its
-     false positives under 0.1% at any score (Table I).
+     A match's green: full for an exact one, whose score is nil, or a fuzzy one by its distance from identical toward
+     the `--score` threshold: an ssdeep similarity falls from 100, a TLSH distance rises from 0.
+
+     A TLSH distance has no upper bound, so from 300, where the TLSH paper's false positives pass 79% (Table II), a
+     match is gray whatever the threshold, and the greens stop there. Those rates count the length, so with `--xlen` the
+     greens run to the threshold.
+
+     An ssdeep match is never gray: the same paper keeps its false positives under 0.1% at any score (Table I).
      */
-    func matchTint(_ score: Int) -> Tint {
+    func matchTint(_ score: Int?) -> Tint {
+        guard let score else {
+            return .match(distance: 0)
+        }
         if self.algorithm == .ssdeep {
             return .match(distance: Double(100 - score) / Double(max(100 - self.score, 1)))
         }

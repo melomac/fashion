@@ -6,11 +6,11 @@ The project is hosted on [Codeberg](https://codeberg.org/melomac/fashion), mirro
 * [CryptoKit](https://developer.apple.com/documentation/cryptokit/ "Perform cryptographic operations securely and efficiently.") hash functions: [SHA-2][] (SHA-256 by default), insecure [SHA-1][] and [MD5][]
 * fuzzy hash functions: [ssdeep][] and [TLSH][] as submodules with Swift C bridging
 * searching for multiple digests with any algo and a similarity / distance score for fuzzy hash
-- [symhash][] of Mach-O binaries, with any algo, separator and optional sort
-- [CDHash][] of Mach-O binaries — embedded when signed, AD-HOC synthesized when not
+* [symhash][] of Mach-O binaries, with any algo, separator and optional sort
+* [CDHash][] of Mach-O binaries — embedded when signed, AD-HOC synthesized when not
 * [XAR][] archives (macOS packages) table of contents checksum with any algo and optional decompress (zlib)
 * [git-hash-object][]
-- multithreading
+* multithreading
 
 Multithreaded with `--jobs 0`, `fashion` is very fast and stays well under 150 MB of memory:
 
@@ -50,6 +50,12 @@ Project algorithm choices are driven by interoperability with existing tools and
 #### Insecure MD5 and SHA1
 
 MD5 and SHA1 both have known [collisions](https://en.wikipedia.org/wiki/Collision_attack#cite_note-md5-2004-1) and are considered insecure.
+
+#### ssdeep
+
+Clang's `-Wshorten-64-to-32`, which Xcode and SwiftPM enable, flags three implicit conversions in ssdeep's `edit_dist.c` and `fuzzy.c`, so every build of `fashion` printed them.
+All are lossless, bounded by the 64 characters of a spamsum, and [pull request #43](https://github.com/ssdeep-project/ssdeep/pull/43 "GitHub: ssdeep-project/ssdeep PR43: Silence -Wshorten-64-to-32 in edit_distn and score_strings") removes them without changing a digest or a score.
+Until it merges, the ssdeep submodule tracks that branch of [a fork](https://github.com/melomac/ssdeep/tree/shorten-64-to-32 "GitHub: melomac/ssdeep, branch shorten-64-to-32") instead of ssdeep-project.
 
 #### TLSH
 
@@ -192,28 +198,29 @@ Only regular files are hashed: a FIFO, device or socket is skipped, whether name
 
 On a terminal, `fashion` colors lines by what they tell:
 
-* green:
-  * a fuzzy match, full green when identical, darker greens as the distance grows toward the `--score` threshold;
+* **Green**
+  * a full match with any algorithm: a digest, a symhash, a cdhash, `ADHOC` included;
+  * a fuzzy match, darker greens as the distance grows toward the `--score` threshold;
   * a TLSH distance from 300, where [false positives][TLSH paper] pass 79%, is gray whatever the threshold, unless `--xlen` leaves out the length those rates count;
-  * an ssdeep match is never gray, its false positives staying under 0.1% at any score;
-* red: a file `fashion` could not parse, its Mach-O, signature or XAR malformed;
-* yellow: anything else `fashion` reports on standard error, a file that could not be read, a signature that does not hold, or a file TLSH can't hash;
-* dimmed: `ADHOC` lines, synthesized for unsigned code.
+* **Red**: a file `fashion` can't parse, a malformed Mach-O, signature or XAR;
+* **Yellow**: anything else `fashion` reports on standard error: a file that can't be read, a signature that doesn't hold, or a file TLSH can't hash;
+* **Dimmed**: `ADHOC` lines, synthesized for unsigned code.
 
-`NO_COLOR` turns it off.
+Set `NO_COLOR` to turn this off.
 
 ### Exit status
 
 `fashion` follows the grep/codesign convention so it can be scripted:
 
-| Code | Description                                               |
-|:----:|:----------------------------------------------------------|
-|  0   | success — in match mode, at least one match was found     |
-|  1   | match mode — no file matched                              |
-|  2   | one or more paths could not be enumerated or hashed       |
-|  64  | usage — invalid options, or an argument that is not UTF-8 |
+|  Code  | Description                                             |
+|:------:|:--------------------------------------------------------|
+| **0**  | success — in match mode: at least one file is matched   |
+| **1**  | match mode: no file matched                             |
+| **2**  | one or more paths couldn't be enumerated or hashed      |
+| **64** | usage: invalid options, or an argument that isn't UTF-8 |
 
-Per-path failures (a missing path, a permission-denied directory, an unreadable file, one that changed or was replaced while it was hashed, a name that is not UTF-8, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`; they never abort the rest of the scan.
+Per-path failures (a missing path, a permission-denied directory, an unreadable file, one that changed or was replaced while it was hashed, a name that is not UTF-8, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`.
+They never abort the rest of the scan.
 
 ## Misc
 

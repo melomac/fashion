@@ -161,6 +161,32 @@ final class RunnerTests: XCTestCase {
         // A threshold of 100 (ssdeep) or 0 (TLSH) only matches the identical.
         XCTAssertEqual(try sgr(["--algo", "ssdeep", "--score", "100"], [100]), ["38;5;46"])
         XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "0"], [0]), ["38;5;46"])
+        // An exact match has no score: full green, with any algorithm.
+        XCTAssertEqual(try Digester(Fashion.parse(["x"])).matchTint(nil).sgr, "38;5;46")
+        XCTAssertEqual(try Digester(Fashion.parse(["x", "--algo", "cdhash"])).matchTint(nil).sgr, "38;5;46")
+    }
+
+    func testExactMatchIsGreen() throws {
+        // A digest searched for is full green when found, whatever the algorithm, an ad-hoc cdhash included, which is
+        // dimmed otherwise. Without --match, lines keep their own tint.
+        let slice = self.machO()
+        let url = try self.write(slice, name: "match")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        func lines(_ arguments: [String]) throws -> [Line] {
+            try Digester(Fashion.parse([url.path] + arguments)).lines(for: url.path, reporter: Reporter(console: Console()))
+        }
+
+        let sha256 = try XCTUnwrap(ByteHash.sha256.digest(slice))
+        XCTAssertEqual(try lines([]).map(\.tint), [.none])
+        XCTAssertEqual(try lines(["--match", sha256]).map(\.tint), [.match(distance: 0)])
+        XCTAssertEqual(try lines(["--match", sha256.uppercased(), "--quiet"]).map(\.tint), [.match(distance: 0)])
+        XCTAssertTrue(try lines(["--match", String(sha256.dropLast())]).isEmpty)
+
+        let cdhash = try XCTUnwrap(CDHash.hash(data: slice))
+        XCTAssertEqual(try lines(["--algo", "cdhash"]).map(\.tint), [.adhoc, .adhoc])
+        XCTAssertEqual(try lines(["--algo", "cdhash", "--match", String(cdhash.prefix(8))]).map(\.tint), [.match(distance: 0)])
     }
 
     func testMalformedFileIsRed() {
