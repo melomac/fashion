@@ -608,50 +608,68 @@ final class SignalTrap: @unchecked Sendable {
 
 /**
  Hands the walked paths to the hash threads through a short queue: the walker waits for room before adding a path,
- so it stays at most `capacity` paths ahead of hashing.
+ so it stays at most `capacity` paths ahead of hashing, and a hash thread waits for a path, or for the walk to end.
+
+ One condition variable serves both waits: hash threads wait while the queue is empty, the walker while it is full,
+ never both at once. Not semaphores: a semaphore has no owner, and Xcode's Thread Performance Checker reports hash
+ threads waiting on one as waiting on "a thread without a QoS class", which nobody is; it leaves a condition alone.
  */
 final class Handoff: @unchecked Sendable {
-    private let lock = NSLock()
+    private let condition = NSCondition()
+    private let capacity: Int
     private var queue: [(index: Int, path: String)] = []
-    private let available = DispatchSemaphore(value: 0)
-    private let room: DispatchSemaphore
-    private let takers: Int
+    private var closed = false
 
-    init(capacity: Int, takers: Int) {
-        self.room = DispatchSemaphore(value: capacity)
-        self.takers = takers
+    init(capacity: Int) {
+        self.capacity = capacity
     }
 
     /**
-     Wait for room, then queue the path.
+     Wait for room, then queue the path and wake a hash thread.
      */
     func put(index: Int, path: String) {
-        self.room.wait()
-        self.lock.withLock { self.queue.append((index, path)) }
-        self.available.signal()
+        self.condition.lock()
+        defer {
+            self.condition.unlock()
+        }
+        while self.queue.count == self.capacity {
+            self.condition.wait()
+        }
+        self.queue.append((index, path))
+        self.condition.signal()
     }
 
     /**
-     Wait for the next path; nil once the walk is over.
+     Wait for the next path; nil once the walk is over and the queue is empty.
      */
     func take() -> (index: Int, path: String)? {
-        self.available.wait()
-        let item: (index: Int, path: String)? = self.lock.withLock {
-            self.queue.isEmpty ? nil : self.queue.removeFirst()
+        self.condition.lock()
+        defer {
+            self.condition.unlock()
         }
-        if item != nil {
-            self.room.signal()
+        while self.queue.isEmpty, !self.closed {
+            self.condition.wait()
+        }
+        guard !self.queue.isEmpty else {
+            return nil
+        }
+        let wasFull = self.queue.count == self.capacity
+        let item = self.queue.removeFirst()
+        if wasFull {
+            // The walker waits for this room, and so may hash threads a signal has not reached yet: wake them all.
+            self.condition.broadcast()
         }
         return item
     }
 
     /**
-     End the walk: each hash thread wakes once more to an empty queue and stops.
+     End the walk: every hash thread wakes, empties the queue and stops.
      */
     func close() {
-        for _ in 0 ..< self.takers {
-            self.available.signal()
-        }
+        self.condition.lock()
+        self.closed = true
+        self.condition.broadcast()
+        self.condition.unlock()
     }
 }
 
@@ -691,7 +709,7 @@ extension Fashion {
         _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
 
         // A few dozen paths of lookahead keep every hash thread busy while the walker reads a large directory.
-        let handoff = Handoff(capacity: 64, takers: jobs)
+        let handoff = Handoff(capacity: 64)
         let hashing = DispatchGroup()
         for _ in 0 ..< jobs {
             hashing.enter()

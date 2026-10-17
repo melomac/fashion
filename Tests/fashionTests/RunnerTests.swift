@@ -1,5 +1,6 @@
 @testable import fashion
 import MachO
+import os
 import System
 import XCTest
 
@@ -236,5 +237,386 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try self.run(url, slices: true), 0)
         // A copy alone would reach `size`; hashing in place adds far less than the 64 MiB above `before`.
         XCTAssertLessThan(try XCTUnwrap(Reporter.peakFootprint()), Int64(size))
+    }
+}
+
+/**
+ The lock-guarded parts of a run, driven from threads the way the walker and the hash threads drive them, with stdout
+ and stderr sent into pipes like `fashion | sort 2>errors`: every line comes out whole, in index order with `--sort`,
+ and the counts add up. The in-process side of the spawned runs above, where ThreadSanitizer sees the locking:
+ `swift test --sanitize=thread --scratch-path .build/tsan`.
+ */
+final class RunnerConcurrencyTests: XCTestCase {
+    /**
+     The lines `body` writes to the process's `fd` (stdout or stderr), sent into a pipe like `fashion | sort` and read as
+     they come, at the writers' QoS, so a full pipe never has a hash thread wait on a lower thread. A Console looks at
+     its descriptors once: `body` makes its own.
+     */
+    private func piped(_ fd: Int32, _ body: () throws -> Void) throws -> [String] {
+        var ends: [Int32] = [-1, -1]
+        XCTAssertEqual(Darwin.pipe(&ends), 0)
+        let (readEnd, writeEnd) = (ends[0], ends[1])
+        let collected = OSAllocatedUnfairLock(initialState: Data())
+        let reading = DispatchGroup()
+        DispatchQueue.global(qos: .userInitiated).async(group: reading) {
+            var buffer = [UInt8](repeating: 0, count: 64 << 10)
+            while true {
+                let count = Darwin.read(readEnd, &buffer, buffer.count)
+                guard count > 0 else {
+                    break
+                }
+                let chunk = Data(bytes: buffer, count: count)
+                collected.withLock { $0.append(chunk) }
+            }
+            close(readEnd)
+        }
+
+        let saved = dup(fd)
+        XCTAssertNotEqual(saved, -1)
+        dup2(writeEnd, fd)
+        close(writeEnd)
+        let result = Result(catching: body)
+        dup2(saved, fd)
+        close(saved)
+        reading.wait()
+        try result.get()
+        return String(decoding: collected.withLock { $0 }, as: UTF8.self).split(separator: "\n").map(String.init)
+    }
+
+    /**
+     `body` on `count` threads at the hash threads' QoS, each given its number; the group ends when the last returns.
+     */
+    private func start(_ count: Int, _ body: @escaping @Sendable (Int) -> Void) -> DispatchGroup {
+        let group = DispatchGroup()
+        for number in 0 ..< count {
+            group.enter()
+            let thread = Thread {
+                body(number)
+                group.leave()
+            }
+            thread.qualityOfService = .userInitiated
+            thread.start()
+        }
+        return group
+    }
+
+    /**
+     Wait for the threads of `group`, failing the test rather than hanging it when they are stuck.
+     */
+    private func finish(_ group: DispatchGroup, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success, "threads still running", file: file, line: line)
+    }
+
+    private func run(_ count: Int, _ body: @escaping @Sendable (Int) -> Void, file: StaticString = #filePath, line: UInt = #line) {
+        self.finish(self.start(count, body), file: file, line: line)
+    }
+
+    /**
+     Two lines for most files, like a two-architecture binary with `--slices`; none for every tenth, like a file that
+     cannot be read.
+     */
+    private static func lines(of index: Int) -> [Line] {
+        index % 10 == 9 ? [] : [Line(text: "\(index)  /\(index)"), Line(text: "\(index)  /\(index) (arm64)")]
+    }
+
+    // MARK: - Output
+
+    func testSortedOutputPrintsEachFileWholeInIndexOrder() throws {
+        // Hash threads finish files in any order: with --sort a file's lines wait for every earlier file and come out in
+        // index order, a file's lines together, whichever thread ends up printing them. A file that prints nothing still
+        // lets the next one through.
+        let files = 2000
+        let hashers = 8
+        let lines = try self.piped(STDOUT_FILENO) {
+            let console = Console()
+            let output = Output(sorted: true, console: console, reporter: Reporter(console: console), trap: nil)
+            let hashing = self.start(hashers) { number in
+                for index in stride(from: number, to: files, by: hashers).shuffled() {
+                    output.started(index, path: "/\(index)")
+                    output.finished(index, lines: Self.lines(of: index))
+                }
+            }
+            // The status timer reads what is held and being hashed while that goes on.
+            let ticking = self.start(1) { _ in
+                while hashing.wait(timeout: .now()) == .timedOut {
+                    output.showStatus()
+                    usleep(100)
+                }
+            }
+            self.finish(hashing)
+            self.finish(ticking)
+            XCTAssertTrue(output.printedAny)
+        }
+        XCTAssertEqual(lines, (0 ..< files).flatMap { Self.lines(of: $0).map(\.text) })
+    }
+
+    func testUnsortedOutputPrintsEachFileWholeAsFinished() throws {
+        // Without --sort a finished file prints at once, its lines still together.
+        let files = 2000
+        let hashers = 8
+        let lines = try self.piped(STDOUT_FILENO) {
+            let console = Console()
+            let output = Output(sorted: false, console: console, reporter: Reporter(console: console), trap: nil)
+            XCTAssertFalse(output.printedAny)
+            self.run(hashers) { number in
+                for index in stride(from: number, to: files, by: hashers) {
+                    output.finished(index, lines: Self.lines(of: index))
+                }
+            }
+            XCTAssertTrue(output.printedAny)
+        }
+        let expected = (0 ..< files).flatMap { Self.lines(of: $0).map(\.text) }
+        XCTAssertEqual(lines.count, expected.count)
+        XCTAssertEqual(Set(lines), Set(expected))
+        // Each file's two lines are adjacent, the whole-file line first.
+        for first in stride(from: 0, to: lines.count - 1, by: 2) {
+            XCTAssertEqual(lines[first + 1], lines[first] + " (arm64)")
+        }
+    }
+
+    func testCallersLocksKeepLongLinesWhole() throws {
+        // A hash thread prints a file's lines through Output and its diagnostics through Reporter while the others do
+        // the same: each caller's lock keeps a stream's lines whole, well past the PIPE_BUF (512 bytes) a pipe keeps a
+        // single write whole up to. The stdout lines go far past it; the stderr lines stay under it, where a line the
+        // unified log copies to stderr under Xcode (OS_ACTIVITY_DT_MODE) cannot cut one.
+        let hashers = 8
+        let files = 100
+        let long = String(repeating: "x", count: 4000)
+        var errors: [String] = []
+        let lines = try self.piped(STDOUT_FILENO) {
+            errors = try self.piped(STDERR_FILENO) {
+                let console = Console()
+                let reporter = Reporter(console: console)
+                let output = Output(sorted: false, console: console, reporter: reporter, trap: nil)
+                self.run(hashers) { number in
+                    for file in 0 ..< files {
+                        let path = "/\(number)/\(file)"
+                        output.finished(number * files + file, lines: [Line(text: "\(long)  \(path)")])
+                        reporter.warn(path: path, message: "warned")
+                    }
+                }
+            }
+        }
+        var paths: Set<String> = []
+        for number in 0 ..< hashers {
+            for file in 0 ..< files {
+                paths.insert("/\(number)/\(file)")
+            }
+        }
+        XCTAssertEqual(lines.count, paths.count)
+        XCTAssertEqual(Set(lines), Set(paths.map { "\(long)  \($0)" }))
+        let diagnostics = errors.filter { $0.hasPrefix("fashion: /") }
+        XCTAssertEqual(diagnostics.count, paths.count)
+        XCTAssertEqual(Set(diagnostics), Set(paths.map { "fashion: \($0): warned" }))
+    }
+
+    // MARK: - Reporter
+
+    func testReporterCountsAndDiagnosticsFromConcurrentThreads() throws {
+        // Hash threads count files and report, warn and inform at once, while the status line reads the counts and ⌃T
+        // asks for progress: every count adds up, and every line reaches stderr whole, once. The end of the run is
+        // reached twice, as on a signal that arrives as the walk ends.
+        let hashers = 8
+        let files = 100
+        var counts = (files: 0, errors: 0)
+        let lines = try self.piped(STDERR_FILENO) {
+            let reporter = Reporter(console: Console())
+            let hashing = self.start(hashers) { number in
+                for file in 0 ..< files {
+                    let path = "/\(number)/\(file)"
+                    reporter.fileProcessed()
+                    reporter.report(path: path, message: "failed")
+                    reporter.warn(path: path, message: "warned")
+                    reporter.inform(path: path, message: "informed")
+                    if file % 50 == 0 {
+                        reporter.progress()
+                    }
+                }
+            }
+            let watching = self.start(1) { _ in
+                while hashing.wait(timeout: .now()) == .timedOut {
+                    // Each thread counts a file before it reports it.
+                    XCTAssertLessThanOrEqual(reporter.errorCount, reporter.fileCount)
+                    usleep(100)
+                }
+            }
+            self.finish(hashing)
+            self.finish(watching)
+            self.run(2) { _ in
+                reporter.end("Done")
+            }
+            counts = (reporter.fileCount, reporter.errorCount)
+        }
+        XCTAssertEqual(counts.files, hashers * files)
+        XCTAssertEqual(counts.errors, hashers * files)
+
+        // Under Xcode the unified log is copied to stderr too (OS_ACTIVITY_DT_MODE): only fashion's own lines count.
+        var expected: Set<String> = []
+        for number in 0 ..< hashers {
+            for file in 0 ..< files {
+                for message in ["failed", "warned", "informed"] {
+                    expected.insert("fashion: /\(number)/\(file): \(message)")
+                }
+            }
+        }
+        let diagnostics = lines.filter { $0.hasPrefix("fashion: /") }
+        XCTAssertEqual(diagnostics.count, expected.count)
+        XCTAssertEqual(Set(diagnostics), expected)
+        let progress = lines.filter { $0.hasPrefix("fashion: ") && !$0.hasPrefix("fashion: /") }
+        XCTAssertEqual(progress.count, hashers * 2)
+        for line in progress {
+            XCTAssertNotNil(line.wholeMatch(of: /fashion: \d+ files? with \d+ errors? in .+/), line)
+        }
+    }
+
+    // MARK: - Handoff
+
+    func testHandoffHoldsFastWalkerToItsCapacity() {
+        // The walker fills the queue, then waits: with nobody taking yet, it gets exactly `capacity` paths ahead. Once
+        // the hashers take, slowly, every path reaches one of them, once, in walk order for each.
+        let capacity = 4
+        let paths = 100
+        let hashers = 2
+        let handoff = Handoff(capacity: capacity)
+        let handed = OSAllocatedUnfairLock(initialState: 0)
+        let walking = self.start(1) { _ in
+            for index in 0 ..< paths {
+                handoff.put(index: index, path: "/\(index)")
+                handed.withLock { $0 += 1 }
+            }
+            handoff.close()
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while handed.withLock({ $0 }) < capacity, Date() < deadline {
+            usleep(1000)
+        }
+        usleep(200_000)
+        XCTAssertEqual(handed.withLock { $0 }, capacity, "the walker ran ahead of the room it has")
+
+        let taken = OSAllocatedUnfairLock(initialState: [[Int]](repeating: [], count: hashers))
+        let hashing = self.start(hashers) { number in
+            while let (index, path) = handoff.take() {
+                XCTAssertEqual(path, "/\(index)")
+                usleep(1000)
+                taken.withLock { $0[number].append(index) }
+            }
+        }
+        self.finish(walking)
+        self.finish(hashing)
+        let lists = taken.withLock { $0 }
+        for list in lists {
+            XCTAssertEqual(list, list.sorted())
+        }
+        XCTAssertEqual(lists.flatMap(\.self).sorted(), Array(0 ..< paths))
+    }
+
+    func testHandoffWakesIdleHashersForEachPathOfSlowWalker() {
+        // Hashers outnumber what a slow walker delivers: each path wakes one of them, and closing the handoff wakes every
+        // one of them a last time, so none is left waiting.
+        let hashers = 4
+        let paths = 50
+        let handoff = Handoff(capacity: 64)
+        let taken = OSAllocatedUnfairLock(initialState: [[Int]](repeating: [], count: hashers))
+        let hashing = self.start(hashers) { number in
+            while let (index, path) = handoff.take() {
+                XCTAssertEqual(path, "/\(index)")
+                taken.withLock { $0[number].append(index) }
+            }
+        }
+        // At the hashers' QoS, like the walking thread of a run: a hasher waiting on a lower thread is a priority
+        // inversion, which Xcode's Thread Performance Checker reports.
+        let walking = self.start(1) { _ in
+            for index in 0 ..< paths {
+                usleep(500)
+                handoff.put(index: index, path: "/\(index)")
+            }
+            handoff.close()
+        }
+        self.finish(walking)
+        self.finish(hashing)
+        let lists = taken.withLock { $0 }
+        for list in lists {
+            XCTAssertEqual(list, list.sorted())
+        }
+        XCTAssertEqual(lists.flatMap(\.self).sorted(), Array(0 ..< paths))
+    }
+
+    // MARK: - Console
+
+    func testConsoleLinesFromConcurrentThreadsStayWhole() throws {
+        // Off a terminal Console takes no lock: a line is one write, so lines up to PIPE_BUF stay whole on their own, on
+        // either stream, from however many threads. Longer ones rely on their caller's lock (see the Output tests).
+        let threads = 8
+        let rounds = 200
+        let text = String(repeating: "x", count: 400)
+        var errors: [String] = []
+        let lines = try self.piped(STDOUT_FILENO) {
+            errors = try self.piped(STDERR_FILENO) {
+                let console = Console()
+                self.run(threads) { number in
+                    for round in 0 ..< rounds {
+                        do {
+                            try console.out("\(number).\(round) \(text)")
+                        } catch {
+                            XCTFail("stdout: \(error)")
+                        }
+                        console.err("\(number).\(round) \(text)", tint: .error)
+                    }
+                }
+            }
+        }
+        let expected = Set((0 ..< threads).flatMap { number in (0 ..< rounds).map { "\(number).\($0) \(text)" } })
+        XCTAssertEqual(lines.count, expected.count)
+        XCTAssertEqual(Set(lines), expected)
+        XCTAssertEqual(errors.count, expected.count)
+        XCTAssertEqual(Set(errors), expected)
+    }
+
+    // MARK: - Scan
+
+    func testScanPrintsTheSameOnEveryCPU() throws {
+        // The run end to end in this process, walker to Output, where the sanitizer sees it when the tests are built
+        // with one: files of two sizes finish out of order on every CPU, and --sort prints what one job does.
+        let directory = FileManager.default.temporaryDirectory / "fashion-runner-scan-\(UUID())"
+        try FileManager.default.createDirectory(at: directory / "sub", withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        for index in 0 ..< 300 {
+            let size = index % 25 == 0 ? 1 << 20 : 1
+            let name = index % 3 == 0 ? "sub/\(index)" : "f\(index)"
+            try Data(repeating: UInt8(index % 256), count: size).write(to: directory / name)
+        }
+
+        func scan(_ arguments: [String]) throws -> (status: Int32, lines: [String]) {
+            // On a thread of its own: scan() raises its thread's QoS to the hash threads', as the command line's main
+            // thread allows; the test runner's main thread keeps its own.
+            let status = OSAllocatedUnfairLock<Int32>(initialState: -1)
+            let arguments = [directory.path] + arguments
+            let lines = try self.piped(STDOUT_FILENO) {
+                self.run(1) { _ in
+                    do {
+                        let code = try Fashion.parse(arguments).scan()
+                        status.withLock { $0 = code }
+                    } catch {
+                        XCTFail("\(error)")
+                    }
+                }
+            }
+            return (status.withLock { $0 }, lines)
+        }
+
+        let one = try scan(["--sort", "-j", "1"])
+        XCTAssertEqual(one.status, 0)
+        XCTAssertEqual(one.lines.count, 300)
+        let paths = one.lines.map { String($0.split(separator: "  ", maxSplits: 1)[1]) }
+        XCTAssertEqual(paths, naturallySorted(paths))
+        let all = try scan(["--sort", "-J"])
+        XCTAssertEqual(all.status, 0)
+        XCTAssertEqual(all.lines, one.lines)
+        // Unsorted, the same lines in the order the files finished.
+        let unsorted = try scan(["-J"])
+        XCTAssertEqual(unsorted.status, 0)
+        XCTAssertEqual(unsorted.lines.sorted(), one.lines.sorted())
     }
 }
