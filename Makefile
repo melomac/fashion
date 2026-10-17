@@ -61,6 +61,39 @@ xcode-test: xcode
 xcode-clean: xcode
 	xcodebuild clean -scheme $(PRODUCT_NAME) -destination platform=macOS -alltargets
 
+# ----------------------------------------------------------------------------
+# Setup dependencies
+# ----------------------------------------------------------------------------
+
+.PHONY: xcode
+xcode:
+	xcode-select --print-path
+	xcodebuild -runFirstLaunch
+
+.PHONY: brew
+brew: xcode
+	[ -f /etc/paths.d/*brew ] \
+	|| /bin/bash -c "$$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+	&& eval "$$(/usr/libexec/path_helper)" \
+	&& ( HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_OFFLINE=1 brew bundle check --no-upgrade --file Brewfile || brew bundle --file Brewfile )
+
+# ----------------------------------------------------------------------------
+# Fuzzing (see Fuzz/README.md)
+# ----------------------------------------------------------------------------
+
+FUZZ_SECONDS ?= 900
+
+.PHONY: fuzz
+fuzz:
+	Fuzz/fuzz.sh build
+
+.PHONY: fuzz-seed
+fuzz-seed:
+	Fuzz/fuzz.sh seed
+
+.PHONY: fuzz-run
+fuzz-run: fuzz
+	Fuzz/fuzz.sh run $(FUZZ_SECONDS)
 
 # ----------------------------------------------------------------------------
 # Housekeeping
@@ -69,8 +102,3 @@ xcode-clean: xcode
 .PHONY: distclean
 distclean: clean xcode-clean
 	git clean -dx --force -e submodules
-
-.PHONY: xcode
-xcode:
-	xcode-select --print-path
-	xcodebuild -runFirstLaunch

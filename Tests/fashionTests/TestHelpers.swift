@@ -1,3 +1,4 @@
+import CryptoKit
 @testable import fashion
 import Foundation
 import MachO
@@ -9,6 +10,7 @@ import XCTest
  */
 extension File {
     convenience init(data: Data) throws {
+        saveFixture(data)
         let url = FileManager.default.temporaryDirectory / "fashion-fixture-\(UUID())"
         try data.write(to: url)
         defer {
@@ -19,12 +21,42 @@ extension File {
 }
 
 /**
+ The directory `FASHION_FIXTURES` names, where every fixture the tests open is kept, named by its SHA-256, to seed the
+ fuzzer's corpora (`Fuzz/fuzz.sh seed`). Nil, and nothing is kept, unless the environment sets it.
+ */
+private let fixtureDirectory = ProcessInfo.processInfo.environment["FASHION_FIXTURES"].map { URL(fileURLWithPath: $0) }
+
+/// The largest fixture kept (1 MiB): the fuzzer takes no longer input, and a sparse one of gigabytes would be read whole.
+private let maxFixtureSize = 1 << 20
+
+func saveFixture(_ data: Data) {
+    guard let fixtureDirectory, data.count <= maxFixtureSize else {
+        return
+    }
+    try? data.write(to: fixtureDirectory / SHA256.hash(data: data).hexString)
+}
+
+/// `saveFixture` for a file at `path`: a binary the test compiled or signed, or one of the OS's.
+func saveFixture(path: String) {
+    guard
+        fixtureDirectory != nil,
+        let size = try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int,
+        size <= maxFixtureSize,
+        let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+    else {
+        return
+    }
+    saveFixture(data)
+}
+
+/**
  Test conveniences over the parsers: open a fixture or a path, and best-effort views of a fixture that read as far
  as a damaged load-command table parses instead of throwing (production only uses the throwing initializer).
  */
 extension Universal {
     static func open(path: String) throws -> Universal {
-        try self.open(File(path: path))
+        saveFixture(path: path)
+        return try self.open(File(path: path))
     }
 
     static func open(data: Data) throws -> Universal {
@@ -33,7 +65,8 @@ extension Universal {
 
     /// Whether `open` reads the file as a Mach-O, thin or universal.
     static func isMachO(path: String) throws -> Bool {
-        try self.isMachO(File(path: path))
+        saveFixture(path: path)
+        return try self.isMachO(File(path: path))
     }
 
     static func isMachO(data: Data) throws -> Bool {
@@ -81,7 +114,8 @@ extension SymHash {
 
 extension CDHash {
     static func hash(path: String, exact: Bool = false) throws -> [SliceResult] {
-        try self.hash(File(path: path), path: path, exact: exact)
+        saveFixture(path: path)
+        return try self.hash(File(path: path), path: path, exact: exact)
     }
 
     /// Every slice's cdhashes, as `hash(path:)` reports a file's; the name only appears in the log.

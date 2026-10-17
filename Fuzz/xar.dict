@@ -1,0 +1,9 @@
+# XAR tokens, for the xar harness.
+magic="xar!"
+header="\x00\x1c\x00\x01"
+checksum_sha1="\x00\x00\x00\x01"
+zlib_default="\x78\x9c"
+zlib_fastest="\x78\x01"
+zlib_best="\x78\xda"
+zlib_empty="\x78\x9c\x03\x00\x00\x00\x00\x01"
+toc="<xar><toc>"

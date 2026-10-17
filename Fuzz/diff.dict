@@ -1,0 +1,5 @@
+# Digest tokens, for the diff harness.
+tlsh_prefix="T1"
+tlsh_prefix_lower="t1"
+ssdeep_block="3:"
+colon=":"
