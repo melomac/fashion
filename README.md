@@ -198,27 +198,32 @@ Only regular files are hashed: a FIFO, device or socket is skipped, whether name
 
 On a terminal, `fashion` colors lines by what they tell:
 
-* **Green**
-  * a full match with any algorithm: a digest, a symhash, a cdhash, `ADHOC` included;
-  * a fuzzy match, darker greens as the distance grows toward the `--score` threshold;
-  * a TLSH distance from 300, where [false positives][TLSH paper] pass 79%, is gray whatever the threshold, unless `--xlen` leaves out the length those rates count;
-* **Red**: a file `fashion` can't parse, a malformed Mach-O, signature or XAR;
-* **Yellow**: anything else `fashion` reports on standard error: a file that can't be read, a signature that doesn't hold, or a file TLSH can't hash;
-* **Dimmed**: `ADHOC` lines, synthesized for unsigned code.
+🟢 **Green**:
+
+* a full match with any algorithm: a digest, a symhash, a cdhash, `ADHOC` included;
+* a fuzzy match, darker greens as the distance grows toward the `--score` threshold;
+* a TLSH distance from 300, where [false positives][TLSH paper] pass 79%, is gray whatever the threshold,  
+  unless `--xlen` leaves out the length those rates count;
+
+🔴 **Red**: a file `fashion` can't parse, a malformed Mach-O, signature or XAR;
+
+🟡 **Yellow**: anything else `fashion` reports on standard error: a file that can't be read, a signature that doesn't hold, or a file TLSH can't hash;
+
+⚪️ **Dimmed**: synthesized `ADHOC` lines, for unsigned code.
 
 A terminal with 16 colors, by `TERM` and `COLORTERM`, gets its own green, dimmed as soon as a match is not full.
-Set `NO_COLOR` to turn this off.
+Set `NO_COLOR=1` to turn this off.
 
 ### Exit status
 
 `fashion` follows the grep/codesign convention so it can be scripted:
 
-|  Code  | Description                                             |
-|:------:|:--------------------------------------------------------|
-| **0**  | success — in match mode: at least one file is matched   |
-| **1**  | match mode: no file matched                             |
-| **2**  | one or more paths couldn't be enumerated or hashed      |
-| **64** | usage: invalid options, or an argument that isn't UTF-8 |
+|  Code  | Description                                                |
+|:------:|:-----------------------------------------------------------|
+| **0**  | ✅ success — in match mode: at least one file is matched   |
+| **1**  | ❌ match mode: no file matched                             |
+| **2**  | ❌ one or more paths couldn't be enumerated or hashed      |
+| **64** | ❌ usage: invalid options, or an argument that isn't UTF-8 |
 
 Per-path failures (a missing path, a permission-denied directory, an unreadable file, one that changed or was replaced while it was hashed, a name that is not UTF-8, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`.
 They never abort the rest of the scan.

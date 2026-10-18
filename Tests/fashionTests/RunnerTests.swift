@@ -242,9 +242,9 @@ final class RunnerTests: XCTestCase {
 
 /**
  The lock-guarded parts of a run, driven from threads the way the walker and the hash threads drive them, with stdout
- and stderr sent into pipes like `fashion | sort 2>errors`: every line comes out whole, in index order with `--sort`,
- and the counts add up. The in-process side of the spawned runs above, where ThreadSanitizer sees the locking:
- `swift test --sanitize=thread --scratch-path .build/tsan`.
+ and stderr sent into pipes like `fashion | sort 2>errors`, or into a pty like a terminal: every line comes out whole,
+ in index order with `--sort`, and the counts add up. The in-process side of the spawned runs above, where
+ ThreadSanitizer sees the locking: `swift test --sanitize=thread --scratch-path .build/tsan`.
  */
 final class RunnerConcurrencyTests: XCTestCase {
     /**
@@ -257,19 +257,7 @@ final class RunnerConcurrencyTests: XCTestCase {
         XCTAssertEqual(Darwin.pipe(&ends), 0)
         let (readEnd, writeEnd) = (ends[0], ends[1])
         let collected = OSAllocatedUnfairLock(initialState: Data())
-        let reading = DispatchGroup()
-        DispatchQueue.global(qos: .userInitiated).async(group: reading) {
-            var buffer = [UInt8](repeating: 0, count: 64 << 10)
-            while true {
-                let count = Darwin.read(readEnd, &buffer, buffer.count)
-                guard count > 0 else {
-                    break
-                }
-                let chunk = Data(bytes: buffer, count: count)
-                collected.withLock { $0.append(chunk) }
-            }
-            close(readEnd)
-        }
+        let reading = self.collect(readEnd, into: collected)
 
         let saved = dup(fd)
         XCTAssertNotEqual(saved, -1)
@@ -281,6 +269,77 @@ final class RunnerConcurrencyTests: XCTestCase {
         reading.wait()
         try result.get()
         return String(decoding: collected.withLock { $0 }, as: UTF8.self).split(separator: "\n").map(String.init)
+    }
+
+    /**
+     Read `fd` to its end on a thread at the writers' QoS, so a full pipe never has a hash thread wait on a lower
+     thread, appending to `collected`. With `pause`, the reader stops for that many microseconds after every 16 ms of
+     reading, as an emulator does while it draws a frame, and as busy as one.
+     */
+    private func collect(_ fd: Int32, pause: useconds_t = 0, into collected: OSAllocatedUnfairLock<Data>) -> DispatchGroup {
+        let reading = DispatchGroup()
+        DispatchQueue.global(qos: .userInitiated).async(group: reading) {
+            var buffer = [UInt8](repeating: 0, count: 64 << 10)
+            var drawn = ContinuousClock.now
+            while true {
+                // 0 at the end of a pipe, -1 (EIO) once a pty's last slave descriptor is closed.
+                let count = Darwin.read(fd, &buffer, buffer.count)
+                guard count > 0 else {
+                    break
+                }
+                let chunk = Data(bytes: buffer, count: count)
+                collected.withLock { $0.append(chunk) }
+                if pause > 0, ContinuousClock.now - drawn >= .milliseconds(16) {
+                    let deadline = ContinuousClock.now + .microseconds(Int(pause))
+                    while ContinuousClock.now < deadline {}
+                    drawn = ContinuousClock.now
+                }
+            }
+            close(fd)
+        }
+        return reading
+    }
+
+    /**
+     The lines `body` writes to `fds` (stdout, stderr or both), sent into a pty like a terminal and read from its master
+     as they come, pausing like an emulator with `pause` (see `collect`); a pty hands the reader 1 KiB per read, so a
+     pause has the writer wait within a few lines. Tints are kept: `plain(_:)` takes them off. A Console looks at its
+     descriptors once: `body` makes its own.
+     */
+    private func terminal(_ fds: [Int32], pause: useconds_t = 0, _ body: () throws -> Void) throws -> [String] {
+        let master = posix_openpt(O_RDWR | O_NOCTTY)
+        guard master != -1, grantpt(master) == 0, unlockpt(master) == 0, let name = ptsname(master) else {
+            throw Errno(rawValue: errno)
+        }
+        let slave = open(String(cString: name), O_RDWR | O_NOCTTY)
+        guard slave != -1 else {
+            close(master)
+            throw Errno(rawValue: errno)
+        }
+        let collected = OSAllocatedUnfairLock(initialState: Data())
+        let reading = self.collect(master, pause: pause, into: collected)
+
+        let saved = fds.map { dup($0) }
+        for fd in fds {
+            dup2(slave, fd)
+        }
+        close(slave)
+        let result = Result(catching: body)
+        for (fd, original) in zip(fds, saved) {
+            dup2(original, fd)
+            close(original)
+        }
+        reading.wait()
+        try result.get()
+        // The pty's output processing ends each line with CR LF, one Character.
+        return String(decoding: collected.withLock { $0 }, as: UTF8.self).split(separator: "\r\n").map(String.init)
+    }
+
+    /**
+     A line as written, without the tint a terminal got it in.
+     */
+    private static func plain(_ line: String) -> String {
+        line.replacing(/\u{1B}\[[0-9;]*m/, with: "")
     }
 
     /**
@@ -376,9 +435,10 @@ final class RunnerConcurrencyTests: XCTestCase {
 
     func testCallersLocksKeepLongLinesWhole() throws {
         // A hash thread prints a file's lines through Output and its diagnostics through Reporter while the others do
-        // the same: each caller's lock keeps a stream's lines whole, well past the PIPE_BUF (512 bytes) a pipe keeps a
-        // single write whole up to. The stdout lines go far past it; the stderr lines stay under it, where a line the
-        // unified log copies to stderr under Xcode (OS_ACTIVITY_DT_MODE) cannot cut one.
+        // the same: Output's one printer at a time and Reporter's lock keep each stream's lines whole, well past the
+        // PIPE_BUF (512 bytes) a pipe keeps a single write whole up to. The stdout lines go far past it; the stderr
+        // lines stay under it, where a line the unified log copies to stderr under Xcode (OS_ACTIVITY_DT_MODE) cannot
+        // cut one.
         let hashers = 8
         let files = 100
         let long = String(repeating: "x", count: 4000)
@@ -392,7 +452,7 @@ final class RunnerConcurrencyTests: XCTestCase {
                     for file in 0 ..< files {
                         let path = "/\(number)/\(file)"
                         output.finished(number * files + file, lines: [Line(text: "\(long)  \(path)")])
-                        reporter.warn(path: path, message: "warned")
+                        reporter.emit(reporter.warn(path: path, message: "warned"))
                     }
                 }
             }
@@ -410,6 +470,84 @@ final class RunnerConcurrencyTests: XCTestCase {
         XCTAssertEqual(Set(diagnostics), Set(paths.map { "fashion: \($0): warned" }))
     }
 
+    func testDiagnosticsPrintWithTheirFileOnATerminal() throws {
+        // A file's yellow or red line is queued with its own lines, so on a terminal, where stdout and stderr meet, it
+        // comes out right before them, in index order with --sort, however the hash threads interleave. Every third file
+        // has one; every tenth prints nothing else, like a file TLSH makes no digest of.
+        let files = 500
+        let hashers = 8
+        let lines = try self.terminal([STDOUT_FILENO, STDERR_FILENO]) {
+            let console = Console()
+            let reporter = Reporter(console: console)
+            let output = Output(sorted: true, console: console, reporter: reporter, trap: nil)
+            // Every file's lines, warnings first, before any is printed: under Xcode the unified log is copied to
+            // stderr too (OS_ACTIVITY_DT_MODE), and a copy written while a batch of lines goes out could cut one.
+            let prepared = (0 ..< files).map { index in
+                (index % 3 == 0 ? [reporter.warn(path: "/\(index)", message: "warned")] : []) + Self.lines(of: index)
+            }
+            self.run(hashers) { number in
+                for index in stride(from: number, to: files, by: hashers).shuffled() {
+                    output.finished(index, lines: prepared[index])
+                }
+            }
+            XCTAssertTrue(output.printedAny)
+        }
+        var expected: [String] = []
+        for index in 0 ..< files {
+            if index % 3 == 0 {
+                expected.append("fashion: /\(index): warned")
+            }
+            expected += Self.lines(of: index).map(\.text)
+        }
+        // Only fashion's own lines: the log copies under Xcode come before them, and are not among them.
+        let own = Set(expected)
+        XCTAssertEqual(lines.map(Self.plain).filter(own.contains), expected)
+    }
+
+    func testDiagnosticsAloneLeaveNothingPrinted() throws {
+        // In match mode, files that only have diagnostics have not matched: the run exits 1 like one that printed
+        // nothing. Off a terminal the diagnostic goes out at once, as it comes, through Reporter.
+        let lines = try self.piped(STDERR_FILENO) {
+            let console = Console()
+            let reporter = Reporter(console: console)
+            let output = Output(sorted: false, console: console, reporter: reporter, trap: nil)
+            output.finished(0, lines: [reporter.inform(path: "/0", message: "informed")])
+            output.finished(1, lines: [])
+            XCTAssertFalse(output.printedAny)
+        }
+        XCTAssertEqual(lines.filter { $0.hasPrefix("fashion: /") }, ["fashion: /0: informed"])
+    }
+
+    func testHashersRunOnWhileTheTerminalDraws() {
+        // Eight hashers, 25 µs of work and two lines per file, print to a pty whose reader stops for 8 ms after every
+        // 16 ms of reading, a third of the time, as an emulator does while it draws a frame. With the output lock held
+        // across the write, every hasher waited out each pause within a few lines: 3.5 s. With the lines queued they
+        // run on: 1 s, most of it the pty's 1 KiB round trips. Measured, so a change to Output or Console shows what
+        // it costs here. The round trips jitter by some 13% run to run, more than the 10% a baseline allows by default:
+        // one recorded in Xcode needs its maximum deviation raised to hold.
+        let files = 100_000
+        let hashers = 8
+        let expected = (0 ..< files).reduce(0) { $0 + Self.lines(of: $1).count }
+        self.measure {
+            do {
+                let lines = try self.terminal([STDOUT_FILENO], pause: 8000) {
+                    let console = Console()
+                    let output = Output(sorted: false, console: console, reporter: Reporter(console: console), trap: nil)
+                    self.run(hashers) { number in
+                        for index in stride(from: number, to: files, by: hashers) {
+                            let deadline = ContinuousClock.now + .microseconds(25)
+                            while ContinuousClock.now < deadline {}
+                            output.finished(index, lines: Self.lines(of: index))
+                        }
+                    }
+                }
+                XCTAssertEqual(lines.count, expected)
+            } catch {
+                XCTFail("\(error)")
+            }
+        }
+    }
+
     // MARK: - Reporter
 
     func testReporterCountsAndDiagnosticsFromConcurrentThreads() throws {
@@ -425,9 +563,9 @@ final class RunnerConcurrencyTests: XCTestCase {
                 for file in 0 ..< files {
                     let path = "/\(number)/\(file)"
                     reporter.fileProcessed()
-                    reporter.report(path: path, message: "failed")
-                    reporter.warn(path: path, message: "warned")
-                    reporter.inform(path: path, message: "informed")
+                    reporter.emit(reporter.report(path: path, message: "failed"))
+                    reporter.emit(reporter.warn(path: path, message: "warned"))
+                    reporter.emit(reporter.inform(path: path, message: "informed"))
                     if file % 50 == 0 {
                         reporter.progress()
                     }
@@ -556,7 +694,7 @@ final class RunnerConcurrencyTests: XCTestCase {
                 self.run(threads) { number in
                     for round in 0 ..< rounds {
                         do {
-                            try console.out("\(number).\(round) \(text)")
+                            try console.out([Line(text: "\(number).\(round) \(text)")])
                         } catch {
                             XCTFail("stdout: \(error)")
                         }

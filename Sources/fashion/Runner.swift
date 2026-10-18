@@ -27,17 +27,19 @@ import System
  | by fashion_fts_compare   |       +---------+       |     cdhash | slices | file     |
  | walk errors -> Reporter  |                         |   -> [DigestResult]            |
  +--------------------------+                         |   -> match / quiet -> lines    |
-                                                      |   hash errors -> Reporter      |
+                                                      |   diagnostics: Reporter, lines |
                                                       | reporter.fileProcessed()       |
                                                       | output.finished(index, lines)  |
                                                       +--------------------------------+
               | handoff.close() when the walk ends                     |
               v                                                        v
         hashing.wait()                                +--------------------------------+
-              |                                       | Output (lock)                  |
-              v                                       |  unsorted: print now           |
+              |                                       | Output (condition)             |
+              v                                       |  unsorted: queue now           |
         reporter.end("done")                          |  --sort: hold by index until   |
-        exit 0, 1 (no match), 2 (errors)              |  every earlier file printed    |
+        exit 0, 1 (no match), 2 (errors)              |  every earlier file queued     |
+                                                      |  one thread prints the queue,  |
+                                                      |  the others hash on            |
                                                       |  write error -> trap / exit 2  |
                                                       +--------------------------------+
                                                                        |
@@ -81,10 +83,14 @@ struct DigestResult {
 
 /**
  A line to print, and how it shows on a terminal.
+
+ A file's diagnostics are lines of its own, for stderr. Where both streams show on one terminal they print with the
+ file's lines rather than as they come (see `Output`), so the terminal shows them together.
  */
 struct Line {
     let text: String
     var tint = Tint.none
+    var diagnostic = false
 }
 
 /**
@@ -146,6 +152,8 @@ final class Console: @unchecked Sendable {
     let isLive = isatty(STDOUT_FILENO) == 1 && !Console.dumb
     private let stdoutIsTerminal = isatty(STDOUT_FILENO) == 1
     private let stderrIsTerminal = isatty(STDERR_FILENO) == 1
+    /// Whether stdout and stderr both show on a terminal, where a file's diagnostics print with its lines (see `Output`).
+    let streamsMeet = isatty(STDOUT_FILENO) == 1 && isatty(STDERR_FILENO) == 1
     private let tints = !Console.dumb && Console.environment["NO_COLOR", default: ""].isEmpty
     private let colors256 = ["256color", "direct"].contains { Console.environment["TERM", default: ""].contains($0) } || Console.environment["COLORTERM"] != nil
     private let lock = NSLock()
@@ -153,10 +161,18 @@ final class Console: @unchecked Sendable {
     private var closed = false
 
     /**
-     Write a line to stdout; throws on a write error.
+     Write lines to stdout, in one write, none for no lines; throws on a write error.
      */
-    func out(_ line: String, tint: Tint = .none) throws {
-        try self.write(self.stdoutIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none, colors256: self.colors256) : line, to: .standardOutput)
+    func out(_ lines: some Sequence<Line>) throws {
+        var bytes: [UInt8] = []
+        for line in lines {
+            bytes.append(contentsOf: self.rendered(line.text, tint: line.tint, terminal: self.stdoutIsTerminal).utf8)
+            bytes.append(UInt8(ascii: "\n"))
+        }
+        guard !bytes.isEmpty else {
+            return
+        }
+        try self.write(bytes, to: .standardOutput)
     }
 
     /**
@@ -164,7 +180,7 @@ final class Console: @unchecked Sendable {
      trapped SIGPIPE.
      */
     func err(_ line: String, tint: Tint = .none) {
-        try? self.write(self.stderrIsTerminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none, colors256: self.colors256) : line, to: .standardError)
+        try? self.write((self.rendered(line, tint: tint, terminal: self.stderrIsTerminal) + "\n").utf8, to: .standardError)
     }
 
     /**
@@ -235,16 +251,23 @@ final class Console: @unchecked Sendable {
     }
 
     /**
-     On a terminal, erase the status line first, under the lock so it cannot be redrawn in the middle of the line.
+     A line as a terminal shows it, printable and in its tint; as is anywhere else.
      */
-    private func write(_ line: String, to fd: FileDescriptor) throws {
+    private func rendered(_ line: String, tint: Tint, terminal: Bool) -> String {
+        terminal ? Self.tinted(Self.printable(line), self.tints ? tint : .none, colors256: self.colors256) : line
+    }
+
+    /**
+     On a terminal, erase the status line first, under the lock so it cannot be redrawn in the middle of the lines.
+     */
+    private func write(_ bytes: some Sequence<UInt8>, to fd: FileDescriptor) throws {
         guard self.isLive else {
-            _ = try fd.writeAll((line + "\n").utf8)
+            _ = try fd.writeAll(bytes)
             return
         }
         try self.lock.withLock {
             self.erase()
-            _ = try fd.writeAll((line + "\n").utf8)
+            _ = try fd.writeAll(bytes)
         }
     }
 
@@ -265,15 +288,32 @@ final class Console: @unchecked Sendable {
  Thread-safe stdout writer: each file's lines print once it is hashed, right away or, with `--sort`, in the sorted
  order the paths were handed out, holding a file's lines until every file before it has printed. On a terminal, the
  status line shows the count of hashed files, the files held back and the file hashed for the longest.
+
+ Lines ready to print queue up, and the first hash thread to find nobody printing prints them: all that have queued
+ up each time a write returns, until none are left. The others hash on rather than wait, each for a write of its own,
+ on a terminal that takes lines slower than they are hashed. Hashing then runs ahead of the terminal, by up to
+ `backlog` lines before the hash threads wait for it, rather than in step with it.
+
+ Where stdout and stderr both show on a terminal, a file's diagnostics queue with its lines, so the terminal shows
+ them together; anywhere else they go out as they come, since nothing shows the two streams side by side and a line
+ that waits in the queue is lost should the run end first.
  */
 final class Output: @unchecked Sendable {
-    private let lock = NSLock()
+    /**
+     How many lines may queue up for a slow terminal before the hash threads wait for it: a fraction of a second of
+     small files, which carries them through a terminal's longer stalls, a few MB at most when full.
+     */
+    static let backlog = 1 << 13
+
+    private let condition = NSCondition()
     private let sorted: Bool
     private let console: Console
     private let reporter: Reporter
     private let trap: SignalTrap?
     private var held: [Int: [Line]] = [:]
     private var hashing: [Int: String] = [:]
+    private var queued: [Line] = []
+    private var printing = false
     private var next = 0
     private var printed = false
 
@@ -285,10 +325,10 @@ final class Output: @unchecked Sendable {
     }
 
     /**
-     Whether any line was printed, which in match mode means a file matched.
+     Whether any line was printed on stdout, which in match mode means a file matched; diagnostics do not count.
      */
     var printedAny: Bool {
-        self.lock.withLock { self.printed }
+        self.condition.withLock { self.printed }
     }
 
     /**
@@ -299,48 +339,94 @@ final class Output: @unchecked Sendable {
         guard self.console.isLive else {
             return
         }
-        self.lock.withLock {
+        self.condition.withLock {
             self.hashing[index] = path
         }
     }
 
     /**
-     Print the lines of the file handed out at `index`.
+     Queue the lines of the file handed out at `index`, and print the queue unless another thread is printing it.
      */
     func finished(_ index: Int, lines: [Line]) {
-        self.lock.withLock {
-            self.hashing[index] = nil
-            // Unsorted, a finished file is simply the next to print.
-            self.held[self.sorted ? index : self.next] = lines
-            while let ready = self.held.removeValue(forKey: self.next) {
-                for line in ready {
-                    self.write(line)
-                }
-                self.next += 1
+        var lines = lines
+        if !self.console.streamsMeet {
+            for line in lines where line.diagnostic {
+                self.reporter.emit(line)
+            }
+            lines.removeAll(where: \.diagnostic)
+        }
+
+        self.condition.lock()
+        defer {
+            self.condition.unlock()
+        }
+        self.hashing[index] = nil
+
+        // Unsorted, a finished file is simply the next to print.
+        self.held[self.sorted ? index : self.next] = lines
+        while let ready = self.held.removeValue(forKey: self.next) {
+            self.queued += ready
+            self.next += 1
+            if ready.contains(where: { !$0.diagnostic }) {
+                self.printed = true
             }
         }
+
+        // Another thread is printing: leave the lines to it, and wait only once it is far behind.
+        while self.printing, self.queued.count > Self.backlog {
+            self.condition.wait()
+        }
+        guard !self.printing else {
+            return
+        }
+        self.printing = true
+        while !self.queued.isEmpty {
+            let lines = self.queued
+            self.queued = []
+            // Room for the threads waiting on the backlog; the write itself waits for nobody but the reader.
+            self.condition.broadcast()
+            self.condition.unlock()
+            self.write(lines)
+            self.condition.lock()
+        }
+        self.printing = false
     }
 
     /**
      Redraw the status line: the count of hashed files, the lines held back and the file hashed for the longest.
      */
     func showStatus() {
-        self.lock.withLock {
+        let status: (path: String, waiting: Int)? = self.condition.withLock {
             guard let path = self.hashing.min(by: { $0.key < $1.key })?.value else {
-                return
+                return nil
             }
-            let waiting = self.held.count
-            self.console.status("\(String(self.reporter.fileCount, pluralizing: "file")) · \(waiting > 0 ? "\(waiting) waiting · " : "")hashing ", path: path)
+            return (path, self.held.count)
         }
+        guard let status else {
+            return
+        }
+        // Off the lock: the write waits for the terminal, and the hash threads must not wait for that.
+        self.console.status("\(String(self.reporter.fileCount, pluralizing: "file")) · \(status.waiting > 0 ? "\(status.waiting) waiting · " : "")hashing ", path: status.path)
     }
 
     /**
-     Caller holds the lock, so lines from concurrent hash threads never interleave.
+     One thread prints at a time, so lines from concurrent hash threads never interleave.
+
+     A file's diagnostics go to stderr as they come among its lines, where the terminal shows them together.
      */
-    private func write(_ line: Line) {
-        self.printed = true
+    private func write(_ lines: [Line]) {
+        var start = lines.startIndex
+        for index in lines.indices where lines[index].diagnostic {
+            self.write(lines[start ..< index])
+            self.reporter.emit(lines[index])
+            start = index + 1
+        }
+        self.write(lines[start...])
+    }
+
+    private func write(_ lines: ArraySlice<Line>) {
         do {
-            try self.console.out(line.text, tint: line.tint)
+            try self.console.out(lines)
         } catch {
             if error as? Errno == .brokenPipe {
                 // The reader went away (`| head`): if the trap holds SIGPIPE, this logs the end and dies of it
@@ -364,7 +450,8 @@ final class Output: @unchecked Sendable {
 /**
  Thread-safe bookkeeping for one run, callable from the walking and hash threads as well as signal handlers:
  - diagnostics go to both stderr (for the user and scripts) and the unified log (for a persistent, queryable record),
-   and failures are counted so the process can exit non-zero when any path could not be enumerated or hashed;
+   and failures are counted so the process can exit non-zero when any path could not be enumerated or hashed; a
+   file's are logged and counted as they come, and printed with its lines where a terminal shows them together;
  - files are counted as hash threads finish them, for the status line, the progress report on SIGINFO and the end of
    the run, which is logged exactly once whether the run completes or is interrupted;
  - the progress report and the end of the run carry the peak memory footprint, which the kernel tracks on its own.
@@ -395,42 +482,53 @@ final class Reporter: @unchecked Sendable {
         self.lock.withLock { self.errors }
     }
 
-    func report(path: String, message: String, tint: Tint = .error) {
+    /**
+     A path that could not be enumerated or hashed, logged and counted now.
+
+     The line is printed with the file's lines, or on its own (see `emit(_:)`).
+     */
+    func report(path: String, message: String, tint: Tint = .error) -> Line {
         logger.error("\(path, privacy: .public): \(message, privacy: .public)")
 
         self.lock.withLock {
             self.errors += 1
         }
-        self.diagnose(path: path, message: message, tint: tint)
+        return Self.line(path: path, message: message, tint: tint)
     }
 
     /**
-     Report a file that was hashed but deserves a second look, like a failure but uncounted: it leaves the exit status
-     alone.
+     A file that was hashed but deserves a second look, like a failure but uncounted: it leaves the exit status alone.
      */
-    func warn(path: String, message: String) {
+    func warn(path: String, message: String) -> Line {
         logger.notice("\(path, privacy: .public): \(message, privacy: .public)")
 
-        self.diagnose(path: path, message: message, tint: .error)
+        return Self.line(path: path, message: message, tint: .error)
     }
 
     /**
-     Report what an algorithm left out of a file's digest, or why it made none: the input TLSH defines no digest of, or
-     what lies past its length limit. Not a failure but the algorithm's definition: uncounted, though yellow like any
-     other diagnostic.
+     What an algorithm left out of a file's digest, or why it made none: the input TLSH defines no digest of, or what
+     lies past its length limit.
+
+     Not a failure but the algorithm's definition: uncounted, though yellow like any other diagnostic.
      */
-    func inform(path: String, message: String) {
+    func inform(path: String, message: String) -> Line {
         logger.info("\(path, privacy: .public): \(message, privacy: .public)")
 
-        self.diagnose(path: path, message: message, tint: .error)
+        return Self.line(path: path, message: message, tint: .error)
     }
 
-    private func diagnose(path: String, message: String, tint: Tint) {
-        let displayPath = OutputFormatter.formatPath(path)
-        let displayMessage = OutputFormatter.formatDiagnostic(message)
+    /**
+     Write a diagnostic line now: a walk error, which has no file lines to go out with, or a file's where no terminal
+     shows both streams; otherwise the thread printing the file's lines emits its diagnostics among them (see `Output`).
+     */
+    func emit(_ line: Line) {
         self.lineLock.withLock {
-            self.console.err("fashion: \(displayPath): \(displayMessage)", tint: tint)
+            self.console.err(line.text, tint: line.tint)
         }
+    }
+
+    private static func line(path: String, message: String, tint: Tint) -> Line {
+        Line(text: "fashion: \(OutputFormatter.formatPath(path)): \(OutputFormatter.formatDiagnostic(message))", tint: tint, diagnostic: true)
     }
 
     func fileProcessed() {
@@ -818,39 +916,41 @@ struct Digester {
     /**
      The lines to print for one file: every digest or, in match mode, every matching one. A quiet match names the file
      once, and so does a symhash search, which reports files rather than slices (the slices of one binary usually share
-     a symhash). A match is green, a fuzzy one by its distance. A file that cannot be hashed is reported, in red when it
-     is malformed, and prints nothing.
+     a symhash). A match is green, a fuzzy one by its distance. The file's diagnostics come first: a file that cannot
+     be hashed is reported, in red when it is malformed, and prints nothing else.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
+        var diagnostics: [Line] = []
         let results: [DigestResult]
         do {
-            results = try self.digests(path, reporter: reporter)
+            results = try self.digests(path, reporter: reporter) { diagnostics.append($0) }
         } catch {
-            reporter.report(path: path, message: File.message(for: error), tint: Self.tint(for: error))
-            return []
-        }
-
-        guard !self.targets.isEmpty else {
-            return results.map { result in
-                Line(text: self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: self.algorithm), tint: result.tint)
-            }
+            return diagnostics + [reporter.report(path: path, message: File.message(for: error), tint: Self.tint(for: error))]
         }
 
         var lines: [Line] = []
-        for result in results {
-            guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score, xlen: self.xlen) else {
-                continue
+        if self.targets.isEmpty {
+            lines = results.map { result in
+                Line(text: self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: self.algorithm), tint: result.tint)
             }
-            let tint = self.matchTint(match.score)
-            if self.quiet {
-                return [Line(text: OutputFormatter.formatPath(path), tint: tint)]
+        } else {
+            for result in results {
+                guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score, xlen: self.xlen) else {
+                    continue
+                }
+                let tint = self.matchTint(match.score)
+                if self.quiet {
+                    lines = [Line(text: OutputFormatter.formatPath(path), tint: tint)]
+                    break
+                }
+                if case .symhash = self.mode {
+                    lines = [Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm), tint: tint)]
+                    break
+                }
+                lines.append(Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: self.algorithm), tint: tint))
             }
-            if case .symhash = self.mode {
-                return [Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm), tint: tint)]
-            }
-            lines.append(Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: self.algorithm), tint: tint))
         }
-        return lines
+        return diagnostics + lines
     }
 
     /**
@@ -890,9 +990,9 @@ struct Digester {
     // MARK: - Digests
 
     /**
-     The digests of one file in the selected mode.
+     The digests of one file in the selected mode; `note` hears each of its diagnostics as it comes.
      */
-    private func digests(_ path: String, reporter: Reporter) throws -> [DigestResult] {
+    private func digests(_ path: String, reporter: Reporter, note: @escaping (Line) -> Void) throws -> [DigestResult] {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed.
         let file = try File(path: path)
         // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless
@@ -901,7 +1001,7 @@ struct Digester {
             guard !self.quiet else {
                 return
             }
-            reporter.inform(path: arch.map { "\(path) (\($0))" } ?? path, message: message)
+            note(reporter.inform(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
         }
         return switch self.mode {
         case let .file(hash):
@@ -913,7 +1013,7 @@ struct Digester {
         case let .xarToc(hash, decompress):
             try XARParser.hashToc(file, algorithm: hash, decompress: decompress, caveat: { caveat(nil, $0) }).map { [DigestResult(digest: $0)] } ?? []
         case .cdhash:
-            try self.cdHashDigests(file, path: path, reporter: reporter)
+            try self.cdHashDigests(file, path: path, reporter: reporter, note: note)
         }
     }
 
@@ -922,13 +1022,13 @@ struct Digester {
      synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is labeled INVALID, and warned about
      once, however many of its directories fail.
      */
-    private func cdHashDigests(_ file: File, path: String, reporter: Reporter) throws -> [DigestResult] {
+    private func cdHashDigests(_ file: File, path: String, reporter: Reporter, note: (Line) -> Void) throws -> [DigestResult] {
         let results = try CDHash.hash(file, path: path, exact: self.exact)
         var warned: Set<String> = []
         for result in results where result.invalid && warned.insert(result.arch ?? "").inserted {
             // Security rejects the signature, so the slice is hashed as unsigned, or its code changed since signing.
             let reason = result.adhoc ? "signature rejected, hashed as unsigned" : "invalid signature (code or signature have been modified)"
-            reporter.warn(path: result.arch.map { "\(path) (\($0))" } ?? path, message: reason)
+            note(reporter.warn(path: result.arch.map { "\(path) (\($0))" } ?? path, message: reason))
         }
 
         return results.map { result in

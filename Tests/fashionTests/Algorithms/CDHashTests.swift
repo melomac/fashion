@@ -136,13 +136,15 @@ final class CDHashTests: XCTestCase {
             XCTAssertEqual(result.invalid, result.arch == slice.arch, result.arch ?? "thin")
         }
 
-        // Its lines say so too, labeled INVALID.
+        // Its lines say so too: the warning first, for stderr, then one per directory, the slice's labeled INVALID.
+        let warning = "fashion: \(tampered.path)\(slice.arch.map { " (\($0))" } ?? ""): invalid signature (code or signature have been modified)"
         let lines = try Digester(Fashion.parse([tampered.path, "--algo", "cdhash"])).lines(for: tampered.path, reporter: Reporter(console: Console()))
-        XCTAssertEqual(lines.map { $0.text.contains("INVALID") }, results.map(\.invalid))
+        XCTAssertEqual(lines.filter(\.diagnostic).map(\.text), [warning])
+        XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("INVALID") }, results.map(\.invalid))
 
         let (status, errors) = try runFashion(["--algo", "cdhash", tampered.path])
         XCTAssertEqual(status, 0)
-        XCTAssertEqual(errors, ["fashion: \(tampered.path)\(slice.arch.map { " (\($0))" } ?? ""): invalid signature (code or signature have been modified)"])
+        XCTAssertEqual(errors, [warning])
 
         let archArgs = slice.arch.map { ["--arch", $0] } ?? []
         XCTAssertThrowsError(try codesign(["--verify"] + archArgs + [tampered.path])) { error in

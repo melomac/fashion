@@ -109,9 +109,14 @@ final class FileWalker: Sequence, IteratorProtocol {
 
     // MARK: - Private
 
-    /// Report `error` for `path`, as `strerror` describes it.
+    /**
+     Report `error` for `path`, as `strerror` describes it, now: a walk error has no file lines to go out with.
+     */
     private func report(_ path: String, _ error: Errno) {
-        self.reporter?.report(path: path, message: error.description)
+        guard let reporter else {
+            return
+        }
+        reporter.emit(reporter.report(path: path, message: error.description))
     }
 
     /**
