@@ -1,12 +1,53 @@
 import Foundation
 
 /**
- Exact and fuzzy match logic for digests.
+ The `--match` targets of a run, typed and normalised once at startup. Each is compared with one algorithm: `--algo`'s
+ when given, or without it the one the shape of the target names, so a list that mixes MD5, SHA-256, ssdeep and TLSH
+ digests is searched for in one run. A byte hash's targets are lowercased and kept in a set, which an exact match looks
+ up; a cdhash's are lowercased for the prefix rule; ssdeep's and TLSH's are kept as given, for the libraries that score
+ them.
  */
-enum Matching {
+struct Targets {
     /// The hex lengths of a cdhash target: the 20-byte CDHash Apple's tools show, or the full digest of a SHA-1,
     /// SHA-256, SHA-384 or SHA-512 directory, as fashion prints it.
     static let cdhashHexLengths = [40, 64, 96, 128]
+
+    /// How many targets were given, whatever their shape: any means match mode.
+    let count: Int
+    /// The algorithms the targets need, in `Algorithm.allCases` order: every file is hashed with each.
+    let algorithms: [Algorithm]
+    /// Exact digests by algorithm, lowercased.
+    private var exact: [Algorithm: Set<String>] = [:]
+    /// Full or truncated cdhashes, lowercased.
+    private var prefixes: [String] = []
+    private var ssdeep: [String] = []
+    private var tlsh: [String] = []
+
+    /**
+     Type each target by `algorithm` or, without one, by its shape. A target that fits neither is left out, and
+     matches nothing: `Fashion.validate()` refuses the run over it first.
+     */
+    init(_ targets: [String] = [], algorithm: Algorithm? = nil) {
+        self.count = targets.count
+        var algorithms: Set<Algorithm> = []
+        for target in targets {
+            guard Self.fits(target, algorithm), let algorithm = algorithm ?? Self.shape(of: target) else {
+                continue
+            }
+            algorithms.insert(algorithm)
+            switch algorithm {
+            case .ssdeep: self.ssdeep.append(target)
+            case .tlsh: self.tlsh.append(target)
+            case .cdhash: self.prefixes.append(target.lowercased())
+            default: self.exact[algorithm, default: []].insert(target.lowercased())
+            }
+        }
+        self.algorithms = Algorithm.allCases.filter(algorithms.contains)
+    }
+
+    var isEmpty: Bool {
+        self.count == 0
+    }
 
     // MARK: - Shapes
 
@@ -45,10 +86,13 @@ enum Matching {
     /**
      Whether `target` can be a digest of `algorithm`'s: git's and git256's have the SHA-1 and SHA-256 shapes, a cdhash's
      is the 20-byte CDHash Apple's tools show or a whole directory digest (`cdhashHexLengths`); any other algorithm's
-     has its own shape.
+     has its own shape. With no algorithm, whether any shape names one.
      */
-    static func fits(_ target: String, _ algorithm: Algorithm) -> Bool {
-        switch algorithm {
+    static func fits(_ target: String, _ algorithm: Algorithm?) -> Bool {
+        guard let algorithm else {
+            return self.shape(of: target) != nil
+        }
+        return switch algorithm {
         case .git: self.shape(of: target) == .sha1
         case .git256: self.shape(of: target) == .sha256
         case .cdhash: self.cdhashHexLengths.contains(target.utf8.count) && target.utf8.allSatisfy(self.isHexDigit)
@@ -56,20 +100,24 @@ enum Matching {
         }
     }
 
+    // MARK: - Matching
+
     /**
-     Check if a digest matches any of the target digests for the given algorithm. With `xlen`, TLSH digests are compared
-     without the file length they record.
+     The match of a digest of `algorithm` against the targets of that algorithm, nil without one: the same digest for a
+     byte hash, a target the digest starts with for a cdhash, an ssdeep similarity of at least `threshold` or a TLSH
+     distance of at most `threshold`, the best of them scored. With `xlen`, TLSH digests are compared without the file
+     length they record.
      */
-    static func check(digest: String, against targets: [String], algorithm: Algorithm, threshold: Int, xlen: Bool = false) -> MatchResult? {
+    func match(_ digest: String, algorithm: Algorithm, threshold: Int, xlen: Bool = false) -> MatchResult? {
         switch algorithm {
         case .ssdeep:
-            self.checkSSDeep(digest: digest, targets: targets, threshold: threshold)
+            self.matchSSDeep(digest, threshold: threshold)
         case .tlsh:
-            self.checkTLSH(digest: digest, targets: targets, threshold: threshold, xlen: xlen)
+            self.matchTLSH(digest, threshold: threshold, xlen: xlen)
         case .cdhash:
-            self.checkPrefix(digest: digest, targets: targets)
+            self.matchPrefix(digest)
         default:
-            self.checkExact(digest: digest, targets: targets)
+            self.exact[algorithm]?.contains(digest.lowercased()) == true ? MatchResult(score: nil) : nil
         }
     }
 
@@ -87,40 +135,19 @@ enum Matching {
         self.isDigit(byte) || (UInt8(ascii: "a") ... UInt8(ascii: "z")).contains(byte | 0x20) || byte == UInt8(ascii: "+") || byte == UInt8(ascii: "/")
     }
 
-    private static func checkExact(digest: String, targets: [String]) -> MatchResult? {
+    /**
+     A truncated CDHash is a hex prefix of the full digest, so a target is only accepted as a prefix of the computed
+     digest, never the reverse.
+     */
+    private func matchPrefix(_ digest: String) -> MatchResult? {
         let lower = digest.lowercased()
-
-        for target in targets {
-            if lower == target.lowercased() {
-                return MatchResult(score: nil)
-            }
-        }
-
-        return nil
+        return self.prefixes.contains { lower.hasPrefix($0) } ? MatchResult(score: nil) : nil
     }
 
-    private static func checkPrefix(digest: String, targets: [String]) -> MatchResult? {
-        let lower = digest.lowercased()
-
-        for target in targets {
-            // A target is a whole CDHash, truncated to 20 bytes as Apple's tools show it or in full: anything else would
-            // prefix-match (nearly) every digest. The truncated form is a hex prefix of the full digest, so a target is
-            // only accepted as a prefix of the computed digest — never the reverse.
-            guard self.fits(target, .cdhash) else {
-                continue
-            }
-            if lower.hasPrefix(target.lowercased()) {
-                return MatchResult(score: nil)
-            }
-        }
-
-        return nil
-    }
-
-    private static func checkSSDeep(digest: String, targets: [String], threshold: Int) -> MatchResult? {
+    private func matchSSDeep(_ digest: String, threshold: Int) -> MatchResult? {
         var bestScore = 0
         var matched = false
-        for target in targets {
+        for target in self.ssdeep {
             let score = SSDeepBridge.compare(digest, target)
             if score >= threshold {
                 matched = true
@@ -133,10 +160,10 @@ enum Matching {
         return matched ? MatchResult(score: bestScore) : nil
     }
 
-    private static func checkTLSH(digest: String, targets: [String], threshold: Int, xlen: Bool) -> MatchResult? {
+    private func matchTLSH(_ digest: String, threshold: Int, xlen: Bool) -> MatchResult? {
         var bestScore = Int.max
         var matched = false
-        for target in targets {
+        for target in self.tlsh {
             let distance = TLSHBridge.diff(digest, target, length: !xlen)
             if distance >= 0, distance <= threshold {
                 matched = true
@@ -153,7 +180,7 @@ enum Matching {
 // MARK: -
 
 /**
- A match, which `Matching.check` returns only when there is one.
+ A match, which `Targets.match` returns only when there is one.
  */
 struct MatchResult {
     /// The ssdeep similarity or TLSH distance; nil for an exact or prefix match.

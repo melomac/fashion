@@ -70,8 +70,8 @@ final class TLSHBridgeTests: XCTestCase {
         XCTAssertEqual(TLSHBridge.diff(exact, padded), 505)
         XCTAssertEqual(TLSHBridge.diff(exact, padded, length: false), 1)
 
-        XCTAssertNil(Matching.check(digest: padded, against: [exact], algorithm: .tlsh, threshold: 40))
-        XCTAssertEqual(Matching.check(digest: padded, against: [exact], algorithm: .tlsh, threshold: 40, xlen: true)?.score, 1)
+        XCTAssertNil(Targets([exact]).match(padded, algorithm: .tlsh, threshold: 40))
+        XCTAssertEqual(Targets([exact]).match(padded, algorithm: .tlsh, threshold: 40, xlen: true)?.score, 1)
     }
 
     func testDiffInvalidHashes() {
@@ -89,7 +89,9 @@ final class TLSHBridgeTests: XCTestCase {
 
         for target in [hash + ":garbage", hash + "ZZZZ", hash + "0", "T2" + digits, String(hash.dropLast()), "T1" + digits.dropLast() + "G", " " + hash] {
             XCTAssertEqual(TLSHBridge.diff(hash, target), -1, target)
-            XCTAssertNil(Matching.check(digest: hash, against: [target], algorithm: .tlsh, threshold: 40), target)
+            // Neither is a TLSH target: shaped like none, it is left out before any digest is compared.
+            XCTAssertNil(Targets.shape(of: target), target)
+            XCTAssertNil(Targets([target], algorithm: .tlsh).match(hash, algorithm: .tlsh, threshold: 40), target)
         }
     }
 

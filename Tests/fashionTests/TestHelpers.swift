@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import MachO
 import XCTest
+import zlib
 
 /**
  A fixture as a file: written to a temporary file, opened and unlinked at once, so the descriptor holds the only
@@ -112,6 +113,20 @@ extension SymHash {
     }
 }
 
+extension SymHash {
+    /// The symhashes by one algorithm, as the tests ask for them.
+    static func compute(_ file: File, algorithm: ByteHash, separator: String, sortSymbols: Bool) throws -> [DigestResult] {
+        try self.compute(file, algorithms: [algorithm], separator: separator, sortSymbols: sortSymbols)
+    }
+}
+
+extension XARParser {
+    /// The table of contents' digest by one algorithm, as the tests ask for it; nil for a file that is not a XAR archive.
+    static func hashToc(_ file: File, algorithm: ByteHash, decompress: Bool) throws -> String? {
+        try self.hashToc(file, algorithms: [algorithm], decompress: decompress).first?.digest
+    }
+}
+
 extension CDHash {
     static func hash(path: String, exact: Bool = false) throws -> [SliceResult] {
         saveFixture(path: path)
@@ -127,6 +142,33 @@ extension CDHash {
     static func hash(data: Data, exact: Bool = false) throws -> String? {
         try MachO(data)?.codeDirectoryHashes(exact: exact).hashes.first?.hash
     }
+}
+
+/**
+ A XAR archive holding `toc` as its table of contents, declared `size` bytes uncompressed, then `trailer`.
+ */
+func xarArchive(toc: Data, size: Int, trailer: Data = Data()) -> Data {
+    var data = Data("xar!".utf8)
+    data.append(contentsOf: [0x00, 0x1c, 0x00, 0x01]) // header size 28, version 1
+    data.appendUInt64BE(UInt64(toc.count))
+    data.appendUInt64BE(UInt64(size))
+    data.appendUInt32BE(1) // checksum algorithm
+    return data + toc + trailer
+}
+
+/**
+ `data` compressed by zlib, as a XAR archive stores its table of contents.
+ */
+func deflate(_ data: Data, level: Int32 = Z_DEFAULT_COMPRESSION) -> Data {
+    var length = compressBound(uLong(data.count))
+    var compressed = Data(count: Int(length))
+    let status = data.withUnsafeBytes { source in
+        compressed.withUnsafeMutableBytes { destination in
+            compress2(destination.baseAddress!.assumingMemoryBound(to: Bytef.self), &length, source.baseAddress?.assumingMemoryBound(to: Bytef.self), uLong(data.count), level)
+        }
+    }
+    XCTAssertEqual(status, Z_OK)
+    return compressed.prefix(Int(length))
 }
 
 /**

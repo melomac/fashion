@@ -11,8 +11,9 @@ private enum OptionError: Error, Equatable {
     case negativeJobs
     case jobsWithAllJobs
     case negativeScore
+    case targetOfNoShape(String)
     case targetNotOfAlgorithm(String, Algorithm)
-    case xlenWithoutTLSHMatch
+    case xlenWithoutTLSHTarget
     case argumentNotUTF8(Int)
 }
 
@@ -37,10 +38,12 @@ extension OptionError: LocalizedError {
             "-J and --jobs are mutually exclusive."
         case .negativeScore:
             "--score must be zero or greater."
+        case let .targetOfNoShape(target):
+            "--match '\(target)' is not shaped like MD5, SHA-1, SHA-2, ssdeep or TLSH digests; git, git256 and cdhash take --algo."
         case let .targetNotOfAlgorithm(target, algorithm):
             "--match '\(target)' is not shaped like \(algorithm.rawValue) digests."
-        case .xlenWithoutTLSHMatch:
-            "--xlen requires --algo tlsh and --match."
+        case .xlenWithoutTLSHTarget:
+            "--xlen requires a TLSH digest to --match."
         case let .argumentNotUTF8(index):
             "Argument \(index) is not valid UTF-8."
         }
@@ -180,11 +183,6 @@ struct Fashion: ParsableCommand {
             if self.slices, algo == .cdhash {
                 throw ValidationError(OptionError.unsupportedSlicesCDHash)
             }
-            // A target is compared with --algo, whose digests it must be shaped like: one shaped otherwise would scan
-            // everything and match nothing.
-            for target in self.matchOptions.match where !Matching.fits(target, algo) {
-                throw ValidationError(OptionError.targetNotOfAlgorithm(target, algo))
-            }
         }
 
         // Flags that are silently ignored outside the mode they belong to.
@@ -194,8 +192,13 @@ struct Fashion: ParsableCommand {
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
             throw ValidationError(OptionError.decompressWithoutXarToc)
         }
-        if self.matchOptions.xlen, self.resolvedAlgorithm != .tlsh || self.matchOptions.match.isEmpty {
-            throw ValidationError(OptionError.xlenWithoutTLSHMatch)
+        // A target is compared with --algo, whose digests it must be shaped like, or without --algo with the algorithm
+        // its shape names: one shaped like none would scan everything and match nothing.
+        for target in self.matchOptions.match where !Targets.fits(target, self.algo) {
+            throw ValidationError(self.algo.map { OptionError.targetNotOfAlgorithm(target, $0) } ?? .targetOfNoShape(target))
+        }
+        if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.algo).algorithms.contains(.tlsh) {
+            throw ValidationError(OptionError.xlenWithoutTLSHTarget)
         }
         // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
         if let jobs = self.jobs, jobs < 0 {

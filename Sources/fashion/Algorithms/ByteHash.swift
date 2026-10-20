@@ -25,6 +25,13 @@ enum ByteHash: String {
     }
 
     /**
+     The algorithm of the same name, which every byte hash has.
+     */
+    var algorithm: Algorithm {
+        Algorithm(rawValue: self.rawValue)!
+    }
+
+    /**
      The most bytes the algorithm reads: TLSH defines the digest of a larger input as that of its first
      `TLSHBridge.maximumDataSize` bytes.
      */
@@ -78,14 +85,94 @@ enum ByteHash: String {
     }
 
     /**
+     The digests of several hashes from one read of a file, or of `range` of it, each with its hash in the order given:
+     a `FanOutHasher` feeds every hasher the same chunks, TLSH's up to its `maximumLength` while the others go on to the
+     end. A hash that makes no digest (TLSH) is left out, and `caveat` hears why. One hash reads the file as
+     `digest(_:range:caveat:)` does.
+     */
+    static func digests(_ hashes: [ByteHash], _ file: File, range: Range<Int>? = nil, caveat: (String) -> Void = { _ in }) throws -> [(hash: ByteHash, digest: String)] {
+        if hashes.count == 1, let hash = hashes.first {
+            return try hash.digest(file, range: range, caveat: caveat).map { [(hash, $0)] } ?? []
+        }
+        let range = range ?? 0 ..< file.size
+        var fanOut = try FanOutHasher(hashes.map { ($0, min(range.count, $0.maximumLength)) })
+        try file.stream(range.lowerBound ..< range.lowerBound + fanOut.length) { fanOut.update($0) }
+        return try zip(hashes, fanOut.finalize()).compactMap { hash, digest in
+            hash.note(digest, length: range.count, caveat: caveat)
+            return digest.map { (hash, $0) }
+        }
+    }
+
+    /**
+     The digests of several hashes of bytes in memory, each with its hash in the order given, without those TLSH makes none of.
+     */
+    static func digests(_ hashes: [ByteHash], _ data: Data, caveat: (String) -> Void = { _ in }) throws -> [(hash: ByteHash, digest: String)] {
+        try hashes.compactMap { hash in try hash.digest(data, caveat: caveat).map { (hash, $0) } }
+    }
+
+    /**
      The digest of `length` bytes, of which `hasher` was fed at most `maximumLength`.
      */
     private func finalize(_ hasher: inout any ByteHasher, length: Int, caveat: (String) -> Void) throws -> String? {
         let digest = try hasher.finalize()
+        self.note(digest, length: length, caveat: caveat)
+        return digest
+    }
+
+    /**
+     Tell `caveat` what the digest of `length` bytes leaves out, which only TLSH's does: every byte when it made none, or
+     those past its `maximumLength`.
+     */
+    private func note(_ digest: String?, length: Int, caveat: (String) -> Void) {
         if self == .tlsh, let message = TLSHBridge.caveat(length: length, digest: digest) {
             caveat(message)
         }
-        return digest
+    }
+}
+
+// MARK: -
+
+/**
+ Several hashers fed from one read, each up to its own `length`: TLSH's stops at its `maximumLength` while the others
+ go on to the end of the file.
+ */
+struct FanOutHasher {
+    private var hashers: [(hasher: any ByteHasher, remaining: Int)]
+
+    /**
+     A hasher per hash, for the `length` bytes it will be fed.
+     */
+    init(_ hashes: [(hash: ByteHash, length: Int)]) throws {
+        self.hashers = try hashes.map { try ($0.hash.hasher(length: $0.length), $0.length) }
+    }
+
+    /**
+     The most bytes any hasher has yet to take: what feeding the hashers further may read.
+     */
+    var length: Int {
+        self.hashers.map(\.remaining).max() ?? 0
+    }
+
+    /**
+     Feed each hasher as many of the bytes as it has yet to take.
+     */
+    mutating func update(_ bytes: UnsafeRawBufferPointer) {
+        for index in self.hashers.indices where self.hashers[index].remaining > 0 {
+            let count = min(bytes.count, self.hashers[index].remaining)
+            self.hashers[index].hasher.update(UnsafeRawBufferPointer(rebasing: bytes[..<count]))
+            self.hashers[index].remaining -= count
+        }
+    }
+
+    /**
+     Each hasher's digest, in the order given; nil where the algorithm makes none (TLSH).
+     */
+    mutating func finalize() throws -> [String?] {
+        var digests: [String?] = []
+        for index in self.hashers.indices {
+            try digests.append(self.hashers[index].hasher.finalize())
+        }
+        return digests
     }
 }
 

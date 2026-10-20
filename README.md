@@ -127,8 +127,31 @@ T16083DADB57582C64EC989C7412CEA727BF33E7550B92412B60A1C4EA3E437B67E3584C   26  /
 
 With the quiet flag, we only print matching paths.
 
-Every target must be shaped like a digest of the algorithm: 32 hex digits for `md5`, 40 for `sha1` and `git`, 64 for `sha256` and `git256`, 96 for `sha384`, 128 for `sha512`, `T1` and 70 hex digits (or 70 alone) for `tlsh`, `blocksize:chunk:chunk` for `ssdeep`, and for `cdhash` the 40 hex digits of the 20-byte CDHash Apple's tools show, or the 64, 96 or 128 hex digits of the full digest `fashion` prints.
-A target shaped otherwise is a usage error, and the run exits 64 before hashing anything.
+Targets of several algorithms go in one run, as a threat intelligence list mixes them: without `--algo`, the shape of each target picks its hash function, and every file is read once and hashed with each function the targets need.
+A match line shows the digest that matched, with its score when fuzzy.
+A `git` or `git256` digest is shaped like a SHA-1 or SHA-256 one, so a 40 or 64 hex target is a file's SHA-1 or SHA-256 unless `--algo git` or `--algo git256` says otherwise; a CDHash takes `--algo cdhash`, which accepts the 20-byte truncated form too.
+
+| Shape                                  | Algorithm |
+|:---------------------------------------|:----------|
+| 32 hex digits                          | `md5`     |
+| 40 hex digits                          | `sha1`    |
+| 64 hex digits                          | `sha256`  |
+| 96 hex digits                          | `sha384`  |
+| 128 hex digits                         | `sha512`  |
+| `T1` and 70 hex digits, or 70 alone    | `tlsh`    |
+| `blocksize:chunk:chunk`, base64 chunks | `ssdeep`  |
+
+```console
+$ fashion --match $(fashion -q --algo md5 /usr/bin/true) --match $(fashion -q /usr/bin/false) --match $(fashion -q --algo tlsh /usr/bin/yes) /usr/bin/
+0b778f18b68fe47b9b8704b3a0e968e7  /usr/bin/true
+T180F51D6B69625063D894CE7867799A524B14F2A3C18E0472F173B739FDCEB97C2030DA    0  /usr/bin/yes
+ccdd13063a974daa3ffcb707ac70104fb642eaf4aab3b621e816f36e2e8b59ab  /usr/bin/false
+```
+
+Hex digits are matched in either case.
+The shape picks the function and the mode flags pick the input, as without `--match`: under `--symhash` a 40 hex target is the SHA-1 of the symbol list, under `--xar-toc` of the table of contents, under `--slices` of each architecture too, and `--exact` trims the Mach-O first.
+With `--algo`, every target is compared with that algorithm, and one shaped otherwise is a usage error; without it, a target shaped like no digest is one. Either exits 64 before hashing anything.
+`--xlen` needs a TLSH target among them, with or without `--algo`.
 
 ### Symbol mode
 

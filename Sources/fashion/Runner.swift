@@ -66,10 +66,12 @@ private let logger = Logger(subsystem: "fashion", category: "runner")
 // MARK: Pipeline Types
 
 /**
- One digest of a file: of the whole file, or of one of its slices, named by `label` (`arm64`, `x86_64, ADHOC, sha256`).
+ One digest of a file: of the whole file, or of one of its slices, named by `label` (`arm64`, `x86_64, ADHOC, sha256`),
+ by `algorithm`, which tells how it is matched and printed.
  */
 struct DigestResult {
     let digest: String
+    let algorithm: Algorithm
     var label: String?
     var tint = Tint.none
 
@@ -791,11 +793,11 @@ extension Fashion {
         let jobs = self.resolvedJobs
         let digester = Digester(self)
 
-        let algorithm = digester.algorithm.defaultValueDescription
-        logger.info("\(self.sort ? "Run sorted" : "Run", privacy: .public) with \(String(jobs, pluralizing: "job"), privacy: .public) and \(algorithm, privacy: .public) algorithm in \(String(self.paths.count, pluralizing: "path"), privacy: .public): \(self.paths.joined(separator: ", "), privacy: .public)")
+        let algorithms = digester.algorithms.map(\.defaultValueDescription).joined(separator: ", ")
+        logger.info("\(self.sort ? "Run sorted" : "Run", privacy: .public) with \(String(jobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.paths.count, pluralizing: "path"), privacy: .public): \(self.paths.joined(separator: ", "), privacy: .public)")
 
         if !digester.targets.isEmpty {
-            logger.info("Match mode with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(digester.targets.joined(separator: ", "), privacy: .public)")
+            logger.info("Match mode with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
         }
 
         let console = Console()
@@ -867,20 +869,21 @@ struct Digester {
      */
     enum Mode {
         /// The whole file, or its Mach-O image with `--exact`.
-        case file(ByteHash)
+        case file([ByteHash])
         /// The whole file, then each architecture of a universal binary.
-        case slices(ByteHash)
+        case slices([ByteHash])
         /// The external symbol names of each Mach-O slice.
-        case symhash(ByteHash, separator: String, sortSymbols: Bool)
+        case symhash([ByteHash], separator: String, sortSymbols: Bool)
         /// The table of contents of a XAR archive.
-        case xarToc(ByteHash, decompress: Bool)
+        case xarToc([ByteHash], decompress: Bool)
         /// The code directory hashes of each Mach-O slice.
         case cdhash
     }
 
-    let algorithm: Algorithm
+    /// The algorithms every file is hashed with: one, or with `--match` and no `--algo`, one per shape among the targets.
+    let algorithms: [Algorithm]
     let mode: Mode
-    let targets: [String]
+    let targets: Targets
     let score: Int
     let quiet: Bool
     let exact: Bool
@@ -888,26 +891,28 @@ struct Digester {
     let xlen: Bool
 
     init(_ command: Fashion) {
-        self.algorithm = command.resolvedAlgorithm
-        self.targets = command.matchOptions.match
+        self.targets = Targets(command.matchOptions.match, algorithm: command.algo)
+        // The algorithms the targets name or, without any, --algo's or the mode's default.
+        self.algorithms = self.targets.algorithms.isEmpty ? [command.resolvedAlgorithm] : self.targets.algorithms
         self.score = command.resolvedScore
         self.quiet = command.quiet
         self.exact = command.exact
         self.xlen = command.matchOptions.xlen
 
         // `--algo cdhash` is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
-        guard let hash = ByteHash(self.algorithm) else {
+        let hashes = self.algorithms.compactMap(ByteHash.init)
+        guard !hashes.isEmpty else {
             self.mode = .cdhash
             return
         }
         self.mode = if command.symbolOptions.symhash {
-            .symhash(hash, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.sortSymbols)
+            .symhash(hashes, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.sortSymbols)
         } else if command.xarOptions.xarToc {
-            .xarToc(hash, decompress: command.xarOptions.decompress)
+            .xarToc(hashes, decompress: command.xarOptions.decompress)
         } else if command.slices {
-            .slices(hash)
+            .slices(hashes)
         } else {
-            .file(hash)
+            .file(hashes)
         }
     }
 
@@ -931,23 +936,23 @@ struct Digester {
         var lines: [Line] = []
         if self.targets.isEmpty {
             lines = results.map { result in
-                Line(text: self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: self.algorithm), tint: result.tint)
+                Line(text: self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: result.algorithm), tint: result.tint)
             }
         } else {
             for result in results {
-                guard let match = Matching.check(digest: result.digest, against: self.targets, algorithm: self.algorithm, threshold: self.score, xlen: self.xlen) else {
+                guard let match = self.targets.match(result.digest, algorithm: result.algorithm, threshold: self.score, xlen: self.xlen) else {
                     continue
                 }
-                let tint = self.matchTint(match.score)
+                let tint = self.matchTint(match.score, algorithm: result.algorithm)
                 if self.quiet {
                     lines = [Line(text: OutputFormatter.formatPath(path), tint: tint)]
                     break
                 }
                 if case .symhash = self.mode {
-                    lines = [Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: self.algorithm), tint: tint)]
+                    lines = [Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: result.algorithm), tint: tint)]
                     break
                 }
-                lines.append(Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: self.algorithm), tint: tint))
+                lines.append(Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: result.algorithm), tint: tint))
             }
         }
         return diagnostics + lines
@@ -955,7 +960,7 @@ struct Digester {
 
     /**
      A match's green: full for an exact one, whose score is nil, or a fuzzy one by its distance from identical toward
-     the `--score` threshold: an ssdeep similarity falls from 100, a TLSH distance rises from 0.
+     the `--score` threshold: an ssdeep similarity falls from 100, a TLSH distance rises from 0, which `algorithm` tells.
 
      A TLSH distance has no upper bound, so from 300, where the TLSH paper's false positives pass 79% (Table II), a
      match is gray whatever the threshold, and the greens stop there. Those rates count the length, so with `--xlen` the
@@ -963,11 +968,11 @@ struct Digester {
 
      An ssdeep match is never gray: the same paper keeps its false positives under 0.1% at any score (Table I).
      */
-    func matchTint(_ score: Int?) -> Tint {
+    func matchTint(_ score: Int?, algorithm: Algorithm) -> Tint {
         guard let score else {
             return .match(distance: 0)
         }
-        if self.algorithm == .ssdeep {
+        if algorithm == .ssdeep {
             return .match(distance: Double(100 - score) / Double(max(100 - self.score, 1)))
         }
         if self.xlen {
@@ -1004,14 +1009,14 @@ struct Digester {
             note(reporter.inform(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
         }
         return switch self.mode {
-        case let .file(hash):
-            try self.fileDigest(file, hash: hash, caveat: { caveat(nil, $0) }).map { [DigestResult(digest: $0)] } ?? []
-        case let .slices(hash):
-            try self.sliceDigests(file, hash: hash, caveat: caveat)
-        case let .symhash(hash, separator, sortSymbols):
-            try SymHash.compute(file, algorithm: hash, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
-        case let .xarToc(hash, decompress):
-            try XARParser.hashToc(file, algorithm: hash, decompress: decompress, caveat: { caveat(nil, $0) }).map { [DigestResult(digest: $0)] } ?? []
+        case let .file(hashes):
+            try self.fileDigests(file, hashes: hashes, caveat: { caveat(nil, $0) })
+        case let .slices(hashes):
+            try self.sliceDigests(file, hashes: hashes, caveat: caveat)
+        case let .symhash(hashes, separator, sortSymbols):
+            try SymHash.compute(file, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
+        case let .xarToc(hashes, decompress):
+            try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { caveat(nil, $0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
         case .cdhash:
             try self.cdHashDigests(file, path: path, reporter: reporter, note: note)
         }
@@ -1041,21 +1046,21 @@ struct Digester {
                 result.type
             }
             let label = [result.arch, result.invalid ? "INVALID" : nil, tag].compactMap(\.self).joined(separator: ", ")
-            return DigestResult(digest: result.hash, label: label.isEmpty ? nil : label, tint: result.adhoc ? .adhoc : .none)
+            return DigestResult(digest: result.hash, algorithm: .cdhash, label: label.isEmpty ? nil : label, tint: result.adhoc ? .adhoc : .none)
         }
     }
 
     /**
-     The whole-file digest, then one per architecture of a universal binary, each trimmed when `--exact` is set.
+     The whole-file digests, then each architecture of a universal binary's, each trimmed when `--exact` is set.
      */
-    private func sliceDigests(_ file: File, hash: ByteHash, caveat: (_ arch: String?, _ message: String) -> Void) throws -> [DigestResult] {
+    private func sliceDigests(_ file: File, hashes: [ByteHash], caveat: (_ arch: String?, _ message: String) -> Void) throws -> [DigestResult] {
         // Read the container first, so a malformed one fails before any hashing.
         let slices = try self.sliceRanges(file)
 
-        var results = try self.fileDigest(file, hash: hash, caveat: { caveat(nil, $0) }).map { [DigestResult(digest: $0)] } ?? []
+        var results = try self.fileDigests(file, hashes: hashes, caveat: { caveat(nil, $0) })
         for slice in slices {
-            if let digest = try hash.digest(file, range: slice.range, caveat: { caveat(slice.arch, $0) }) {
-                results.append(DigestResult(digest: digest, label: slice.arch))
+            for (hash, digest) in try ByteHash.digests(hashes, file, range: slice.range, caveat: { caveat(slice.arch, $0) }) {
+                results.append(DigestResult(digest: digest, algorithm: hash.algorithm, label: slice.arch))
             }
         }
         return results
@@ -1081,13 +1086,11 @@ struct Digester {
     }
 
     /**
-     The digest of the whole file or, with `--exact`, of a Mach-O's logical content only: `fileEnd` reads just the
-     headers.
+     The digests of the whole file, read once for every hash, or with `--exact` of a Mach-O's logical content only:
+     `fileEnd` reads just the headers.
      */
-    private func fileDigest(_ file: File, hash: ByteHash, caveat: (String) -> Void) throws -> String? {
-        guard self.exact else {
-            return try hash.digest(file, caveat: caveat)
-        }
-        return try hash.digest(file, range: 0 ..< Universal.fileEnd(file), caveat: caveat)
+    private func fileDigests(_ file: File, hashes: [ByteHash], caveat: (String) -> Void) throws -> [DigestResult] {
+        let range = try self.exact ? 0 ..< Universal.fileEnd(file) : nil
+        return try ByteHash.digests(hashes, file, range: range, caveat: caveat).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
     }
 }

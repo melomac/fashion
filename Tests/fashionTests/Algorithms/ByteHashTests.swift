@@ -112,6 +112,71 @@ final class ByteHashTests: XCTestCase {
         }
     }
 
+    // MARK: - Several hashes from one read
+
+    /// Every byte hash.
+    private let hashes: [ByteHash] = [.md5, .sha1, .sha256, .sha384, .sha512, .git, .git256, .ssdeep, .tlsh]
+
+    func testFanOutMatchesEachHasher() throws {
+        // One read feeds every hasher: each digest is the one its hash makes alone, in the order asked, across chunks.
+        let data = Data((0 ..< File.chunkSize * 2 + 1024).map { UInt8($0 & 0xff) })
+        let file = try File(data: data)
+
+        let digests = try ByteHash.digests(self.hashes, file)
+        XCTAssertEqual(digests.map(\.hash), self.hashes)
+        for (hash, digest) in digests {
+            XCTAssertEqual(digest, try hash.digest(data), "Mismatch for \(hash)")
+        }
+        // The same from bytes in memory, and from one hash, which reads the file on its own.
+        XCTAssertEqual(try ByteHash.digests(self.hashes, data).map(\.digest), digests.map(\.digest))
+        XCTAssertEqual(try ByteHash.digests([.ssdeep], file).map(\.digest), try [ByteHash.ssdeep.digest(data)])
+    }
+
+    func testFanOutOverRange() throws {
+        let file = try File(data: Data("xxhelloyy".utf8))
+
+        let digests = try ByteHash.digests([.md5, .sha256, .git, .ssdeep], file, range: 2 ..< 7)
+        XCTAssertEqual(digests.map(\.hash), [.md5, .sha256, .git, .ssdeep])
+        for (hash, digest) in digests {
+            XCTAssertEqual(digest, try hash.digest(Data("hello".utf8)), "Mismatch for \(hash)")
+        }
+    }
+
+    func testFanOutLeavesOutWhatTLSHCannotHash() throws {
+        // A hash that makes no digest is left out, and the caveat says why; the others are unaffected.
+        var caveats: [String] = []
+        let digests = try ByteHash.digests([.md5, .tlsh, .sha256], File(data: Data("hello".utf8))) { caveats.append($0) }
+        XCTAssertEqual(digests.map(\.hash), [.md5, .sha256])
+        XCTAssertEqual(digests.map(\.digest), ["5d41402abc4b2a76b9719d911017c592", "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"])
+        XCTAssertEqual(caveats, ["TLSH cannot hash: input too small (5 bytes, minimum 50)"])
+    }
+
+    func testFanOutStopsEachHasherAtItsLength() throws {
+        // TLSH takes the first maximumLength bytes of a longer file while the others go on, too many to feed a test:
+        // the fan-out is given the lengths, here 1000 of 3000 bytes for TLSH, which end in the middle of a chunk.
+        let data = Data((0 ..< 3000).map { UInt8($0 % 251) })
+        var fanOut = try FanOutHasher([(.md5, data.count), (.tlsh, 1000), (.sha256, data.count)])
+        XCTAssertEqual(fanOut.length, 3000)
+        data.prefix(700).withUnsafeBytes { fanOut.update($0) }
+        XCTAssertEqual(fanOut.length, 2300)
+        data.dropFirst(700).withUnsafeBytes { fanOut.update($0) }
+        XCTAssertEqual(fanOut.length, 0)
+        XCTAssertEqual(try fanOut.finalize(), try [ByteHash.md5.digest(data), ByteHash.tlsh.digest(data.prefix(1000)), ByteHash.sha256.digest(data)])
+    }
+
+    func testFanOutShrunkFileThrows() throws {
+        let url = FileManager.default.temporaryDirectory / "fashion-shrinking-\(UUID())"
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        try Data("hello".utf8).write(to: url)
+        let file = try File(path: url.path())
+        XCTAssertEqual(truncate(url.path(), 2), 0)
+        XCTAssertThrowsError(try ByteHash.digests([.md5, .sha256], file)) { error in
+            XCTAssertEqual(error as? FileError, .sizeChanged(opened: 5, now: 2))
+        }
+    }
+
     func testSizeChangedDescriptionAgreesWithCount() {
         XCTAssertEqual(
             FileError.sizeChanged(opened: 1, now: 2).localizedDescription,

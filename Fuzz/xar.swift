@@ -12,9 +12,9 @@ public func fuzzXAR(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
         return 0
     }
 
-    _ = try? XARParser.hashToc(file, algorithm: .sha1, decompress: false)
+    _ = try? XARParser.hashToc(file, algorithms: [.sha1], decompress: false)
     for algorithm in [ByteHash.sha1, .ssdeep, .tlsh] {
-        _ = try? XARParser.hashToc(file, algorithm: algorithm, decompress: true)
+        _ = try? XARParser.hashToc(file, algorithms: [algorithm], decompress: true)
     }
 
     return 0

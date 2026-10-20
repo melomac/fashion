@@ -11,8 +11,8 @@ public func fuzzSymHash(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
         return 0
     }
 
-    _ = try? SymHash.compute(file, algorithm: .md5, separator: ",", sortSymbols: true)
-    _ = try? SymHash.compute(file, algorithm: .tlsh, separator: "\n", sortSymbols: false)
+    _ = try? SymHash.compute(file, algorithms: [.md5], separator: ",", sortSymbols: true)
+    _ = try? SymHash.compute(file, algorithms: [.tlsh], separator: "\n", sortSymbols: false)
 
     return 0
 }

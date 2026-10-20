@@ -158,7 +158,7 @@ final class CDHashTests: XCTestCase {
         let results = try CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
-        let match = Matching.check(digest: first.hash, against: [first.hash], algorithm: .cdhash, threshold: 0)
+        let match = Targets([first.hash], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
         XCTAssertNotNil(match)
     }
 
@@ -167,7 +167,7 @@ final class CDHashTests: XCTestCase {
         let first = try XCTUnwrap(results.first)
 
         let upper = first.hash.uppercased()
-        let match = Matching.check(digest: first.hash, against: [upper], algorithm: .cdhash, threshold: 0)
+        let match = Targets([upper], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
         XCTAssertNotNil(match)
     }
 
@@ -179,7 +179,7 @@ final class CDHashTests: XCTestCase {
         let truncated = String(first.hash.prefix(40))
         XCTAssertEqual(truncated.count, 40)
 
-        let match = Matching.check(digest: first.hash, against: [truncated], algorithm: .cdhash, threshold: 0)
+        let match = Targets([truncated], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
         XCTAssertNotNil(match, "Truncated CDHash should match full CDHash")
     }
 
@@ -191,7 +191,7 @@ final class CDHashTests: XCTestCase {
         let first = try XCTUnwrap(results.first)
 
         let truncated = String(first.hash.prefix(40))
-        let match = Matching.check(digest: truncated, against: [first.hash], algorithm: .cdhash, threshold: 0)
+        let match = Targets([first.hash], algorithm: .cdhash).match(truncated, algorithm: .cdhash, threshold: 0)
         XCTAssertNil(match, "A longer target must not match a shorter computed digest")
     }
 
@@ -200,7 +200,7 @@ final class CDHashTests: XCTestCase {
         let first = try XCTUnwrap(results.first)
 
         let fake = String(repeating: "0", count: first.hash.count)
-        let match = Matching.check(digest: first.hash, against: [fake], algorithm: .cdhash, threshold: 0)
+        let match = Targets([fake], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
         XCTAssertNil(match)
     }
 

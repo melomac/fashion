@@ -79,15 +79,15 @@ enum XARParser {
     /**
      Hash the table of contents, compressed as stored or inflated.
 
-     Nil for a file that is not a XAR archive, which its first four bytes tell. Throws for one that is, but whose header
-     or table of contents is malformed, rather than report nothing for it. The compressed table streams from the file;
-     inflated, it streams through zlib, so memory holds no more than the declared uncompressed size, itself bounded.
-     `caveat` hears what TLSH leaves out of the table.
+     A digest per algorithm, with its hash; none for a file that is not a XAR archive, which its first four bytes tell.
+     Throws for one that is, but whose header or table of contents is malformed, rather than report nothing for it. The
+     compressed table streams from the file; inflated, it streams through zlib, so memory holds no more than the declared
+     uncompressed size, itself bounded. `caveat` hears what TLSH leaves out of the table.
      */
-    static func hashToc(_ file: File, algorithm: ByteHash, decompress: Bool, caveat: (String) -> Void = { _ in }) throws -> String? {
+    static func hashToc(_ file: File, algorithms: [ByteHash], decompress: Bool, caveat: (String) -> Void = { _ in }) throws -> [(hash: ByteHash, digest: String)] {
         let head = try file.read(at: 0, count: min(file.size, 28))
         guard head.prefix(4) == Data("xar!".utf8) else {
-            return nil
+            return []
         }
         let header = try self.parseHeader(data: head)
 
@@ -104,7 +104,7 @@ enum XARParser {
         let toc = Int(tocStart) ..< Int(tocStart + compressedLength)
 
         guard decompress else {
-            return try algorithm.digest(file, range: toc, caveat: caveat)
+            return try ByteHash.digests(algorithms, file, range: toc, caveat: caveat)
         }
 
         guard header.uncompressedTocLength <= UInt64(self.maxUncompressedTocSize) else {
@@ -117,7 +117,7 @@ enum XARParser {
             self.logger.debug("XAR TOC:\n\(xml, privacy: .public)")
         }
 
-        return try algorithm.digest(tocData, caveat: caveat)
+        return try ByteHash.digests(algorithms, tocData, caveat: caveat)
     }
 
     // MARK: - Zlib Decompression
