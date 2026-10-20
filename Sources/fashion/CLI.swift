@@ -11,6 +11,7 @@ private enum OptionError: Error, Equatable {
     case negativeJobs
     case jobsWithAllJobs
     case negativeScore
+    case targetNotOfAlgorithm(String, Algorithm)
     case xlenWithoutTLSHMatch
     case argumentNotUTF8(Int)
 }
@@ -36,6 +37,8 @@ extension OptionError: LocalizedError {
             "-J and --jobs are mutually exclusive."
         case .negativeScore:
             "--score must be zero or greater."
+        case let .targetNotOfAlgorithm(target, algorithm):
+            "--match '\(target)' is not shaped like \(algorithm.rawValue) digests."
         case .xlenWithoutTLSHMatch:
             "--xlen requires --algo tlsh and --match."
         case let .argumentNotUTF8(index):
@@ -176,6 +179,11 @@ struct Fashion: ParsableCommand {
             }
             if self.slices, algo == .cdhash {
                 throw ValidationError(OptionError.unsupportedSlicesCDHash)
+            }
+            // A target is compared with --algo, whose digests it must be shaped like: one shaped otherwise would scan
+            // everything and match nothing.
+            for target in self.matchOptions.match where !Matching.fits(target, algo) {
+                throw ValidationError(OptionError.targetNotOfAlgorithm(target, algo))
             }
         }
 

@@ -127,6 +127,9 @@ T16083DADB57582C64EC989C7412CEA727BF33E7550B92412B60A1C4EA3E437B67E3584C   26  /
 
 With the quiet flag, we only print matching paths.
 
+Every target must be shaped like a digest of the algorithm: 32 hex digits for `md5`, 40 for `sha1` and `git`, 64 for `sha256` and `git256`, 96 for `sha384`, 128 for `sha512`, `T1` and 70 hex digits (or 70 alone) for `tlsh`, `blocksize:chunk:chunk` for `ssdeep`, and for `cdhash` the 40 hex digits of the 20-byte CDHash Apple's tools show, or the 64, 96 or 128 hex digits of the full digest `fashion` prints.
+A target shaped otherwise is a usage error, and the run exits 64 before hashing anything.
+
 ### Symbol mode
 
 Following the convention used by ImpHash, symhash, and tools like [VirusTotal](https://www.virustotal.com/), `--symhash` mode defaults to MD5 of the ordered external symbols list joined by the `,` separator, but you can pick any algo, separator, and keep the symbols list as is.

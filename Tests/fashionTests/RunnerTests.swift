@@ -158,7 +158,8 @@ final class RunnerTests: XCTestCase {
         // From a TLSH distance of 300 a match is gray, whatever the threshold, and the greens stop there.
         XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "1000"], [0, 150, 299, 300, 1000]), ["38;5;46", "38;5;34", "38;5;22", "38;5;245", "38;5;245"])
         // Those false positives count the length: without it, the greens run to the threshold.
-        XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "1000", "--match", "T1", "--xlen"], [300, 1000]), ["38;5;34", "38;5;22"])
+        let tlsh = "T13D338D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
+        XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "1000", "--match", tlsh, "--xlen"], [300, 1000]), ["38;5;34", "38;5;22"])
         // A threshold of 100 (ssdeep) or 0 (TLSH) only matches the identical.
         XCTAssertEqual(try sgr(["--algo", "ssdeep", "--score", "100"], [100]), ["38;5;46"])
         XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "0"], [0]), ["38;5;46"])
@@ -187,7 +188,7 @@ final class RunnerTests: XCTestCase {
 
         let cdhash = try XCTUnwrap(CDHash.hash(data: slice))
         XCTAssertEqual(try lines(["--algo", "cdhash"]).map(\.tint), [.adhoc, .adhoc])
-        XCTAssertEqual(try lines(["--algo", "cdhash", "--match", String(cdhash.prefix(8))]).map(\.tint), [.match(distance: 0)])
+        XCTAssertEqual(try lines(["--algo", "cdhash", "--match", String(cdhash.prefix(40))]).map(\.tint), [.match(distance: 0)])
     }
 
     func testMalformedFileIsRed() {

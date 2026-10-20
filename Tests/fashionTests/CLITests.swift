@@ -20,14 +20,44 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(self.error(["--score=-1"]), "--score must be zero or greater.")
     }
 
+    private let md5 = "5d41402abc4b2a76b9719d911017c592"
+    private let sha1 = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+    private let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    private let tlsh = "T13D338D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
+
+    func testTargetsMustBeShapedLikeAlgorithm() throws {
+        // With --algo, every target must be shaped like that algorithm's digests: one shaped otherwise would scan
+        // everything and match nothing.
+        XCTAssertEqual(self.error(["x", "--algo", "md5", "--match", self.sha256]), "--match '\(self.sha256)' is not shaped like md5 digests.")
+        XCTAssertEqual(self.error(["x", "--algo", "tlsh", "--match", "T1"]), "--match 'T1' is not shaped like tlsh digests.")
+        XCTAssertEqual(self.error(["x", "--algo", "ssdeep", "--match", self.md5]), "--match '\(self.md5)' is not shaped like ssdeep digests.")
+        XCTAssertNil(self.error(["x", "--algo", "md5", "--match", self.md5]))
+        XCTAssertNil(self.error(["x", "--algo", "tlsh", "--match", self.tlsh, "--match", String(self.tlsh.dropFirst(2))]))
+        XCTAssertNil(self.error(["x", "--algo", "ssdeep", "--match", "3:abc:def"]))
+        // git and git256 digests are shaped like SHA-1 and SHA-256 ones; a cdhash target is the 20-byte CDHash Apple's
+        // tools show or a whole directory digest, never a shorter prefix.
+        XCTAssertNil(self.error(["x", "--algo", "git", "--match", self.sha1]))
+        XCTAssertEqual(self.error(["x", "--algo", "git", "--match", self.sha256]), "--match '\(self.sha256)' is not shaped like git digests.")
+        XCTAssertNil(self.error(["x", "--algo", "git256", "--match", self.sha256]))
+        XCTAssertEqual(self.error(["x", "--algo", "git256", "--match", self.sha1]), "--match '\(self.sha1)' is not shaped like git256 digests.")
+        XCTAssertNil(self.error(["x", "--algo", "cdhash", "--match", self.sha1]))
+        XCTAssertNil(self.error(["x", "--algo", "cdhash", "--match", self.sha256]))
+        XCTAssertEqual(self.error(["x", "--algo", "cdhash", "--match", String(self.sha1.prefix(39))]), "--match '\(self.sha1.prefix(39))' is not shaped like cdhash digests.")
+        XCTAssertEqual(self.error(["x", "--algo", "cdhash", "--match", String(self.sha1.prefix(8))]), "--match '\(self.sha1.prefix(8))' is not shaped like cdhash digests.")
+        XCTAssertEqual(self.error(["x", "--algo", "cdhash", "--match", "nothexvalue!!!"]), "--match 'nothexvalue!!!' is not shaped like cdhash digests.")
+        // A usage error, exit 64 before anything is hashed.
+        let (status, errors) = try runFashion(["--algo", "md5", "--match", self.sha256, "."])
+        XCTAssertEqual(status, 64) // EX_USAGE
+        XCTAssertEqual(errors.first, "Error: --match '\(self.sha256)' is not shaped like md5 digests.")
+    }
+
     func testXlenNeedsTLSHMatch() {
         // --xlen only changes how TLSH digests are compared: anywhere else it would be silently ignored.
-        let digest = "T13D338D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
         let refused = "--xlen requires --algo tlsh and --match."
         XCTAssertEqual(self.error(["x", "--xlen"]), refused)
         XCTAssertEqual(self.error(["x", "--algo", "tlsh", "--xlen"]), refused)
         XCTAssertEqual(self.error(["x", "--algo", "ssdeep", "--match", "3:a:b", "--xlen"]), refused)
-        XCTAssertNil(self.error(["x", "--algo", "tlsh", "--match", digest, "--xlen"]))
+        XCTAssertNil(self.error(["x", "--algo", "tlsh", "--match", self.tlsh, "--xlen"]))
     }
 
     func testArgumentsMustBeUTF8() throws {
