@@ -1,23 +1,24 @@
 import ArgumentParser
 import Foundation
+import os
 
-private enum OptionError: Error, Equatable {
+private let logger = Logger(subsystem: "fashion", category: "hash")
+
+/// What `Hasher` refuses: a mode, an algorithm or a target that cannot go together.
+private enum HashOptionError: Error, Equatable {
     case conflictingModes
     case unsupportedSymHashAlgorithm(Algorithm)
     case unsupportedXarCDHash
     case unsupportedSlicesCDHash
     case exactWithIncompatibleMode
     case decompressWithoutXarToc
-    case negativeJobs
-    case jobsWithAllJobs
     case negativeScore
     case targetOfNoShape(String)
     case targetNotOfAlgorithm(String, Algorithm)
     case xlenWithoutTLSHTarget
-    case argumentNotUTF8(Int)
 }
 
-extension OptionError: LocalizedError {
+extension HashOptionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .conflictingModes:
@@ -32,10 +33,6 @@ extension OptionError: LocalizedError {
             "--exact does not apply to --symhash or --xar-toc."
         case .decompressWithoutXarToc:
             "--decompress requires --xar-toc."
-        case .negativeJobs:
-            "--jobs must be zero or greater."
-        case .jobsWithAllJobs:
-            "-J and --jobs are mutually exclusive."
         case .negativeScore:
             "--score must be zero or greater."
         case let .targetOfNoShape(target):
@@ -44,15 +41,7 @@ extension OptionError: LocalizedError {
             "--match '\(target)' is not shaped like \(algorithm.rawValue) digests."
         case .xlenWithoutTLSHTarget:
             "--xlen requires a TLSH digest to --match."
-        case let .argumentNotUTF8(index):
-            "Argument \(index) is not valid UTF-8."
         }
-    }
-}
-
-private extension ValidationError {
-    init(_ error: OptionError) {
-        self.init(error.localizedDescription)
     }
 }
 
@@ -79,74 +68,6 @@ extension Algorithm: ExpressibleByArgument {
         }
     }
 }
-
-// MARK: -
-
-/**
- The command line. `fashion` runs the `hash` subcommand unless another is named, so `fashion [options] <paths>` reads as
- it always has; the subcommands share `ScanOptions`, which say what to walk and how.
-
- The root answers to no help flag of its own, so `fashion --help` falls through to the default subcommand and shows its
- options, as it did before there were subcommands; `fashion help` lists the subcommands.
- */
-@main
-struct Fashion: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "fashion",
-        abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
-        version: "1.5.3",
-        subcommands: [
-            Hasher.self,
-        ],
-        defaultSubcommand: Hasher.self,
-        helpNames: [],
-    )
-}
-
-// MARK: - Scan Options
-
-/**
- What every subcommand takes: the paths to walk and how, the workers that take the files, and the order they come out in.
- */
-struct ScanOptions: ParsableArguments {
-    @Argument(help: "Paths to scan (default: current directory).", completion: .file())
-    var paths: [String] = ["."]
-
-    @Option(name: .shortAndLong, help: "Number of concurrent workers (default: 1, 0 = all CPUs).")
-    var jobs: Int?
-
-    @Flag(name: .customShort("J"), help: "All CPUs, as --jobs 0.")
-    var allJobs = false
-
-    @Flag(name: [.customShort("L"), .long], help: "Follow symlinks.")
-    var follow = false
-
-    @Flag(inversion: .prefixedNo, help: "Sort file paths, numbers by value.")
-    var sort = false
-
-    var resolvedJobs: Int {
-        let processors = ProcessInfo.processInfo.activeProcessorCount
-        let jobs = self.allJobs ? 0 : self.jobs ?? 1
-        return jobs == 0 ? processors : min(jobs, processors)
-    }
-
-    mutating func validate() throws {
-        // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
-        if let jobs = self.jobs, jobs < 0 {
-            throw ValidationError(OptionError.negativeJobs)
-        }
-        if self.allJobs, self.jobs != nil {
-            throw ValidationError(OptionError.jobsWithAllJobs)
-        }
-        // CommandLine.arguments repairs bytes that are not UTF-8 to U+FFFD, which names another path (a name copied
-        // raw from an NFS or FAT volume, say): refuse to hash something else.
-        for index in 1 ..< Int(CommandLine.argc) where String(validatingCString: CommandLine.unsafeArgv[index]!) == nil {
-            throw ValidationError(OptionError.argumentNotUTF8(index))
-        }
-    }
-}
-
-// MARK: - Hasher
 
 /**
  Default mode: the digests of every file walked, or the files that match the targets given.
@@ -221,39 +142,39 @@ struct Hasher: ParsableCommand {
         // discards all but the highest-priority one. Reject the ambiguity up front.
         let modeCount = [self.symbolOptions.symhash, self.xarOptions.xarToc, self.slices].count(where: { $0 })
         if modeCount > 1 {
-            throw ValidationError(OptionError.conflictingModes)
+            throw ValidationError(HashOptionError.conflictingModes)
         }
 
         // Reject algorithms a mode cannot compute; otherwise the mode silently emits nothing.
         if let algo = self.algo {
             if self.symbolOptions.symhash, [.git, .git256, .cdhash].contains(algo) {
-                throw ValidationError(OptionError.unsupportedSymHashAlgorithm(algo))
+                throw ValidationError(HashOptionError.unsupportedSymHashAlgorithm(algo))
             }
             if self.xarOptions.xarToc, algo == .cdhash {
-                throw ValidationError(OptionError.unsupportedXarCDHash)
+                throw ValidationError(HashOptionError.unsupportedXarCDHash)
             }
             if self.slices, algo == .cdhash {
-                throw ValidationError(OptionError.unsupportedSlicesCDHash)
+                throw ValidationError(HashOptionError.unsupportedSlicesCDHash)
             }
         }
 
         // Flags that are silently ignored outside the mode they belong to.
         if self.exact, self.symbolOptions.symhash || self.xarOptions.xarToc {
-            throw ValidationError(OptionError.exactWithIncompatibleMode)
+            throw ValidationError(HashOptionError.exactWithIncompatibleMode)
         }
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
-            throw ValidationError(OptionError.decompressWithoutXarToc)
+            throw ValidationError(HashOptionError.decompressWithoutXarToc)
         }
         // A target is compared with --algo, whose digests it must be shaped like, or without --algo with the algorithm
         // its shape names: one shaped like none would scan everything and match nothing.
         for target in self.matchOptions.match where !Targets.fits(target, self.algo) {
-            throw ValidationError(self.algo.map { OptionError.targetNotOfAlgorithm(target, $0) } ?? .targetOfNoShape(target))
+            throw ValidationError(self.algo.map { HashOptionError.targetNotOfAlgorithm(target, $0) } ?? .targetOfNoShape(target))
         }
         if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.algo).algorithms.contains(.tlsh) {
-            throw ValidationError(OptionError.xlenWithoutTLSHTarget)
+            throw ValidationError(HashOptionError.xlenWithoutTLSHTarget)
         }
         if self.matchOptions.score < 0 {
-            throw ValidationError(OptionError.negativeScore)
+            throw ValidationError(HashOptionError.negativeScore)
         }
     }
 
@@ -264,6 +185,39 @@ struct Hasher: ParsableCommand {
         if code != 0 {
             throw ExitCode(code)
         }
+    }
+}
+
+// MARK: - Scan
+
+extension Hasher {
+    /**
+     Scan the paths and return a process exit code:
+     - `0` success,
+     - `1` match mode found nothing,
+     - `2` one or more paths could not be enumerated or hashed.
+
+     `trapSignals` logs the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
+     Signal dispositions are process-wide, so only the command line sets it.
+     */
+    func scan(trapSignals: Bool = false) -> Int32 {
+        let digester = Digester(self)
+
+        let algorithms = digester.algorithms.map(\.defaultValueDescription).joined(separator: ", ")
+        logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+
+        if !digester.targets.isEmpty {
+            logger.info("Match mode with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
+        }
+
+        let run = self.scan.run(trapSignals: trapSignals, activity: "hashing") { digester.lines(for: $0, reporter: $1) }
+        if run.errorCount > 0 {
+            return 2
+        }
+        if !digester.targets.isEmpty, !run.printedAny {
+            return 1
+        }
+        return 0
     }
 }
 

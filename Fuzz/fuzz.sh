@@ -141,7 +141,7 @@ build() {
             "${swift[@]}" "${sanitize[@]}" ${define[@]+"${define[@]}"} -c -wmo -enable-testing -module-name fashion \
                 -Xfrontend -entry-point-function-name -Xfrontend fashion_main "${includes[@]}" \
                 -emit-module -emit-module-path "$out/fashion.swiftmodule" \
-                "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/Algorithms/*.swift -o "$out/fashion.o"
+                "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/Algorithms/*.swift "$root"/Sources/fashion/Commands/*.swift -o "$out/fashion.o"
         fi
     done
 

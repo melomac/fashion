@@ -10,23 +10,26 @@ import System
    |
    v
  Hasher.run() -> scan()         built once per scan:
-                                  Digester    per-file options, read once
+ Thinner.run() -> scan()          Digester    hash: per-file options, read once
+                                  Thinner     thin: a slice per architecture
                                   Console     owns stdout and stderr, and the status line
                                   Reporter    counts, diagnostics, unified log, end of run
                                   SignalTrap  INT/TERM/PIPE: log the end, die of the signal
                                               INFO (^T): progress on stderr
                                   Output      prints each file's lines
 
- MAIN THREAD: WALKER                HANDOFF           HASH THREADS (x jobs)
+ MAIN THREAD: WALKER                HANDOFF           WORK THREADS (x jobs)
  QoS userInitiated                  64 paths          QoS userInitiated
  +--------------------------+       +---------+       +--------------------------------+
  | FileWalker (fts)         |  put  |         |  take | output.started(index, path)    |
- | unsorted: as found       |------>| (index, |------>| digester.lines(for: path)      |
+ | unsorted: as found       |------>| (index, |------>| work(path), hash: Digester     |
  | --sort: roots in natural |       |  path)  |       |   digests(path), by mode:      |
  | order, each directory    |       |         |       |     symhash | xar-toc |        |
  | by fashion_fts_compare   |       +---------+       |     cdhash | slices | file     |
  | walk errors -> Reporter  |                         |   -> [DigestResult]            |
  +--------------------------+                         |   -> match / quiet -> lines    |
+                                                      |   thin: Thinner.lines, the     |
+                                                      |   artifacts written -> lines   |
                                                       |   diagnostics: Reporter, lines |
                                                       | reporter.fileProcessed()       |
                                                       | output.finished(index, lines)  |
@@ -312,6 +315,8 @@ final class Output: @unchecked Sendable {
     private let console: Console
     private let reporter: Reporter
     private let trap: SignalTrap?
+    /// What the threads do to a file, for the status line: "hashing", "thinning".
+    private let activity: String
     private var held: [Int: [Line]] = [:]
     private var hashing: [Int: String] = [:]
     private var queued: [Line] = []
@@ -319,8 +324,9 @@ final class Output: @unchecked Sendable {
     private var next = 0
     private var printed = false
 
-    init(sorted: Bool, console: Console, reporter: Reporter, trap: SignalTrap?) {
+    init(sorted: Bool, activity: String, console: Console, reporter: Reporter, trap: SignalTrap?) {
         self.sorted = sorted
+        self.activity = activity
         self.console = console
         self.reporter = reporter
         self.trap = trap
@@ -408,7 +414,7 @@ final class Output: @unchecked Sendable {
             return
         }
         // Off the lock: the write waits for the terminal, and the hash threads must not wait for that.
-        self.console.status("\(String(self.reporter.fileCount, pluralizing: "file")) · \(status.waiting > 0 ? "\(status.waiting) waiting · " : "")hashing ", path: status.path)
+        self.console.status("\(String(self.reporter.fileCount, pluralizing: "file")) · \(status.waiting > 0 ? "\(status.waiting) waiting · " : "")\(self.activity) ", path: status.path)
     }
 
     /**
@@ -776,51 +782,40 @@ final class Handoff: @unchecked Sendable {
 // MARK: - Scan
 
 /**
- The scan: this thread walks the paths and hands each file to `jobs` hash threads, which print through `Output`.
+ The scan: this thread walks the paths and hands each file to `jobs` work threads, which print through `Output`.
  With `--sort`, the walk sorts each directory as it reads it, so files are handed out in order as they are found.
  */
-extension Hasher {
+extension ScanOptions {
     /**
-     Scan the paths and return a process exit code:
-     - `0` success,
-     - `1` match mode found nothing,
-     - `2` one or more paths could not be enumerated or hashed.
+     Walk the paths and hand each file to `jobs` threads, which print the lines `work` returns for it; `activity` says
+     what they do to a file, for the status line. Returns whether any line was printed, and how many paths could not
+     be walked or worked on.
 
      `trapSignals` logs the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
      Signal dispositions are process-wide, so only the command line sets it.
      */
-    func scan(trapSignals: Bool = false) -> Int32 {
-        let jobs = self.scan.resolvedJobs
-        let digester = Digester(self)
-
-        let algorithms = digester.algorithms.map(\.defaultValueDescription).joined(separator: ", ")
-        logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public) with \(String(jobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
-
-        if !digester.targets.isEmpty {
-            logger.info("Match mode with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
-        }
-
+    func run(trapSignals: Bool, activity: String, work: @escaping @Sendable (_ path: String, _ reporter: Reporter) -> [Line]) -> (printedAny: Bool, errorCount: Int) {
         let console = Console()
         let reporter = Reporter(console: console)
         let trap = trapSignals ? SignalTrap(reporter: reporter) : nil
-        let output = Output(sorted: self.scan.sort, console: console, reporter: reporter, trap: trap)
+        let output = Output(sorted: self.sort, activity: activity, console: console, reporter: reporter, trap: trap)
 
-        // The walking thread runs at the hash threads' QoS, so it keeps up with them when every core is busy.
+        // The walking thread runs at the work threads' QoS, so it keeps up with them when every core is busy.
         _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
 
-        // A few dozen paths of lookahead keep every hash thread busy while the walker reads a large directory.
+        // A few dozen paths of lookahead keep every work thread busy while the walker reads a large directory.
         let handoff = Handoff(capacity: 64)
-        let hashing = DispatchGroup()
-        for _ in 0 ..< jobs {
-            hashing.enter()
+        let working = DispatchGroup()
+        for _ in 0 ..< self.resolvedJobs {
+            working.enter()
             let thread = Thread {
                 while let (index, path) = handoff.take() {
                     output.started(index, path: path)
-                    let lines = digester.lines(for: path, reporter: reporter)
+                    let lines = work(path, reporter)
                     reporter.fileProcessed()
                     output.finished(index, lines: lines)
                 }
-                hashing.leave()
+                working.leave()
             }
             thread.qualityOfService = .userInitiated
             thread.start()
@@ -833,12 +828,12 @@ extension Hasher {
         ticker?.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(100))
         ticker?.resume()
 
-        let files = FileWalker(paths: self.scan.paths, follow: self.scan.follow, reporter: reporter, sorted: self.scan.sort)
+        let files = FileWalker(paths: self.paths, follow: self.follow, reporter: reporter, sorted: self.sort)
         for (index, path) in files.enumerated() {
             handoff.put(index: index, path: path)
         }
         handoff.close()
-        hashing.wait()
+        working.wait()
 
         // Let a redraw in flight finish, so the end of the run erases the status line for good.
         ticker?.cancel()
@@ -847,13 +842,7 @@ extension Hasher {
         reporter.end("Done")
         trap?.restore()
 
-        if reporter.errorCount > 0 {
-            return 2
-        }
-        if !digester.targets.isEmpty, !output.printedAny {
-            return 1
-        }
-        return 0
+        return (output.printedAny, reporter.errorCount)
     }
 }
 

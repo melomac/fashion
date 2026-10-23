@@ -503,7 +503,7 @@ final class RunnerConcurrencyTests: XCTestCase {
         let hashers = 8
         let lines = try self.piped(STDOUT_FILENO) {
             let console = Console()
-            let output = Output(sorted: true, console: console, reporter: Reporter(console: console), trap: nil)
+            let output = Output(sorted: true, activity: "hashing", console: console, reporter: Reporter(console: console), trap: nil)
             let hashing = self.start(hashers) { number in
                 for index in stride(from: number, to: files, by: hashers).shuffled() {
                     output.started(index, path: "/\(index)")
@@ -530,7 +530,7 @@ final class RunnerConcurrencyTests: XCTestCase {
         let hashers = 8
         let lines = try self.piped(STDOUT_FILENO) {
             let console = Console()
-            let output = Output(sorted: false, console: console, reporter: Reporter(console: console), trap: nil)
+            let output = Output(sorted: false, activity: "hashing", console: console, reporter: Reporter(console: console), trap: nil)
             XCTAssertFalse(output.printedAny)
             self.run(hashers) { number in
                 for index in stride(from: number, to: files, by: hashers) {
@@ -562,7 +562,7 @@ final class RunnerConcurrencyTests: XCTestCase {
             errors = try self.piped(STDERR_FILENO) {
                 let console = Console()
                 let reporter = Reporter(console: console)
-                let output = Output(sorted: false, console: console, reporter: reporter, trap: nil)
+                let output = Output(sorted: false, activity: "hashing", console: console, reporter: reporter, trap: nil)
                 self.run(hashers) { number in
                     for file in 0 ..< files {
                         let path = "/\(number)/\(file)"
@@ -594,7 +594,7 @@ final class RunnerConcurrencyTests: XCTestCase {
         let lines = try self.terminal([STDOUT_FILENO, STDERR_FILENO]) {
             let console = Console()
             let reporter = Reporter(console: console)
-            let output = Output(sorted: true, console: console, reporter: reporter, trap: nil)
+            let output = Output(sorted: true, activity: "hashing", console: console, reporter: reporter, trap: nil)
             // Every file's lines, warnings first, before any is printed: under Xcode the unified log is copied to
             // stderr too (OS_ACTIVITY_DT_MODE), and a copy written while a batch of lines goes out could cut one.
             let prepared = (0 ..< files).map { index in
@@ -625,7 +625,7 @@ final class RunnerConcurrencyTests: XCTestCase {
         let lines = try self.piped(STDERR_FILENO) {
             let console = Console()
             let reporter = Reporter(console: console)
-            let output = Output(sorted: false, console: console, reporter: reporter, trap: nil)
+            let output = Output(sorted: false, activity: "hashing", console: console, reporter: reporter, trap: nil)
             output.finished(0, lines: [reporter.inform(path: "/0", message: "informed")])
             output.finished(1, lines: [])
             XCTAssertFalse(output.printedAny)
@@ -647,7 +647,7 @@ final class RunnerConcurrencyTests: XCTestCase {
             do {
                 let lines = try self.terminal([STDOUT_FILENO], pause: 8000) {
                     let console = Console()
-                    let output = Output(sorted: false, console: console, reporter: Reporter(console: console), trap: nil)
+                    let output = Output(sorted: false, activity: "hashing", console: console, reporter: Reporter(console: console), trap: nil)
                     self.run(hashers) { number in
                         for index in stride(from: number, to: files, by: hashers) {
                             let deadline = ContinuousClock.now + .microseconds(25)

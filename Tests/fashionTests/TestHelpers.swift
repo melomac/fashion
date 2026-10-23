@@ -224,6 +224,18 @@ private final class BundleMarker {}
 let fashionEnvironment = ProcessInfo.processInfo.environment.filter { $0.key != "OS_ACTIVITY_DT_MODE" }
 
 /**
+ The message the command line prints for the hash subcommand's `arguments`, or nil when they are valid.
+ */
+func usageError(_ arguments: [String]) -> String? {
+    do {
+        _ = try Hasher.parse(arguments)
+        return nil
+    } catch {
+        return Hasher.message(for: error)
+    }
+}
+
+/**
  Run the built `fashion` on `arguments`, its output discarded: the exit status and the lines it wrote to stderr. Through
  `sh`, which runs `script` with `$0` the binary and `$1`… the arguments, it can be handed bytes a Swift string cannot
  hold.
