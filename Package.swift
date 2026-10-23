@@ -13,7 +13,7 @@ let package = Package(
         .macOS(.v13),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.0"),
     ],
     targets: [
         // CSSDeep and CTLSH compile the submodules' sources through one-line includes, so the headers SwiftPM needs
