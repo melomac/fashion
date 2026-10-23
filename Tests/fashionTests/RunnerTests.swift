@@ -10,7 +10,7 @@ import XCTest
 final class RunnerTests: XCTestCase {
     private func run(_ url: URL, algorithm: Algorithm = .sha256, slices: Bool = false) throws -> Int32 {
         let arguments = [url.path, "--algo", algorithm.rawValue, "--quiet", "--sort"] + (slices ? ["--slices"] : [])
-        return try Fashion.parse(arguments).scan()
+        return try Hasher.parse(arguments).scan()
     }
 
     /**
@@ -141,7 +141,7 @@ final class RunnerTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
 
-        let digester = try Digester(Fashion.parse([url.path, "--slices", "--exact", "--quiet"]))
+        let digester = try Digester(Hasher.parse([url.path, "--slices", "--exact", "--quiet"]))
         let lines = digester.lines(for: url.path, reporter: Reporter(console: Console())).map(\.text)
         XCTAssertEqual(lines, try [ByteHash.sha256.digest(fat), ByteHash.sha256.digest(slice)])
     }
@@ -149,7 +149,7 @@ final class RunnerTests: XCTestCase {
     func testFuzzyMatchTint() throws {
         // Greens by quarters of the way to --score: with 40, a TLSH distance of 0 is full green, then darker each 10.
         func sgr(_ arguments: [String], _ scores: [Int]) throws -> [String?] {
-            let digester = try Digester(Fashion.parse(["x"] + arguments))
+            let digester = try Digester(Hasher.parse(["x"] + arguments))
             return scores.map { digester.matchTint($0, algorithm: digester.algorithms[0]).sgr() }
         }
         let greens = ["38;5;46", "38;5;40", "38;5;34", "38;5;28", "38;5;22"]
@@ -165,8 +165,8 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try sgr(["--algo", "ssdeep", "--score", "100"], [100]), ["38;5;46"])
         XCTAssertEqual(try sgr(["--algo", "tlsh", "--score", "0"], [0]), ["38;5;46"])
         // An exact match has no score: full green, with any algorithm.
-        XCTAssertEqual(try Digester(Fashion.parse(["x"])).matchTint(nil, algorithm: .sha256).sgr(), "38;5;46")
-        XCTAssertEqual(try Digester(Fashion.parse(["x", "--algo", "cdhash"])).matchTint(nil, algorithm: .cdhash).sgr(), "38;5;46")
+        XCTAssertEqual(try Digester(Hasher.parse(["x"])).matchTint(nil, algorithm: .sha256).sgr(), "38;5;46")
+        XCTAssertEqual(try Digester(Hasher.parse(["x", "--algo", "cdhash"])).matchTint(nil, algorithm: .cdhash).sgr(), "38;5;46")
     }
 
     func testMixedTargetsMatchByEachShape() throws {
@@ -199,7 +199,7 @@ final class RunnerTests: XCTestCase {
             "--match", digest(.sha256, "both"),
         ]
 
-        let digester = try Digester(Fashion.parse([directory.path] + targets))
+        let digester = try Digester(Hasher.parse([directory.path] + targets))
         XCTAssertEqual(digester.algorithms, [.md5, .sha256, .ssdeep, .tlsh])
         guard case let .file(hashes) = digester.mode else {
             return XCTFail("\(digester.mode)")
@@ -209,7 +209,7 @@ final class RunnerTests: XCTestCase {
         // A TLSH target has every file hashed with TLSH, which names the files too small for it, as --algo tlsh does.
         func lines(_ name: String, _ arguments: [String] = []) throws -> [String] {
             let path = (directory / name).path
-            let lines = try Digester(Fashion.parse([directory.path] + targets + arguments)).lines(for: path, reporter: Reporter(console: Console()))
+            let lines = try Digester(Hasher.parse([directory.path] + targets + arguments)).lines(for: path, reporter: Reporter(console: Console()))
             if name != "tlsh", name != "ssdeep", !arguments.contains("--quiet") {
                 XCTAssertEqual(lines.filter(\.diagnostic).map(\.text), ["fashion: \(path): TLSH cannot hash: input too small (\(files.first { $0.name == name }!.data.count) bytes, minimum 50)"])
             }
@@ -225,15 +225,15 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try lines("tlsh", ["--quiet"]), [(directory / "tlsh").path])
         // The greens of a match follow the algorithm of the digest that matched: full for an exact one, and for an
         // ssdeep as similar as can be.
-        let tints = try Digester(Fashion.parse([directory.path] + targets + ["--quiet"])).lines(for: (directory / "both").path, reporter: Reporter(console: Console())).map(\.tint)
+        let tints = try Digester(Hasher.parse([directory.path] + targets + ["--quiet"])).lines(for: (directory / "both").path, reporter: Reporter(console: Console())).map(\.tint)
         XCTAssertEqual(tints, [.match(distance: 0)])
-        let scored = try Digester(Fashion.parse([directory.path] + targets)).lines(for: (directory / "ssdeep").path, reporter: Reporter(console: Console())).map(\.tint)
+        let scored = try Digester(Hasher.parse([directory.path] + targets)).lines(for: (directory / "ssdeep").path, reporter: Reporter(console: Console())).map(\.tint)
         XCTAssertEqual(scored, [.match(distance: 0)])
 
         // The run matched: exit 0; with targets no file has, 1.
-        XCTAssertEqual(try Fashion.parse([directory.path, "--quiet"] + targets).scan(), 0)
+        XCTAssertEqual(try Hasher.parse([directory.path, "--quiet"] + targets).scan(), 0)
         let other = try ByteHash.tlsh.digest(Data((0 ..< 1024).map { UInt8($0 * 13 % 256) }))
-        XCTAssertEqual(try Fashion.parse([directory.path, "--quiet", "--match", digest(.md5, "none").replacingOccurrences(of: "0", with: "1"), "--match", XCTUnwrap(other), "--score", "0"]).scan(), 1)
+        XCTAssertEqual(try Hasher.parse([directory.path, "--quiet", "--match", digest(.md5, "none").replacingOccurrences(of: "0", with: "1"), "--match", XCTUnwrap(other), "--score", "0"]).scan(), 1)
     }
 
     func testExactMatchIsGreen() throws {
@@ -245,7 +245,7 @@ final class RunnerTests: XCTestCase {
             try? FileManager.default.removeItem(at: url)
         }
         func lines(_ arguments: [String]) throws -> [Line] {
-            try Digester(Fashion.parse([url.path] + arguments)).lines(for: url.path, reporter: Reporter(console: Console()))
+            try Digester(Hasher.parse([url.path] + arguments)).lines(for: url.path, reporter: Reporter(console: Console()))
         }
 
         let sha256 = try XCTUnwrap(ByteHash.sha256.digest(slice))
@@ -269,7 +269,7 @@ final class RunnerTests: XCTestCase {
         let ssdeep = try XCTUnwrap(digests.first { $0.algorithm == .ssdeep }).digest
         let tlsh = try XCTUnwrap(digests.first { $0.algorithm == .tlsh }).digest
         func lines(_ targets: [String]) throws -> [String] {
-            let digester = try Digester(Fashion.parse([path, "--symhash"] + targets.flatMap { ["--match", $0] }))
+            let digester = try Digester(Hasher.parse([path, "--symhash"] + targets.flatMap { ["--match", $0] }))
             XCTAssertEqual(digester.algorithms, Algorithm.allCases.filter { algorithm in targets.contains { Targets.shape(of: $0) == algorithm } })
             return digester.lines(for: path, reporter: Reporter(console: Console())).filter { !$0.diagnostic }.map(\.text)
         }
@@ -297,7 +297,7 @@ final class RunnerTests: XCTestCase {
         let tlsh = try XCTUnwrap(ByteHash.tlsh.digest(stored))
         let inflated = try XCTUnwrap(ByteHash.tlsh.digest(toc))
         func lines(_ arguments: [String]) throws -> [String] {
-            try Digester(Fashion.parse([url.path, "--xar-toc"] + arguments)).lines(for: url.path, reporter: Reporter(console: Console())).map(\.text)
+            try Digester(Hasher.parse([url.path, "--xar-toc"] + arguments)).lines(for: url.path, reporter: Reporter(console: Console())).map(\.text)
         }
         XCTAssertEqual(try lines(["--match", sha256, "--match", tlsh]), ["\(sha256)  \(url.path)", "\(tlsh)    0  \(url.path)"])
         XCTAssertEqual(try lines(["--match", sha256, "--match", tlsh, "--quiet"]), [url.path])
@@ -849,7 +849,7 @@ final class RunnerConcurrencyTests: XCTestCase {
             let lines = try self.piped(STDOUT_FILENO) {
                 self.run(1) { _ in
                     do {
-                        let code = try Fashion.parse(arguments).scan()
+                        let code = try Hasher.parse(arguments).scan()
                         status.withLock { $0 = code }
                     } catch {
                         XCTFail("\(error)")

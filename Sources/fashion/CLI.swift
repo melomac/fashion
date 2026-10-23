@@ -82,21 +82,35 @@ extension Algorithm: ExpressibleByArgument {
 
 // MARK: -
 
+/**
+ The command line. `fashion` runs the `hash` subcommand unless another is named, so `fashion [options] <paths>` reads as
+ it always has; the subcommands share `ScanOptions`, which say what to walk and how.
+
+ The root answers to no help flag of its own, so `fashion --help` falls through to the default subcommand and shows its
+ options, as it did before there were subcommands; `fashion help` lists the subcommands.
+ */
 @main
 struct Fashion: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fashion",
         abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
         version: "1.5.3",
+        subcommands: [
+            Hasher.self,
+        ],
+        defaultSubcommand: Hasher.self,
+        helpNames: [],
     )
+}
 
+// MARK: - Scan Options
+
+/**
+ What every subcommand takes: the paths to walk and how, the workers that take the files, and the order they come out in.
+ */
+struct ScanOptions: ParsableArguments {
     @Argument(help: "Paths to scan (default: current directory).", completion: .file())
     var paths: [String] = ["."]
-
-    // MARK: - Options
-
-    @Option(name: .shortAndLong, help: "Hash algorithm")
-    var algo: Algorithm?
 
     @Option(name: .shortAndLong, help: "Number of concurrent workers (default: 1, 0 = all CPUs).")
     var jobs: Int?
@@ -107,6 +121,53 @@ struct Fashion: ParsableCommand {
     @Flag(name: [.customShort("L"), .long], help: "Follow symlinks.")
     var follow = false
 
+    @Flag(inversion: .prefixedNo, help: "Sort file paths, numbers by value.")
+    var sort = false
+
+    var resolvedJobs: Int {
+        let processors = ProcessInfo.processInfo.activeProcessorCount
+        let jobs = self.allJobs ? 0 : self.jobs ?? 1
+        return jobs == 0 ? processors : min(jobs, processors)
+    }
+
+    mutating func validate() throws {
+        // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
+        if let jobs = self.jobs, jobs < 0 {
+            throw ValidationError(OptionError.negativeJobs)
+        }
+        if self.allJobs, self.jobs != nil {
+            throw ValidationError(OptionError.jobsWithAllJobs)
+        }
+        // CommandLine.arguments repairs bytes that are not UTF-8 to U+FFFD, which names another path (a name copied
+        // raw from an NFS or FAT volume, say): refuse to hash something else.
+        for index in 1 ..< Int(CommandLine.argc) where String(validatingCString: CommandLine.unsafeArgv[index]!) == nil {
+            throw ValidationError(OptionError.argumentNotUTF8(index))
+        }
+    }
+}
+
+// MARK: - Hasher
+
+/**
+ Default mode: the digests of every file walked, or the files that match the targets given.
+ */
+struct Hasher: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "hash",
+        abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
+        usage: "fashion [hash] [<options>] [<paths> ...]",
+        discussion: "Other subcommands are listed by 'fashion help'.",
+        helpNames: .shortAndLong,
+    )
+
+    // MARK: - Options
+
+    @Option(name: .shortAndLong, help: "Hash algorithm")
+    var algo: Algorithm?
+
+    @OptionGroup
+    var scan: ScanOptions
+
     @Flag(name: .shortAndLong, help: "Quiet output: digests alone, or matched paths, and no TLSH caveat.")
     var quiet = false
 
@@ -115,9 +176,6 @@ struct Fashion: ParsableCommand {
 
     @Flag(help: "Hash the exact Mach-O image, ignoring appended bytes.")
     var exact = false
-
-    @Flag(inversion: .prefixedNo, help: "Sort file paths, numbers by value.")
-    var sort = false
 
     // MARK: - Grouped Options
 
@@ -142,12 +200,6 @@ struct Fashion: ParsableCommand {
         } else {
             .sha256
         }
-    }
-
-    var resolvedJobs: Int {
-        let processors = ProcessInfo.processInfo.activeProcessorCount
-        let jobs = self.allJobs ? 0 : self.jobs ?? 1
-        return jobs == 0 ? processors : min(jobs, processors)
     }
 
     var resolvedSeparator: String {
@@ -200,20 +252,8 @@ struct Fashion: ParsableCommand {
         if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.algo).algorithms.contains(.tlsh) {
             throw ValidationError(OptionError.xlenWithoutTLSHTarget)
         }
-        // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
-        if let jobs = self.jobs, jobs < 0 {
-            throw ValidationError(OptionError.negativeJobs)
-        }
-        if self.allJobs, self.jobs != nil {
-            throw ValidationError(OptionError.jobsWithAllJobs)
-        }
         if self.matchOptions.score < 0 {
             throw ValidationError(OptionError.negativeScore)
-        }
-        // CommandLine.arguments repairs bytes that are not UTF-8 to U+FFFD, which names another path (a name copied
-        // raw from an NFS or FAT volume, say): refuse to hash something else.
-        for index in 1 ..< Int(CommandLine.argc) where String(validatingCString: CommandLine.unsafeArgv[index]!) == nil {
-            throw ValidationError(OptionError.argumentNotUTF8(index))
         }
     }
 

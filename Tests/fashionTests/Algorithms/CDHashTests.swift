@@ -138,7 +138,7 @@ final class CDHashTests: XCTestCase {
 
         // Its lines say so too: the warning first, for stderr, then one per directory, the slice's labeled INVALID.
         let warning = "fashion: \(tampered.path)\(slice.arch.map { " (\($0))" } ?? ""): invalid signature (code or signature have been modified)"
-        let lines = try Digester(Fashion.parse([tampered.path, "--algo", "cdhash"])).lines(for: tampered.path, reporter: Reporter(console: Console()))
+        let lines = try Digester(Hasher.parse([tampered.path, "--algo", "cdhash"])).lines(for: tampered.path, reporter: Reporter(console: Console()))
         XCTAssertEqual(lines.filter(\.diagnostic).map(\.text), [warning])
         XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("INVALID") }, results.map(\.invalid))
 

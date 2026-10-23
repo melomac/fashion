@@ -3,13 +3,13 @@ import os
 import System
 
 /*
- The scan, end to end. `Fashion.scan()` builds the parts below once per run, then the calling (main) thread walks the
+ The scan, end to end. `Hasher.scan()` builds the parts below once per run, then the calling (main) thread walks the
  paths and hands each file to `jobs` hash threads, which print through `Output` and `Console`.
 
- fashion [options] <paths>
+ fashion [hash] [options] <paths>
    |
    v
- Fashion.run() -> scan()        built once per scan:
+ Hasher.run() -> scan()         built once per scan:
                                   Digester    per-file options, read once
                                   Console     owns stdout and stderr, and the status line
                                   Reporter    counts, diagnostics, unified log, end of run
@@ -606,7 +606,7 @@ final class Reporter: @unchecked Sendable {
 
  A signal inherited as ignored (a background job in a script, `nohup`) stays ignored, and `restore()` puts back
  the inherited dispositions once the run is over. Dispositions are process-wide, so only the command line installs
- a trap (see `Fashion.scan(trapSignals:)`).
+ a trap (see `Hasher.scan(trapSignals:)`).
  */
 final class SignalTrap: @unchecked Sendable {
     private let reporter: Reporter
@@ -779,7 +779,7 @@ final class Handoff: @unchecked Sendable {
  The scan: this thread walks the paths and hands each file to `jobs` hash threads, which print through `Output`.
  With `--sort`, the walk sorts each directory as it reads it, so files are handed out in order as they are found.
  */
-extension Fashion {
+extension Hasher {
     /**
      Scan the paths and return a process exit code:
      - `0` success,
@@ -790,11 +790,11 @@ extension Fashion {
      Signal dispositions are process-wide, so only the command line sets it.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        let jobs = self.resolvedJobs
+        let jobs = self.scan.resolvedJobs
         let digester = Digester(self)
 
         let algorithms = digester.algorithms.map(\.defaultValueDescription).joined(separator: ", ")
-        logger.info("\(self.sort ? "Run sorted" : "Run", privacy: .public) with \(String(jobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.paths.count, pluralizing: "path"), privacy: .public): \(self.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public) with \(String(jobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
         if !digester.targets.isEmpty {
             logger.info("Match mode with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
@@ -803,7 +803,7 @@ extension Fashion {
         let console = Console()
         let reporter = Reporter(console: console)
         let trap = trapSignals ? SignalTrap(reporter: reporter) : nil
-        let output = Output(sorted: self.sort, console: console, reporter: reporter, trap: trap)
+        let output = Output(sorted: self.scan.sort, console: console, reporter: reporter, trap: trap)
 
         // The walking thread runs at the hash threads' QoS, so it keeps up with them when every core is busy.
         _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
@@ -833,7 +833,7 @@ extension Fashion {
         ticker?.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(100))
         ticker?.resume()
 
-        let files = FileWalker(paths: self.paths, follow: self.follow, reporter: reporter, sorted: self.sort)
+        let files = FileWalker(paths: self.scan.paths, follow: self.scan.follow, reporter: reporter, sorted: self.scan.sort)
         for (index, path) in files.enumerated() {
             handoff.put(index: index, path: path)
         }
@@ -890,7 +890,7 @@ struct Digester {
     /// Whether TLSH digests are compared without the file length they record.
     let xlen: Bool
 
-    init(_ command: Fashion) {
+    init(_ command: Hasher) {
         self.targets = Targets(command.matchOptions.match, algorithm: command.algo)
         // The algorithms the targets name or, without any, --algo's or the mode's default.
         self.algorithms = self.targets.algorithms.isEmpty ? [command.resolvedAlgorithm] : self.targets.algorithms

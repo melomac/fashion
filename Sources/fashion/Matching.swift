@@ -25,7 +25,7 @@ struct Targets {
 
     /**
      Type each target by `algorithm` or, without one, by its shape. A target that fits neither is left out, and
-     matches nothing: `Fashion.validate()` refuses the run over it first.
+     matches nothing: `Hasher.validate()` refuses the run over it first.
      */
     init(_ targets: [String] = [], algorithm: Algorithm? = nil) {
         self.count = targets.count

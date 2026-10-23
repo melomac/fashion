@@ -7,10 +7,10 @@ final class CLITests: XCTestCase {
      */
     private func error(_ arguments: [String]) -> String? {
         do {
-            _ = try Fashion.parse(arguments)
+            _ = try Hasher.parse(arguments)
             return nil
         } catch {
-            return Fashion.message(for: error)
+            return Hasher.message(for: error)
         }
     }
 
@@ -73,7 +73,7 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(self.error(["x", "--match", self.md5, "--match", "T1"]), noShape("T1"))
         XCTAssertEqual(self.error(["x", "--match", String(self.sha1.prefix(8))]), noShape(String(self.sha1.prefix(8))))
         XCTAssertNil(self.error(["x", "--match", self.md5, "--match", self.sha256, "--match", self.tlsh, "--match", "3:abc:def"]))
-        XCTAssertEqual(try Digester(Fashion.parse(["x", "--match", self.sha1, "--match", self.sha256])).algorithms, [.sha1, .sha256])
+        XCTAssertEqual(try Digester(Hasher.parse(["x", "--match", self.sha1, "--match", self.sha256])).algorithms, [.sha1, .sha256])
         // A usage error, exit 64 before anything is hashed.
         let (status, errors) = try runFashion(["--match", "zzz", "."])
         XCTAssertEqual(status, 64) // EX_USAGE
@@ -100,13 +100,46 @@ final class CLITests: XCTestCase {
 
     func testJobsResolveToTheProcessors() throws {
         let processors = ProcessInfo.processInfo.activeProcessorCount
-        XCTAssertEqual(try Fashion.parse([]).resolvedJobs, 1)
-        XCTAssertEqual(try Fashion.parse(["--jobs=0"]).resolvedJobs, processors)
-        XCTAssertEqual(try Fashion.parse(["--jobs=1"]).resolvedJobs, 1)
-        XCTAssertEqual(try Fashion.parse(["--jobs=\(processors + 1)"]).resolvedJobs, processors)
+        XCTAssertEqual(try Hasher.parse([]).scan.resolvedJobs, 1)
+        XCTAssertEqual(try Hasher.parse(["--jobs=0"]).scan.resolvedJobs, processors)
+        XCTAssertEqual(try Hasher.parse(["--jobs=1"]).scan.resolvedJobs, 1)
+        XCTAssertEqual(try Hasher.parse(["--jobs=\(processors + 1)"]).scan.resolvedJobs, processors)
         // -J is --jobs 0, and says so rather than letting one silently win over the other.
-        XCTAssertEqual(try Fashion.parse(["-J"]).resolvedJobs, processors)
+        XCTAssertEqual(try Hasher.parse(["-J"]).scan.resolvedJobs, processors)
         XCTAssertEqual(self.error(["-J", "--jobs=0"]), "-J and --jobs are mutually exclusive.")
         XCTAssertEqual(self.error(["-J", "-j", "4"]), "-J and --jobs are mutually exclusive.")
+    }
+
+    func testHashIsTheDefaultSubcommand() throws {
+        // `fashion [options] <paths>` reads as it did before subcommands: the root runs `hash` unless another is named,
+        // and `fashion hash` spells it out. The option groups of a default subcommand are validated like any other.
+        for arguments in [["--algo", "md5", "-J", "x"], ["hash", "--algo", "md5", "-J", "x"]] {
+            let command = try XCTUnwrap(Fashion.parseAsRoot(arguments) as? Hasher)
+            XCTAssertEqual(command.algo, .md5)
+            XCTAssertEqual(command.scan.paths, ["x"])
+            XCTAssertTrue(command.scan.allJobs)
+        }
+        XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot([]) as? Hasher).scan.paths, ["."])
+        XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot(["hash"]) as? Hasher).scan.paths, ["."])
+        XCTAssertThrowsError(try Fashion.parseAsRoot(["hash", "-J", "--jobs=0"]))
+        // The root has no help flag of its own: `fashion --help` prints the default subcommand's help, every option
+        // included, and `fashion help` lists the subcommands.
+        func stdout(_ arguments: [String]) throws -> String {
+            let process = Process()
+            process.executableURL = try fashionExecutable()
+            process.arguments = arguments
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            return output
+        }
+        XCTAssertTrue(try stdout(["--help"]).contains("USAGE: fashion [hash] [<options>] [<paths> ...]"))
+        XCTAssertTrue(try stdout(["help"]).contains("SUBCOMMANDS:"))
+        // End to end, through the binary, both spellings.
+        XCTAssertEqual(try runFashion(["--algo", "md5", "-q", "/bin/ls"]).status, 0)
+        XCTAssertEqual(try runFashion(["hash", "--algo", "md5", "-q", "/bin/ls"]).status, 0)
     }
 }
