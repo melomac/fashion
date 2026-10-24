@@ -101,4 +101,4 @@ fuzz-run: fuzz
 
 .PHONY: distclean
 distclean: clean xcode-clean
-	git clean -dx --force -e submodules
+	git clean -dx --force --exclude local.xcconfig --exclude submodules

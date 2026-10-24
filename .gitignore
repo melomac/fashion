@@ -1,1 +1,13 @@
+# Xcode local configuration
 local.xcconfig
+
+# LLVM code coverage / profiling data
+*.profraw
+
+# Swift Package Manager
+Package.resolved
+.build
+.swiftpm
+
+# DesktopServices
+.DS_Store
