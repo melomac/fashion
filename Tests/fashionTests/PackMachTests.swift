@@ -4,17 +4,20 @@ import XCTest
 /**
  `--unpack`: a Mach-O UPX packed, given back as it was before packing, as `upx -d` gives it back, and where `upx -d`
  gives up, behind a signature added after packing. The packed fixtures are made at test time by the `upx` installed,
- with `--force-macos`, since UPX 4.2 no longer packs for macOS by default.
+ with `--force-macos`, since UPX 4.2 no longer packs for macOS by default, and signed after packing by the Developer ID
+ `local.xcconfig` names, or ad hoc without one.
  */
 final class PackMachTests: XCTestCase {
+    /// The package, three folders up from this file.
+    private static let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+
     /**
      The folder a test makes its files in, kept after it as the fuzzer keeps its own under `.build/fuzz`: the packed
      and unpacked files of the last run of each test stay in `.build/tests/PackMachTests/<name>` to look at, until the
      next run empties it.
      */
     private func directory(_ name: String) throws -> URL {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let url = root / ".build/tests/PackMachTests/\(name)"
+        let url = Self.root / ".build/tests/PackMachTests/\(name)"
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
@@ -40,6 +43,27 @@ final class PackMachTests: XCTestCase {
         try XCTSkipUnless(execute(self.upx(), ["-q", "--force-macos"] + options + ["-o", packed.path, file.path]), "upx cannot pack it")
         saveFixture(path: packed.path)
         return packed
+    }
+
+    /**
+     The signing identity `local.xcconfig` names, `CODE_SIGN_IDENTITY`, the Developer ID releases are signed with on
+     the user's Mac; "-", ad hoc, without the file or the line, so the tests sign everywhere.
+     */
+    private static let identity: String = {
+        let lines = (try? String(contentsOf: PackMachTests.root / "local.xcconfig", encoding: .utf8))?.split(separator: "\n") ?? []
+        let settings = lines.map { $0.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) } }
+        return settings.first { $0.count == 2 && $0[0] == "CODE_SIGN_IDENTITY" }?[1] ?? "-"
+    }()
+
+    /// `file` signed into `<file>_resigned` beside it, made anew: a sample signed after packing, by `identity`, without
+    /// the timestamp a Developer ID signature asks a server for.
+    private func resigned(_ file: URL) throws -> URL {
+        let resigned = URL(fileURLWithPath: file.path + "_resigned")
+        try? FileManager.default.removeItem(at: resigned)
+        try FileManager.default.copyItem(at: file, to: resigned)
+        _ = try codesign(["-s", Self.identity, "--timestamp=none", resigned.path])
+        saveFixture(path: resigned.path)
+        return resigned
     }
 
     /// The x86_64 and arm64e slices of `/bin/ls` without their signature, as thin --unsign writes them, by name.
@@ -93,8 +117,7 @@ final class PackMachTests: XCTestCase {
         // too with --unsign.
         let directory = try self.directory("signed")
         let (name, unsigned, data) = try XCTUnwrap(self.unsignedLs(in: directory).first)
-        let file = try self.packed(unsigned)
-        _ = try codesign(["-s", "-", file.path])
+        let file = try self.resigned(self.packed(unsigned))
         XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", file.path + "_upx-d", file.path]))
         XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [ByteHash.sha256.digest(data)])
 
@@ -105,10 +128,14 @@ final class PackMachTests: XCTestCase {
         let signed = Universal.sliceData(fileData: ls, arch: slice)
         let apple = directory / "ls_\(name)"
         try signed.write(to: apple)
-        let packed = try self.packed(apple)
-        _ = try codesign(["-f", "-s", "-", packed.path])
+        let packed = try self.resigned(self.packed(apple))
         XCTAssertEqual(try self.hashLines(packed.path, ["--unpack"]), try [ByteHash.sha256.digest(signed)])
         XCTAssertEqual(try self.hashLines(packed.path, ["--unpack", "--unsign"]), try [ByteHash.sha256.digest(data)])
+        // thin writes Apple's slice back, signature and all: codesign's strict validation is the second oracle.
+        let unpacked = URL(fileURLWithPath: packed.path + "_unpacked")
+        XCTAssertEqual(Thinner.lines(for: packed.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
+        XCTAssertEqual(try Data(contentsOf: unpacked), signed)
+        _ = try codesign(["--verify", "--strict", unpacked.path])
     }
 
     func testUnpackRestoresAUniversalFile() throws {
@@ -128,6 +155,15 @@ final class PackMachTests: XCTestCase {
         // The slice UPX packed is named for its unpacking; the other, as it was, keeps its name.
         XCTAssertEqual(try Data(contentsOf: directory / "universal_\(slices[0].name)_unpacked"), slices[0].data)
         XCTAssertEqual(try Data(contentsOf: directory / "universal_\(slices[1].name)"), slices[1].data)
+
+        // Signed after its slices were packed, which lays the universal file out again: --unpack sees past each
+        // slice's signature, and with --unsign gives the file lipo made of the originals; thin writes both slices, the
+        // packed one named for its unpacking alone, since the signature came off before the image was unpacked.
+        let resigned = try self.resigned(universal)
+        XCTAssertEqual(try self.hashLines(resigned.path, ["--unpack", "--unsign"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
+        XCTAssertEqual(Thinner.lines(for: resigned.path, exact: false, unsign: true, unpack: true, overwrite: false, reporter: Reporter(console: Console())).count, 2)
+        XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[0].name)_unpacked"), slices[0].data)
+        XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[1].name)_unsigned"), slices[1].data)
     }
 
     func testCorruptPackHeaderIsReported() throws {
@@ -186,11 +222,10 @@ final class PackMachTests: XCTestCase {
         let reporter = Reporter(console: Console())
         XCTAssertEqual(Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, overwrite: false, reporter: reporter).count, slices.count)
 
-        // ls_x86_64_unsigned packed into ls_x86_64_unsigned_packed, then unpacked into ls_x86_64_unsigned_packed_unpacked.
+        // ls_x86_64_unsigned packed into ls_x86_64_unsigned_packed, signed into ls_x86_64_unsigned_packed_resigned, then
+        // unpacked into ls_x86_64_unsigned_packed_resigned_unpacked.
         let packed = try slices.map { slice in
-            let file = try self.packed(directory / "ls_\(slice.name)_unsigned")
-            _ = try codesign(["-s", "-", file.path])
-            return file
+            try self.resigned(self.packed(directory / "ls_\(slice.name)_unsigned"))
         }
         for file in packed {
             XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_unpacked"])
