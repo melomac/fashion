@@ -2,5 +2,9 @@
 
 # `make format`
 brew "swiftformat"
+
 # `make fuzz`: libFuzzer's runtime, libclang_rt.fuzzer_osx.a, which Xcode's toolchain does not ship (see Fuzz/README.md)
 brew "llvm"
+
+# `make test`: PackMachTests pack their fixtures with UPX at test time (`--force-macos`), and skip without it
+brew "upx"

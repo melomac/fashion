@@ -171,6 +171,24 @@ func deflate(_ data: Data, level: Int32 = Z_DEFAULT_COMPRESSION) -> Data {
     return compressed.prefix(Int(length))
 }
 
+extension Data {
+    /// The bytes `hex` spells, two digits each; nil for anything else.
+    init?(hex: String) {
+        let digits = Array(hex.utf8)
+        guard digits.count.isMultiple(of: 2) else {
+            return nil
+        }
+        var bytes: [UInt8] = []
+        for index in stride(from: 0, to: digits.count, by: 2) {
+            guard let byte = UInt8(String(decoding: digits[index ..< index + 2], as: UTF8.self), radix: 16) else {
+                return nil
+            }
+            bytes.append(byte)
+        }
+        self.init(bytes)
+    }
+}
+
 /**
  Byte builders for synthetic Mach-O fixtures: native-endian for thin headers and load commands,
  big-endian for fat headers and embedded code signatures.

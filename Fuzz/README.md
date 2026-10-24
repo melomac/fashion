@@ -12,10 +12,12 @@ here feed libFuzzer's inputs through those parsers under AddressSanitizer, one e
 | `symhash`  | `SymHash.compute`: the symbol and string tables, the names windowed out of them, sorted and in table order |
 | `diff`     | `TLSHBridge.diff` and `SSDeepBridge.compare` on two strings, the digests `--match` is given               |
 | `bytehash` | ssdeep's, TLSH's and git's hashers over the bytes, streamed from a file and whole in memory              |
+| `unpack`   | `MachOEditor.edit`: UPX's pack header, UCL's and LZMA's decoders, the unfilters, signature removal, the universal rebuild |
 
 An input reaches a parser as a `File`, the way a test fixture does: written over one scratch file per process and
-opened from there (`support.swift`). `macho` and `cdhash` are built with both `--exact` endings (see Package.swift):
-`fuzz-macho` and `fuzz-cdhash` with `SECURITY_STRICT_VALIDATION`, `fuzz-macho-segments` and `fuzz-cdhash-segments` without.
+opened from there (`support.swift`). `macho`, `cdhash` and `unpack` are built with both `--exact` endings (see
+Package.swift): `fuzz-macho`, `fuzz-cdhash` and `fuzz-unpack` with `SECURITY_STRICT_VALIDATION`, the `-segments` ones
+without.
 
 ## Running
 

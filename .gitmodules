@@ -5,3 +5,11 @@
 [submodule "submodules/tlsh"]
 	path = submodules/tlsh
 	url = https://github.com/trendmicro/tlsh
+[submodule "submodules/ucl"]
+	path = submodules/ucl
+	url = https://github.com/upx/upx-vendor-ucl.git
+	branch = upx-vendor
+[submodule "submodules/lzma-sdk"]
+	path = submodules/lzma-sdk
+	url = https://github.com/upx/upx-vendor-lzma-sdk.git
+	branch = upx-vendor

@@ -12,6 +12,7 @@ private enum HashOptionError: Error, Equatable {
     case unsupportedSlicesCDHash
     case exactWithIncompatibleMode
     case unsignWithIncompatibleMode
+    case unpackWithXarToc
     case decompressWithoutXarToc
     case negativeScore
     case targetOfNoShape(String)
@@ -34,6 +35,8 @@ extension HashOptionError: LocalizedError {
             "--exact does not apply to --symhash or --xar-toc."
         case .unsignWithIncompatibleMode:
             "--unsign does not apply to --symhash or --xar-toc."
+        case .unpackWithXarToc:
+            "--unpack does not apply to --xar-toc."
         case .decompressWithoutXarToc:
             "--decompress requires --xar-toc."
         case .negativeScore:
@@ -104,6 +107,9 @@ struct Hasher: ParsableCommand {
     @Flag(help: "Hash Mach-O code without its signature, restored as it was before.")
     var unsign = false
 
+    @Flag(help: "Hash Mach-O code UPX packed as it was before packing.")
+    var unpack = false
+
     // MARK: - Grouped Options
 
     @OptionGroup(title: "Match mode")
@@ -170,6 +176,9 @@ struct Hasher: ParsableCommand {
         }
         if self.unsign, self.symbolOptions.symhash || self.xarOptions.xarToc {
             throw ValidationError(HashOptionError.unsignWithIncompatibleMode)
+        }
+        if self.unpack, self.xarOptions.xarToc {
+            throw ValidationError(HashOptionError.unpackWithXarToc)
         }
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
             throw ValidationError(HashOptionError.decompressWithoutXarToc)

@@ -7,9 +7,9 @@ The fashion binary is built from the tag matching its version (fashion --version
 
 fashion is licensed under the GNU General Public License version 3, see LICENSE.
 
-The fashion binary includes the third-party code listed below. The ssdeep and TLSH sources, with their license files,
-are in the repository's submodules/ at the commits the release tag pins; swift-argument-parser is the version
-Package.resolved pins.
+The fashion binary includes the third-party code listed below. The ssdeep, TLSH, UCL and LZMA SDK sources, with their
+license files, are in the repository's submodules/ at the commits the release tag pins; swift-argument-parser is the
+version Package.resolved pins.
 
 
 ssdeep
@@ -63,6 +63,34 @@ TLSH is provided for use under two licenses, Apache OR BSD, and fashion uses it 
     LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
     OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
     OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+UPX
+https://github.com/upx/upx
+
+Sources/fashion/PackMach.swift translates UPX's Mach-O unpacker (p_mach.cpp, packhead.cpp, the filters and the
+decompression wrappers of UPX 5.2.1), licensed under the GNU General Public License version 2 or (at your option) any
+later version, used here under version 3, see LICENSE:
+
+    Copyright (C) Markus Franz Xaver Johannes Oberhumer
+    Copyright (C) Laszlo Molnar
+    Copyright (C) John Reiser
+
+
+UCL
+https://github.com/upx/upx-vendor-ucl
+
+The NRV decompressors, licensed under the GNU General Public License version 2 or (at your option) any later version,
+used here under version 3, see LICENSE:
+
+    Copyright (C) 1996-2004 Markus Franz Xaver Johannes Oberhumer
+
+
+LZMA SDK
+https://github.com/upx/upx-vendor-lzma-sdk
+
+LzmaDecode.c and LzmaDecode.h, the LZMA SDK 4.40 decoder UPX uses, written and placed in the public domain by Igor
+Pavlov.
 
 
 swift-argument-parser

@@ -19,6 +19,13 @@ final class HasherTests: XCTestCase {
         XCTAssertNil(usageError(["x", "--unsign", "--algo", "cdhash"]))
     }
 
+    func testUnpackDoesNotApplyToXarToc() {
+        // A XAR archive is no Mach-O for UPX to have packed; the symbols of one it packed are those of its original.
+        XCTAssertEqual(usageError(["x", "--unpack", "--xar-toc"]), "--unpack does not apply to --xar-toc.")
+        XCTAssertNil(usageError(["x", "--unpack", "--symhash"]))
+        XCTAssertNil(usageError(["x", "--unpack", "--unsign", "--slices", "--exact"]))
+    }
+
     private let md5 = "5d41402abc4b2a76b9719d911017c592"
     private let sha1 = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
     private let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"

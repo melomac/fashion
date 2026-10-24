@@ -20,12 +20,12 @@ logs=$build/logs
 jobs=${FUZZ_JOBS:-2}
 
 # The harnesses: each is Fuzz/<name>.swift, with an LLVMFuzzerTestOneInput, and fuzzes corpus/<name>.
-harnesses="macho cdhash xar symhash diff bytehash"
+harnesses="macho cdhash xar symhash diff bytehash unpack"
 
 # The --exact endings a harness is built with (see Package.swift): both for those that read a Mach-O's logical end.
 endings() {
     case $1 in
-        macho | cdhash) echo "strict segments" ;;
+        macho | cdhash | unpack) echo "strict segments" ;;
         *) echo strict ;;
     esac
 }
@@ -47,7 +47,7 @@ binaries() {
 # The longest input a harness takes: a signed /bin/ls slice, a XAR, two digests.
 max_len() {
     case $1 in
-        macho | cdhash | symhash) echo 262144 ;;
+        macho | cdhash | symhash | unpack) echo 262144 ;;
         diff) echo 512 ;;
         *) echo 65536 ;;
     esac
@@ -103,10 +103,10 @@ build() {
         "${swift[@]}" -c -wmo -module-name ArgumentParser -I "$build/modules" -emit-module -emit-module-path "$build/modules/ArgumentParser.swiftmodule" "${files[@]}" -o "$build/objects/ArgumentParser.o"
     fi
 
-    # The C targets, with the module maps SwiftPM writes for them, instrumented too: ssdeep and TLSH read the bytes.
-    # The bridges to the submodules are in Bridges/, fashion's own C in Sources/.
+    # The C targets, with the module maps SwiftPM writes for them, instrumented too: ssdeep, TLSH and UPX's decoders
+    # read the bytes. The bridges to the submodules are in Bridges/, fashion's own C in Sources/.
     local name include header cflags=(-c -O1 -g -fsanitize=fuzzer-no-link,address -target "$(uname -m)-apple-macos13.0")
-    for name in Bridges/CSSDeep Bridges/CTLSH Sources/CMachOCompat; do
+    for name in Bridges/CSSDeep Bridges/CTLSH Bridges/CUCL Bridges/CLZMA Sources/CMachOCompat; do
         include=$root/$name/include
         name=$(basename "$name")
         mkdir -p "$build/modules/$name"
@@ -121,6 +121,12 @@ build() {
         name=$build/objects/$(basename "$file" .c).o
         if stale "$name" "$file" "$(dirname "$file")/include" "$root/submodules/ssdeep"; then
             xcrun clang "${cflags[@]}" -I "$(dirname "$file")/include" "$file" -o "$name"
+        fi
+    done
+    for file in "$root"/Bridges/CUCL/*.c "$root"/Bridges/CLZMA/*.c; do
+        name=$build/objects/$(basename "$file" .c).o
+        if stale "$name" "$file" "$root/submodules/ucl" "$root/submodules/lzma-sdk"; then
+            xcrun clang "${cflags[@]}" -I "$root/submodules/ucl/include" -I "$root/submodules/ucl" "$file" -o "$name"
         fi
     done
     for file in "$root"/Bridges/CTLSH/*.cpp; do
@@ -192,7 +198,7 @@ seed() {
     for file in "$build"/fixtures/*; do
         case $(od -An -tx1 -N4 "$file" | tr -d ' ') in
             cffaedfe | feedfacf | cefaedfe | feedface | cafebabe | cafebabf)
-                for harness in macho cdhash symhash; do
+                for harness in macho cdhash symhash unpack; do
                     cp "$file" "$corpus/$harness/"
                 done
                 ;;

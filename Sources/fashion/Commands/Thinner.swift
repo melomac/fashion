@@ -38,6 +38,9 @@ struct Thinner: ParsableCommand {
     @Flag(help: "Write Mach-O code without its signature, restored as it was before.")
     var unsign = false
 
+    @Flag(help: "Write Mach-O code UPX packed as it was before packing.")
+    var unpack = false
+
     @Flag(help: "Replace a different file found under an artifact's name; otherwise it is reported and left alone.")
     var overwrite = false
 
@@ -58,12 +61,13 @@ struct Thinner: ParsableCommand {
  to it are dropped, as hash mode's `--exact` drops them; a thin Mach-O followed by appended bytes then becomes an
  artifact too, where one that ends where its image ends has nothing to write.
 
- With `--unsign`, the file is read without its code signatures, as `MachOEditor` edits it in memory, after the
- `--exact` cut: a thin signed Mach-O becomes an artifact too. A signature that does not end its image, appended bytes
- after it say, is reported and nothing is written for the file: `--exact` cuts those bytes off first.
+ With `--unsign`, the file is read without its code signatures, and with `--unpack`, with what UPX packed unpacked, as
+ `MachOEditor` edits it in memory, after the `--exact` cut: a thin Mach-O they change becomes an artifact too. A
+ signature that does not end its image, appended bytes after it say, is reported and nothing is written for the file:
+ `--exact` cuts those bytes off first.
 
- An artifact these flags change is named for what they did, in the order they did it: `_exact`, then `_unsigned`,
- after the architecture of a universal file's slice, `ls_x86_64_unsigned`, or after the name of a thin
+ An artifact these flags change is named for what they did, in the order they did it: `_unpacked`, `_exact`, then
+ `_unsigned`, after the architecture of a universal file's slice, `ls_x86_64_unsigned`, or after the name of a thin
  file, which needs no architecture, `sample_unsigned`. It stands beside the plain one rather than in its way, one they
  leave as it is keeps its name, and a later run with other flags over an artifact names what it makes as one run with
  them all would: `ls_x86_64` unsigned is `ls_x86_64_unsigned` either way.
@@ -80,25 +84,25 @@ extension Thinner {
      or written. `trapSignals` as `Hasher.scan(trapSignals:)`.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public)\(self.unpack ? " unpack" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, unsign, overwrite) = (self.exact, self.unsign, self.overwrite)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { Self.lines(for: $0, exact: exact, unsign: unsign, overwrite: overwrite, reporter: $1) }
+        let (exact, unsign, unpack, overwrite) = (self.exact, self.unsign, self.unpack, self.overwrite)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { Self.lines(for: $0, exact: exact, unsign: unsign, unpack: unpack, overwrite: overwrite, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
     /**
      The lines to print for one file: the path of each artifact written or found in place, or a diagnostic for each
      that could not be written, or that a different file stands for without `overwrite`. A file that cannot be read,
-     whose Mach-O is malformed (red), or whose signature `unsign` cannot remove, is reported instead, and nothing is
-     written.
+     whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead, and
+     nothing is written.
      */
-    static func lines(for path: String, exact: Bool, unsign: Bool, overwrite: Bool, reporter: Reporter) -> [Line] {
+    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, overwrite: Bool, reporter: Reporter) -> [Line] {
         let file: File
         let artifacts: [(suffix: String, range: Range<Int>)]
         do {
             let opened = try File(path: path)
-            let edited = try unsign ? MachOEditor.removingSignatures(opened, exact: exact) : nil
+            let edited = try unsign || unpack ? MachOEditor.edit(opened, exact: exact, unsign: unsign, unpack: unpack) : nil
             file = edited?.file ?? opened
             artifacts = try Self.artifacts(of: file, exact: exact, edits: edited?.edits)
         } catch {
@@ -145,8 +149,8 @@ extension Thinner {
             if cut {
                 done.insert(.exact)
             }
-            // In the order the edits are made: cut, then without the signature.
-            let suffixes: [(MachOEditor.Edits, String)] = [(.exact, "_exact"), (.unsigned, "_unsigned")]
+            // In the order the edits are made: unpacked, then cut, then without the signature.
+            let suffixes: [(MachOEditor.Edits, String)] = [(.unpacked, "_unpacked"), (.exact, "_exact"), (.unsigned, "_unsigned")]
             return suffixes.filter { done.contains($0.0) }.map(\.1).joined()
         }
 

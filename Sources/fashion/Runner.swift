@@ -876,8 +876,9 @@ struct Digester {
     let score: Int
     let quiet: Bool
     let exact: Bool
-    /// Whether a Mach-O is hashed without its code signatures, as `MachOEditor` edits it.
+    /// Whether a Mach-O is hashed without its code signatures, and what UPX packed unpacked, as `MachOEditor` edits it.
     let unsign: Bool
+    let unpack: Bool
     /// Whether TLSH digests are compared without the file length they record.
     let xlen: Bool
 
@@ -889,6 +890,7 @@ struct Digester {
         self.quiet = command.quiet
         self.exact = command.exact
         self.unsign = command.unsign
+        self.unpack = command.unpack
         self.xlen = command.matchOptions.xlen
 
         // `--algo cdhash` is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
@@ -981,7 +983,7 @@ struct Digester {
      a crafted file reaches. Yellow for any other failure: the file could not be read, or changed while it was hashed.
      */
     static func tint(for error: Error) -> Tint {
-        error is ParserError || error is CDHashError || error is XARParser.XARError ? .malformed : .error
+        error is ParserError || error is CDHashError || error is XARParser.XARError || error is UnpackError ? .malformed : .error
     }
 
     // MARK: - Digests
@@ -991,9 +993,9 @@ struct Digester {
      */
     private func digests(_ path: String, reporter: Reporter, note: @escaping (Line) -> Void) throws -> [DigestResult] {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed, or the
-        // size of its edit without signatures, which every mode then reads as the file.
+        // size of its edit, unpacked or without signatures, which every mode then reads as the file.
         let opened = try File(path: path)
-        let file = try self.unsign ? MachOEditor.removingSignatures(opened, exact: self.exact)?.file ?? opened : opened
+        let file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack)?.file ?? opened : opened
         // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless
         // --quiet keeps the lines alone.
         let caveat = { (arch: String?, message: String) in

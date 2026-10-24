@@ -16,9 +16,10 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.0"),
     ],
     targets: [
-        // CSSDeep and CTLSH, in Bridges/ apart from fashion's own sources, compile the submodules' sources through
-        // one-line includes, so the headers SwiftPM needs are tracked there: it runs neither ssdeep's autotools nor
-        // TLSH's CMake. CTLSH also holds the C interface Swift calls TLSH's C++ through.
+        // CSSDeep, CTLSH, CUCL and CLZMA, in Bridges/ apart from fashion's own sources, compile the submodules' sources
+        // through one-line includes, so the headers SwiftPM needs are tracked there: it runs neither ssdeep's autotools
+        // nor TLSH's CMake. CTLSH also holds the C interface Swift calls TLSH's C++ through. CUCL and CLZMA are the
+        // decompressors UPX unpacks with, from its own vendor branches of UCL and of the LZMA SDK.
         .target(
             name: "CSSDeep",
             path: "Bridges/CSSDeep",
@@ -34,15 +35,29 @@ let package = Package(
             ],
         ),
         .target(
+            name: "CUCL",
+            path: "Bridges/CUCL",
+            cSettings: [
+                .headerSearchPath("../../submodules/ucl/include"),
+                .headerSearchPath("../../submodules/ucl"),
+            ],
+        ),
+        .target(
+            name: "CLZMA",
+            path: "Bridges/CLZMA",
+        ),
+        .target(
             name: "CMachOCompat",
         ),
         .executableTarget(
             name: "fashion",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "CLZMA",
                 "CMachOCompat",
                 "CSSDeep",
                 "CTLSH",
+                "CUCL",
             ],
             swiftSettings: strictValidation,
         ),

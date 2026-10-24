@@ -17,12 +17,13 @@ extension EditError: LocalizedError {
 }
 
 /**
- A Mach-O file without its code signatures, named after Security's `MachOEditor`, which `codesign --remove-signature`
- drives: the file is edited in memory (`File(editing:pieces:)`), as Security edits its copy before it writes it, so
- hash mode digests the edit and `thin` writes it out.
+ A Mach-O file as `--unsign` and `--unpack` edit it, named after Security's `MachOEditor`, which `codesign
+ --remove-signature` drives: the file is edited in memory (`File(editing:pieces:)`), as Security edits its copy before
+ it writes it, so hash mode digests the edit and `thin` writes it out.
 
  Where Security stops at what it can tell from the signed file, the file is restored as it was before it was signed,
- as far as it can be: the linker's `__LINKEDIT` vmsize, and the layout `lipo` gave a universal file.
+ as far as it can be: the linker's `__LINKEDIT` vmsize, and the layout `lipo` gave a universal file. An image UPX packed
+ is unpacked as `upx -d` unpacks it (`PackMach`), the one edit whose bytes all live in memory.
  */
 enum MachOEditor {
     /// What the edits did to an image, which `thin` names its artifact by.
@@ -31,21 +32,24 @@ enum MachOEditor {
 
         /// The `exact` cut took the bytes appended to it off.
         static let exact = Edits(rawValue: 1 << 0)
+        /// UPX packed it, and it was unpacked.
+        static let unpacked = Edits(rawValue: 1 << 1)
         /// It was signed, and its signature came out.
         static let unsigned = Edits(rawValue: 1 << 2)
     }
 
     /**
-     The file without the code signature of any image, and what came out of each image, in the order of a universal
-     file's architectures; nil when it has none. A thin image as `MachO.removingSignature(end:)` leaves it, or a
-     universal file with each architecture so, laid out again as `lipo` lays out the architectures it is given. With
-     `exact`, an image is cut where it ends before its signature comes out, so appended bytes do not keep it in. Throws
-     for a Mach-O that does not parse, or a signature that does not end its image.
+     The file as the edits leave it, and what they did to each image, in the order of a universal file's
+     architectures; nil when they change nothing. With `unpack`, each image UPX packed is unpacked, then with `unsign`,
+     each comes out without its code signature, as `MachO.removingSignature(end:)` leaves it; a universal file with its
+     architectures so is laid out again as `lipo` lays out the architectures it is given. With `exact`, an image is cut
+     where it ends before its signature comes out, so appended bytes do not keep it in. Throws for a Mach-O that does
+     not parse, a signature that does not end its image, or packed data that does not hold.
      */
-    static func removingSignatures(_ file: File, exact: Bool) throws -> (file: File, edits: [Edits])? {
+    static func edit(_ file: File, exact: Bool, unsign: Bool, unpack: Bool) throws -> (file: File, edits: [Edits])? {
         switch try Universal.open(file) {
         case let .thin(image):
-            return try self.unsigned(image, exact: exact).map { (File(editing: file, pieces: $0.pieces), [$0.edits]) }
+            return try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack).map { (File(editing: file, pieces: $0.pieces), [$0.edits]) }
         case let .fat(archs):
             let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, edits: Edits) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
@@ -53,10 +57,10 @@ enum MachOEditor {
                     // An archive, aligned by lipo for its members' symbols.
                     return (arch, whole, arch.cpuType & CPU_ARCH_ABI64 != 0 ? 3 : 2, [])
                 }
-                guard let unsigned = try self.unsigned(image, exact: exact) else {
+                guard let edit = try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack) else {
                     return (arch, whole, image.universalAlignment, [])
                 }
-                return (arch, unsigned.pieces, image.universalAlignment, unsigned.edits)
+                return (arch, edit.pieces, edit.align, edit.edits)
             }
             guard slices.contains(where: { !$0.edits.isEmpty }) else {
                 return nil
@@ -71,15 +75,61 @@ enum MachOEditor {
     // MARK: - Private
 
     /**
-     The pieces of `image` without its signature, after the `exact` cut: its header and load commands in memory, then
-     the rest of it, and what was done to it; nil when it is not signed.
+     The pieces of `image` of `file` as the edits leave it, the alignment `lipo` gives the image they make, and what they
+     did to it; nil when they change nothing. An unpacked image lives in memory, without its signature too with
+     `unsign`.
      */
-    private static func unsigned(_ image: MachO, exact: Bool) throws -> (pieces: [File.Piece], edits: Edits)? {
+    private static func edit(_ image: MachO, of file: File, exact: Bool, unsign: Bool, unpack: Bool) throws -> (pieces: [File.Piece], align: Int, edits: Edits)? {
+        if unpack, var data = try self.unpacked(image, of: file, exact: exact) {
+            // The unpacked image is parsed in a scope of its own, so that nothing holds its bytes, up to 768 MiB, when
+            // they are edited in place below.
+            let align: Int
+            let unsigned: (head: Data, end: Int, cut: Bool)?
+            do {
+                guard let unpacked = try MachO(File(editing: file, pieces: [.bytes(data)])) else {
+                    throw UnpackError.cantUnpack("file header corrupted")
+                }
+                align = unpacked.universalAlignment
+                let end = exact ? unpacked.logicalEnd() : unpacked.length
+                unsigned = try unsign ? unpacked.removingSignature(end: end).map { ($0.head, $0.end, end < unpacked.length) } : nil
+            }
+            var edits: Edits = .unpacked
+            if let unsigned {
+                data.replaceSubrange(0 ..< unsigned.head.count, with: unsigned.head)
+                data.removeSubrange(unsigned.end...)
+                edits.formUnion(unsigned.cut ? [.exact, .unsigned] : .unsigned)
+            }
+            return ([.bytes(data)], align, edits)
+        }
+        guard
+            unsign,
+            let pieces = try self.unsigned(image, exact: exact)
+        else {
+            return nil
+        }
+        return (pieces, image.universalAlignment, exact && image.logicalEnd() < image.length ? [.exact, .unsigned] : .unsigned)
+    }
+
+    /**
+     What UPX packed in `image` of `file`, unpacked; nil when UPX did not pack it. A signature added after packing hides
+     the 16-byte `__LINKEDIT` UPX leaves, so `upx -d` gives up on it: the image is looked at without it.
+     */
+    private static func unpacked(_ image: MachO, of file: File, exact: Bool) throws -> Data? {
+        // A signature that cannot come out, or leaves no image behind, is no sign of UPX: the image is looked at as it is.
+        let unsigned = (try? self.unsigned(image, exact: exact)) ?? nil
+        let packed = unsigned.flatMap { (try? MachO(File(editing: file, pieces: $0))) ?? nil } ?? image
+        return try PackMach(packed)?.unpack()
+    }
+
+    /**
+     The pieces of `image` without its signature, after the `exact` cut: its header and load commands in memory, then
+     the rest of it; nil when it is not signed.
+     */
+    private static func unsigned(_ image: MachO, exact: Bool) throws -> [File.Piece]? {
         guard let unsigned = try image.removingSignature(end: exact ? image.logicalEnd() : image.length) else {
             return nil
         }
-        let pieces: [File.Piece] = [.bytes(unsigned.head), .range(image.offset + unsigned.head.count ..< image.offset + unsigned.end)]
-        return (pieces, exact && image.logicalEnd() < image.length ? [.exact, .unsigned] : .unsigned)
+        return [.bytes(unsigned.head), .range(image.offset + unsigned.head.count ..< image.offset + unsigned.end)]
     }
 
     /**
