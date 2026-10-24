@@ -60,7 +60,7 @@ struct MachO {
     let cpuSubtype: cpu_subtype_t
 
     let filetype: UInt32
-    private let sizeofcmds: Int
+    let sizeofcmds: Int
     /// The most bytes one read takes for a header and its load commands (4 KiB), which hold both for most images.
     static let headSize = 4096
     let loadCommands: [LoadCommand]

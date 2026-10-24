@@ -11,6 +11,7 @@ private enum HashOptionError: Error, Equatable {
     case unsupportedXarCDHash
     case unsupportedSlicesCDHash
     case exactWithIncompatibleMode
+    case unsignWithIncompatibleMode
     case decompressWithoutXarToc
     case negativeScore
     case targetOfNoShape(String)
@@ -31,6 +32,8 @@ extension HashOptionError: LocalizedError {
             "--slices does not support the cdhash algorithm; use --algo cdhash on its own."
         case .exactWithIncompatibleMode:
             "--exact does not apply to --symhash or --xar-toc."
+        case .unsignWithIncompatibleMode:
+            "--unsign does not apply to --symhash or --xar-toc."
         case .decompressWithoutXarToc:
             "--decompress requires --xar-toc."
         case .negativeScore:
@@ -98,6 +101,9 @@ struct Hasher: ParsableCommand {
     @Flag(help: "Hash the exact Mach-O image, ignoring appended bytes.")
     var exact = false
 
+    @Flag(help: "Hash Mach-O code without its signature, restored as it was before.")
+    var unsign = false
+
     // MARK: - Grouped Options
 
     @OptionGroup(title: "Match mode")
@@ -161,6 +167,9 @@ struct Hasher: ParsableCommand {
         // Flags that are silently ignored outside the mode they belong to.
         if self.exact, self.symbolOptions.symhash || self.xarOptions.xarToc {
             throw ValidationError(HashOptionError.exactWithIncompatibleMode)
+        }
+        if self.unsign, self.symbolOptions.symhash || self.xarOptions.xarToc {
+            throw ValidationError(HashOptionError.unsignWithIncompatibleMode)
         }
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
             throw ValidationError(HashOptionError.decompressWithoutXarToc)

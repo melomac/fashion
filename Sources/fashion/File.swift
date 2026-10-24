@@ -29,10 +29,25 @@ extension FileError: LocalizedError {
  Nothing is mapped: a mapping faults on a bad block of a damaged disk image, which kills the process, and Foundation
  reads a whole file into memory rather than map it from such a volume. A read fails for that one file instead.
  Reads are uncached (`F_NOCACHE`), so scanning large trees does not pollute the unified buffer cache.
+
+ A file can also be an edit of another, made in memory (`init(editing:pieces:)`), which reads like the file it edits.
  */
 final class File {
     /// Streaming chunk size (1 MiB).
     static let chunkSize = 1 << 20
+
+    /// A part of an edited file: bytes in memory, or a range of the file it edits.
+    enum Piece {
+        case bytes(Data)
+        case range(Range<Int>)
+
+        var count: Int {
+            switch self {
+            case let .bytes(data): data.count
+            case let .range(range): range.count
+            }
+        }
+    }
 
     /// The size when the file was opened: every range read from it is checked against this size.
     let size: Int
@@ -40,6 +55,8 @@ final class File {
     private let fd: FileDescriptor
     /// The device and inode opened, which the path may no longer name by the time a read comes up short.
     private let identity: (dev_t, ino_t)
+    /// The file an edit reads from, and its bytes in order; nil for a file as it is on disk.
+    private let edit: (base: File, pieces: [Piece])?
 
     /**
      Open the regular file at `path`. The walk found one there, but the path may name something else by the time it is
@@ -66,10 +83,26 @@ final class File {
         self.fd = fd
         self.size = Int(info.st_size)
         self.identity = (info.st_dev, info.st_ino)
+        self.edit = nil
+    }
+
+    /**
+     The file `pieces` make, in order: an edit of `base`, built in memory like the copy Security's `MachOEditor` makes
+     before it writes one, where the bytes it keeps are read from `base` when they are asked for rather than copied.
+     */
+    init(editing base: File, pieces: [Piece]) {
+        self.path = base.path
+        self.fd = base.fd
+        self.size = pieces.reduce(0) { $0 + $1.count }
+        self.identity = base.identity
+        self.edit = (base, pieces)
     }
 
     deinit {
-        try? self.fd.close()
+        // An edit reads through the descriptor of the file it edits, which closes it.
+        if self.edit == nil {
+            try? self.fd.close()
+        }
     }
 
     /**
@@ -141,6 +174,9 @@ final class File {
      (it names another file now, or none), or the file itself changed size.
      */
     private func shortRead() -> FileError {
+        if let base = self.edit?.base {
+            return base.shortRead()
+        }
         var now = stat()
         guard stat(self.path, &now) == 0, (now.st_dev, now.st_ino) == self.identity else {
             return .replaced
@@ -153,11 +189,45 @@ final class File {
      read until the buffer is full or the file ends. Returns the count read.
      */
     private func read(at offset: Int, into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
+        if let (base, pieces) = self.edit {
+            return try Self.read(pieces, of: base, at: offset, into: buffer)
+        }
         var filled = 0
         while filled < buffer.count {
             let count = try self.fd.read(fromAbsoluteOffset: Int64(offset + filled), into: UnsafeMutableRawBufferPointer(rebasing: buffer[filled...]))
             if count == 0 {
                 break
+            }
+            filled += count
+        }
+        return filled
+    }
+
+    /**
+     Fill `buffer` from `offset` in the file `pieces` make, each from memory or from `base`, until the buffer is full,
+     the pieces end, or `base` comes up short. Returns the count read.
+     */
+    private static func read(_ pieces: [Piece], of base: File, at offset: Int, into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
+        var filled = 0
+        var start = 0
+        for piece in pieces where filled < buffer.count {
+            defer {
+                start += piece.count
+            }
+            let skip = offset + filled - start
+            guard skip < piece.count else {
+                continue
+            }
+            let count = min(piece.count - skip, buffer.count - filled)
+            let target = UnsafeMutableRawBufferPointer(rebasing: buffer[filled ..< filled + count])
+            switch piece {
+            case let .bytes(data):
+                data.copyBytes(to: target, from: data.startIndex + skip ..< data.startIndex + skip + count)
+            case let .range(range):
+                let read = try base.read(at: range.lowerBound + skip, into: target)
+                guard read == count else {
+                    return filled + read
+                }
             }
             filled += count
         }

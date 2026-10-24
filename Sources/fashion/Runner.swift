@@ -876,6 +876,8 @@ struct Digester {
     let score: Int
     let quiet: Bool
     let exact: Bool
+    /// Whether a Mach-O is hashed without its code signatures, as `MachOEditor` edits it.
+    let unsign: Bool
     /// Whether TLSH digests are compared without the file length they record.
     let xlen: Bool
 
@@ -886,6 +888,7 @@ struct Digester {
         self.score = command.resolvedScore
         self.quiet = command.quiet
         self.exact = command.exact
+        self.unsign = command.unsign
         self.xlen = command.matchOptions.xlen
 
         // `--algo cdhash` is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
@@ -987,8 +990,10 @@ struct Digester {
      The digests of one file in the selected mode; `note` hears each of its diagnostics as it comes.
      */
     private func digests(_ path: String, reporter: Reporter, note: @escaping (Line) -> Void) throws -> [DigestResult] {
-        // One descriptor for everything read from the file, whose size when it is opened is the size hashed.
-        let file = try File(path: path)
+        // One descriptor for everything read from the file, whose size when it is opened is the size hashed, or the
+        // size of its edit without signatures, which every mode then reads as the file.
+        let opened = try File(path: path)
+        let file = try self.unsign ? MachOEditor.removingSignatures(opened, exact: self.exact)?.file ?? opened : opened
         // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless
         // --quiet keeps the lines alone.
         let caveat = { (arch: String?, message: String) in

@@ -35,6 +35,9 @@ struct Thinner: ParsableCommand {
     @Flag(help: "Write the exact Mach-O image, dropping appended bytes.")
     var exact = false
 
+    @Flag(help: "Write Mach-O code without its signature, restored as it was before.")
+    var unsign = false
+
     @Flag(help: "Replace a different file found under an artifact's name; otherwise it is reported and left alone.")
     var overwrite = false
 
@@ -55,9 +58,15 @@ struct Thinner: ParsableCommand {
  to it are dropped, as hash mode's `--exact` drops them; a thin Mach-O followed by appended bytes then becomes an
  artifact too, where one that ends where its image ends has nothing to write.
 
- An artifact the cut changes is named for it, `_exact` after the architecture of a universal file's slice,
- `ls_x86_64_exact`, or after the name of a thin file, which needs no architecture, `sample_exact`. It stands beside the
- plain one rather than in its way, and one the cut leaves as it is keeps its name.
+ With `--unsign`, the file is read without its code signatures, as `MachOEditor` edits it in memory, after the
+ `--exact` cut: a thin signed Mach-O becomes an artifact too. A signature that does not end its image, appended bytes
+ after it say, is reported and nothing is written for the file: `--exact` cuts those bytes off first.
+
+ An artifact these flags change is named for what they did, in the order they did it: `_exact`, then `_unsigned`,
+ after the architecture of a universal file's slice, `ls_x86_64_unsigned`, or after the name of a thin
+ file, which needs no architecture, `sample_unsigned`. It stands beside the plain one rather than in its way, one they
+ leave as it is keeps its name, and a later run with other flags over an artifact names what it makes as one run with
+ them all would: `ls_x86_64` unsigned is `ls_x86_64_unsigned` either way.
 
  An artifact already in place, byte for byte, is left as it is and noted in the unified log alone, so a second run over
  a tree is as quiet on the terminal as the first was. A different file under an artifact's name is left alone and
@@ -71,24 +80,27 @@ extension Thinner {
      or written. `trapSignals` as `Hasher.scan(trapSignals:)`.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, overwrite) = (self.exact, self.overwrite)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { Self.lines(for: $0, exact: exact, overwrite: overwrite, reporter: $1) }
+        let (exact, unsign, overwrite) = (self.exact, self.unsign, self.overwrite)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { Self.lines(for: $0, exact: exact, unsign: unsign, overwrite: overwrite, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
     /**
      The lines to print for one file: the path of each artifact written or found in place, or a diagnostic for each
      that could not be written, or that a different file stands for without `overwrite`. A file that cannot be read,
-     or whose Mach-O is malformed (red), is reported instead, and nothing is written.
+     whose Mach-O is malformed (red), or whose signature `unsign` cannot remove, is reported instead, and nothing is
+     written.
      */
-    static func lines(for path: String, exact: Bool, overwrite: Bool, reporter: Reporter) -> [Line] {
+    static func lines(for path: String, exact: Bool, unsign: Bool, overwrite: Bool, reporter: Reporter) -> [Line] {
         let file: File
         let artifacts: [(suffix: String, range: Range<Int>)]
         do {
-            file = try File(path: path)
-            artifacts = try Self.artifacts(of: file, exact: exact)
+            let opened = try File(path: path)
+            let edited = try unsign ? MachOEditor.removingSignatures(opened, exact: exact) : nil
+            file = edited?.file ?? opened
+            artifacts = try Self.artifacts(of: file, exact: exact, edits: edited?.edits)
         } catch {
             return [reporter.report(path: path, message: File.message(for: error), tint: Digester.tint(for: error))]
         }
@@ -122,27 +134,39 @@ extension Thinner {
 
     /**
      The artifacts a file yields, each with the suffix its name takes after the file's: a universal file's slice its
-     architecture, then `_exact` when the `exact` cut takes appended bytes off. Every slice of a universal file, as the
-     fat table places it or cut, a slice that is not Mach-O staying whole; a thin image when it was cut. Throws for a
+     architecture, then for any artifact what was done to it, `edits`, the edits of a file `MachOEditor` made, and the
+     `exact` cut, which takes the bytes appended to an image off. Every slice of a universal file, as the fat table
+     places it or cut, a slice that is not Mach-O staying whole; a thin image when it was edited or cut. Throws for a
      Mach-O that does not parse.
      */
-    private static func artifacts(of file: File, exact: Bool) throws -> [(suffix: String, range: Range<Int>)] {
+    private static func artifacts(of file: File, exact: Bool, edits: [MachOEditor.Edits]?) throws -> [(suffix: String, range: Range<Int>)] {
+        func suffix(_ index: Int, cut: Bool) -> String {
+            var done = edits.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? []
+            if cut {
+                done.insert(.exact)
+            }
+            // In the order the edits are made: cut, then without the signature.
+            let suffixes: [(MachOEditor.Edits, String)] = [(.exact, "_exact"), (.unsigned, "_unsigned")]
+            return suffixes.filter { done.contains($0.0) }.map(\.1).joined()
+        }
+
         switch try Universal.open(file) {
         case let .fat(archs):
-            return try archs.map { arch in
+            return try archs.enumerated().map { index, arch in
                 var length = arch.length
                 if exact, let image = try MachO(file, offset: arch.offset, length: arch.length) {
                     length = image.logicalEnd()
                 }
-                return ("_\(arch.name)" + (length < arch.length ? "_exact" : ""), arch.offset ..< arch.offset + length)
+                return ("_\(arch.name)" + suffix(index, cut: length < arch.length), arch.offset ..< arch.offset + length)
             }
         case let .thin(image):
             // A thin file's artifact is named by what was done to it alone: one nothing was done to would be the file.
-            let end = image.logicalEnd()
-            guard exact, end < image.length else {
+            let end = exact ? image.logicalEnd() : image.length
+            let name = suffix(0, cut: end < image.length)
+            guard !name.isEmpty else {
                 return []
             }
-            return [("_exact", 0 ..< end)]
+            return [(name, 0 ..< end)]
         case .notMachO:
             return []
         }

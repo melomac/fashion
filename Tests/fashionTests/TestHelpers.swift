@@ -206,6 +206,97 @@ extension Data {
 }
 
 /**
+ The smallest big-endian executable codesign signs (ppc, or ppc64 when `is64`): `__TEXT` at file offset
+ `textOffset`, a `__DATA` segment filling any gap before it, a final `__LINKEDIT` of `linkeditSize` bytes that ends the
+ file, and `LC_VERSION_MIN_MACOSX` 10.4 so codesign records the execSeg fields. Given `infoPlist`, `__TEXT` holds it in
+ an `__info_plist` section.
+ */
+func makeBigEndianMachO(is64: Bool, textOffset: UInt32 = 0, linkeditSize: UInt32 = 8, infoPlist: Data? = nil) -> Data {
+    let page: UInt32 = 0x1000
+    func name(_ name: String) -> Data { // a NUL-padded segname / sectname
+        Data(name.utf8) + Data(count: 16 - name.utf8.count)
+    }
+    func field(_ value: UInt32) -> Data { // an address or size, 64-bit in a 64-bit image
+        var field = Data()
+        is64 ? field.appendUInt64BE(UInt64(value)) : field.appendUInt32BE(value)
+        return field
+    }
+    func segment(_ segname: String, offset: UInt32, size: UInt32, maxprot: Int32, initprot: Int32, sections: [Data] = []) -> Data {
+        var command = Data()
+        command.appendUInt32BE(UInt32(is64 ? LC_SEGMENT_64 : LC_SEGMENT))
+        command.appendUInt32BE(UInt32((is64 ? 72 : 56) + sections.reduce(0) { $0 + $1.count })) // cmdsize
+        command.append(name(segname))
+        [offset, (size + page - 1) / page * page, offset, size].forEach { command.append(field($0)) } // vmaddr, vmsize, fileoff, filesize
+        command.appendInt32BE(maxprot)
+        command.appendInt32BE(initprot)
+        command.appendUInt32BE(UInt32(sections.count)) // nsects
+        command.appendUInt32BE(0) // flags
+        sections.forEach { command.append($0) }
+        return command
+    }
+
+    let plistOffset = textOffset + page / 2
+    var sections: [Data] = []
+    if let infoPlist {
+        var section = name("__info_plist") + name("__TEXT") + field(plistOffset) + field(UInt32(infoPlist.count)) // sectname, segname, addr, size
+        [plistOffset, 0, 0, 0, 0, 0, 0].forEach { section.appendUInt32BE($0) } // offset, align, reloff, nreloc, flags, reserved1, reserved2
+        if is64 {
+            section.appendUInt32BE(0) // reserved3
+        }
+        sections.append(section)
+    }
+
+    var commands: [Data] = textOffset > 0 ? [segment("__DATA", offset: 0, size: textOffset, maxprot: 3, initprot: 3)] : []
+    commands.append(segment("__TEXT", offset: textOffset, size: page, maxprot: 7, initprot: 5, sections: sections))
+    commands.append(segment("__LINKEDIT", offset: textOffset + page, size: linkeditSize, maxprot: 7, initprot: 1))
+    var versionMin = Data()
+    [UInt32(LC_VERSION_MIN_MACOSX), 16, 0x000a_0400, 0x000a_0400].forEach { versionMin.appendUInt32BE($0) } // 10.4, SDK 10.4
+    commands.append(versionMin)
+
+    var data = Data()
+    data.appendUInt32BE(is64 ? MH_MAGIC_64 : MH_MAGIC)
+    data.appendInt32BE(is64 ? CPU_TYPE_POWERPC64 : CPU_TYPE_POWERPC)
+    data.appendInt32BE(CPU_SUBTYPE_POWERPC_ALL)
+    data.appendUInt32BE(UInt32(MH_EXECUTE))
+    data.appendUInt32BE(UInt32(commands.count)) // ncmds
+    data.appendUInt32BE(UInt32(commands.reduce(0) { $0 + $1.count })) // sizeofcmds
+    data.appendUInt32BE(0) // flags
+    if is64 {
+        data.appendUInt32BE(0) // reserved
+    }
+    commands.forEach { data.append($0) }
+    data.append(Data((data.count ..< Int(textOffset + page)).map { UInt8(truncatingIfNeeded: $0 * 7) })) // segment content
+    if let infoPlist {
+        data.replaceSubrange(Int(plistOffset) ..< Int(plistOffset) + infoPlist.count, with: infoPlist)
+    }
+    data.append(Data(count: Int(linkeditSize)))
+    return data
+}
+
+/// `int main` built by `clang arguments` against the `sdk` SDK into `dir/name`, unsigned; skips the test when it cannot be built.
+func compile(_ name: String, in dir: URL, sdk: String = "macosx", _ arguments: [String]) throws -> URL {
+    let source = dir / "main.c"
+    try "int main(void) { return 0; }\n".write(to: source, atomically: true, encoding: .utf8)
+    let output = dir / name
+    let built = try execute("/usr/bin/xcrun", ["-sdk", sdk, "clang"] + arguments + ["-Wl,-no_adhoc_codesign", source.path(), "-o", output.path()])
+    try XCTSkipUnless(built, "cannot build \(name) with the \(sdk) SDK")
+    return output
+}
+
+/// Run `executable` with its output discarded; true when it exits zero.
+func execute(_ executable: String, _ arguments: [String]) throws -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+
+    try process.run()
+    process.waitUntilExit()
+    return process.terminationStatus == 0
+}
+
+/**
  The `fashion` executable built next to the test bundle; skips the calling test when it is missing.
  */
 func fashionExecutable() throws -> URL {

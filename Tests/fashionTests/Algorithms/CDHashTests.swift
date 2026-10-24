@@ -240,11 +240,11 @@ final class CDHashTests: XCTestCase {
         // arm64_32 (watchOS) has its own CPU type and macOS ships no such binary, so build one with the watchOS SDK.
         // It follows arm64's page-size rule, so a watchOS 8 rewrite gets 4 KiB pages.
         let dir = try self.temporaryDirectory()
-        let universal = try self.compile("universal", in: dir, sdk: "watchos", ["-arch", "arm64_32", "-arch", "arm64"])
+        let universal = try compile("universal", in: dir, sdk: "watchos", ["-arch", "arm64_32", "-arch", "arm64"])
         XCTAssertEqual(try Set(CDHash.hash(path: universal.path()).compactMap(\.arch)), ["arm64_32", "arm64"])
         try self.assertAdhocMatchesCodesignDetached(universal)
 
-        let thin = try Data(contentsOf: self.compile("thin", in: dir, sdk: "watchos", ["-arch", "arm64_32"]))
+        let thin = try Data(contentsOf: compile("thin", in: dir, sdk: "watchos", ["-arch", "arm64_32"]))
         let watchOS8 = dir / "watchos8"
         try Self.settingBuildVersion(thin, platform: PLATFORM_WATCHOS, minOS: 0x0008_0000).write(to: watchOS8)
         XCTAssertEqual(try Self.field(self.assertAdhocMatchesCodesignDetached(watchOS8), prefix: "Page size="), "4096")
@@ -255,7 +255,7 @@ final class CDHashTests: XCTestCase {
         // non-empty `__TEXT` segment (renamed `__TEXX`, or its filesize zeroed), codesign writes the v0x20100
         // CodeDirectory, which has no execSeg fields.
         let dir = try self.temporaryDirectory()
-        let intel = try Data(contentsOf: self.compile("intel", in: dir, ["-arch", "x86_64"]))
+        let intel = try Data(contentsOf: compile("intel", in: dir, ["-arch", "x86_64"]))
         let text = try XCTUnwrap(MachO.loadCommands(data: intel).first { $0.cmd == UInt32(LC_SEGMENT_64) && $0.data.dropFirst(8).prefix(6) == Data("__TEXT".utf8) }).data.startIndex
         var noText = intel
         noText.replaceSubrange(text + 8 ..< text + 14, with: Data("__TEXX".utf8)) // segname
@@ -279,7 +279,7 @@ final class CDHashTests: XCTestCase {
     func testAdhocSkipsGenericObject() throws {
         // codesign signs a relocatable object as a generic file (`Format=generic`), not as Mach-O code, so an
         // unsigned `.o` has no ad-hoc cdhash: CDHash must report nothing rather than a hash matching nothing.
-        let object = try self.compile("object.o", in: self.temporaryDirectory(), ["-c"])
+        let object = try compile("object.o", in: self.temporaryDirectory(), ["-c"])
         XCTAssertEqual(try Self.field(Self.codesignDetached(object), prefix: "Format="), "generic")
         XCTAssertTrue(try CDHash.hash(path: object.path()).isEmpty)
     }
@@ -289,14 +289,14 @@ final class CDHashTests: XCTestCase {
         // file, yet each slice is ordinary code once extracted, so its cdhashes are those codesign gives `lipo -thin`'s.
         let dir = try self.temporaryDirectory()
         let fat = dir / "fat64"
-        let slices = try [self.compile("intel", in: dir, ["-arch", "x86_64"]), self.compile("arm", in: dir, ["-arch", "arm64"])]
-        let merged = try Self.run("/usr/bin/xcrun", ["lipo", "-create", "-fat64"] + slices.map { $0.path() } + ["-output", fat.path()])
+        let slices = try [compile("intel", in: dir, ["-arch", "x86_64"]), compile("arm", in: dir, ["-arch", "arm64"])]
+        let merged = try execute("/usr/bin/xcrun", ["lipo", "-create", "-fat64"] + slices.map { $0.path() } + ["-output", fat.path()])
         try XCTSkipUnless(merged, "cannot build a 64-bit universal file with lipo")
 
         let results = try CDHash.hash(path: fat.path())
         for arch in ["x86_64", "arm64"] {
             let thin = dir / "thin-\(arch)"
-            let extracted = try Self.run("/usr/bin/xcrun", ["lipo", fat.path(), "-thin", arch, "-output", thin.path()])
+            let extracted = try execute("/usr/bin/xcrun", ["lipo", fat.path(), "-thin", arch, "-output", thin.path()])
             try XCTSkipUnless(extracted, "cannot extract \(arch) with lipo")
 
             try self.assertAdhocMatchesCodesignDetached(thin)
@@ -309,7 +309,7 @@ final class CDHashTests: XCTestCase {
         // codesign signs the arm64 family with 4 KiB pages on tvOS, iOS before 16 and watchOS before 9, and with
         // 16 KiB pages elsewhere: rewrite a built binary's LC_BUILD_VERSION to land on each side of each rule.
         let dir = try self.temporaryDirectory()
-        let arm = try Data(contentsOf: self.compile("arm", in: dir, ["-arch", "arm64"]))
+        let arm = try Data(contentsOf: compile("arm", in: dir, ["-arch", "arm64"]))
         let variants: [(name: String, platform: Int32, minOS: UInt32, pageSize: String)] = [
             ("ios15", PLATFORM_IOS, 0x000f_ffff, "4096"), // 15.255.255
             ("ios16", PLATFORM_IOS, 0x0010_0000, "16384"),
@@ -333,9 +333,9 @@ final class CDHashTests: XCTestCase {
         let reversed32 = UInt64(UInt32(0x1000).byteSwapped) // 0x100000
         let reversed64 = UInt64(0x1000).byteSwapped // 0x10_0000_0000_0000
         let cases: [(name: String, data: Data, base: UInt64, limit: UInt64)] = [
-            ("ppc", Self.makeBigEndianMachO(is64: false), 0, reversed32),
-            ("ppc-text-at-0x1000", Self.makeBigEndianMachO(is64: false, textOffset: 0x1000), reversed32, reversed32),
-            ("ppc64", Self.makeBigEndianMachO(is64: true), 0, reversed64),
+            ("ppc", makeBigEndianMachO(is64: false), 0, reversed32),
+            ("ppc-text-at-0x1000", makeBigEndianMachO(is64: false, textOffset: 0x1000), reversed32, reversed32),
+            ("ppc64", makeBigEndianMachO(is64: true), 0, reversed64),
         ]
 
         for (name, data, base, limit) in cases {
@@ -371,11 +371,11 @@ final class CDHashTests: XCTestCase {
             ("data-segment", ["-arch", "arm64", sectcreate("__DATA", "plist")]),
         ]
         for (name, arguments) in variants {
-            try self.assertAdhocMatchesCodesignDetached(self.compile(name, in: dir, arguments))
+            try self.assertAdhocMatchesCodesignDetached(compile(name, in: dir, arguments))
         }
 
         let ppc = dir / "ppc"
-        try Self.makeBigEndianMachO(is64: false, infoPlist: plist).write(to: ppc)
+        try makeBigEndianMachO(is64: false, infoPlist: plist).write(to: ppc)
         try self.assertAdhocMatchesCodesignDetached(ppc)
     }
 
@@ -419,7 +419,7 @@ final class CDHashTests: XCTestCase {
         // Security's MachO ends the image at __LINKEDIT, and codesign's strict validation rejects any byte past it:
         // the bytes appended to a built binary are exactly the ones logicalEnd trims.
         let dir = try self.temporaryDirectory()
-        let original = try self.compile("original", in: dir, ["-arch", "arm64"])
+        let original = try compile("original", in: dir, ["-arch", "arm64"])
         var padded = try Data(contentsOf: original)
         let end = padded.count
         padded.append(Data(repeating: 0x41, count: 777))
@@ -445,16 +445,6 @@ final class CDHashTests: XCTestCase {
         return dir
     }
 
-    /// `int main` built by `clang arguments` against the `sdk` SDK into `dir/name`, unsigned; skips the test when it cannot be built.
-    private func compile(_ name: String, in dir: URL, sdk: String = "macosx", _ arguments: [String]) throws -> URL {
-        let source = dir / "main.c"
-        try "int main(void) { return 0; }\n".write(to: source, atomically: true, encoding: .utf8)
-        let output = dir / name
-        let built = try Self.run("/usr/bin/xcrun", ["-sdk", sdk, "clang"] + arguments + ["-Wl,-no_adhoc_codesign", source.path(), "-o", output.path()])
-        try XCTSkipUnless(built, "cannot build \(name) with the \(sdk) SDK")
-        return output
-    }
-
     /**
      An arm64 `int main` built with a `__TEXT,__info_plist` section, that section then declared `declaredSize` bytes
      long: the bytes, and the section's offset in them.
@@ -462,7 +452,7 @@ final class CDHashTests: XCTestCase {
     private func compileWithInfoPlist(in dir: URL, declaredSize: UInt64) throws -> (data: Data, offset: Int) {
         let input = dir / "plist"
         try Data("<plist/>".utf8).write(to: input)
-        var data = try Data(contentsOf: self.compile("built", in: dir, ["-arch", "arm64", "-Wl,-sectcreate,__TEXT,__info_plist,\(input.path())"]))
+        var data = try Data(contentsOf: compile("built", in: dir, ["-arch", "arm64", "-Wl,-sectcreate,__TEXT,__info_plist,\(input.path())"]))
 
         let text = try XCTUnwrap(MachO.loadCommands(data: data).first { $0.isSegment(named: "__TEXT") })
         let sections = text.data.startIndex + MemoryLayout<segment_command_64>.size
@@ -484,75 +474,6 @@ final class CDHashTests: XCTestCase {
         fields.appendUInt32(minOS)
         var data = data
         data.replaceSubrange(command.data.startIndex + 8 ..< command.data.startIndex + 16, with: fields)
-        return data
-    }
-
-    /**
-     The smallest big-endian executable codesign signs (ppc, or ppc64 when `is64`): `__TEXT` at file offset
-     `textOffset`, a `__DATA` segment filling any gap before it, a final `__LINKEDIT` that ends the file, and
-     `LC_VERSION_MIN_MACOSX` 10.4 so codesign records the execSeg fields. Given `infoPlist`, `__TEXT` holds it in an
-     `__info_plist` section.
-     */
-    private static func makeBigEndianMachO(is64: Bool, textOffset: UInt32 = 0, infoPlist: Data? = nil) -> Data {
-        let page: UInt32 = 0x1000
-        let linkeditSize: UInt32 = 8
-        func name(_ name: String) -> Data { // a NUL-padded segname / sectname
-            Data(name.utf8) + Data(count: 16 - name.utf8.count)
-        }
-        func field(_ value: UInt32) -> Data { // an address or size, 64-bit in a 64-bit image
-            var field = Data()
-            is64 ? field.appendUInt64BE(UInt64(value)) : field.appendUInt32BE(value)
-            return field
-        }
-        func segment(_ segname: String, offset: UInt32, size: UInt32, maxprot: Int32, initprot: Int32, sections: [Data] = []) -> Data {
-            var command = Data()
-            command.appendUInt32BE(UInt32(is64 ? LC_SEGMENT_64 : LC_SEGMENT))
-            command.appendUInt32BE(UInt32((is64 ? 72 : 56) + sections.reduce(0) { $0 + $1.count })) // cmdsize
-            command.append(name(segname))
-            [offset, (size + page - 1) / page * page, offset, size].forEach { command.append(field($0)) } // vmaddr, vmsize, fileoff, filesize
-            command.appendInt32BE(maxprot)
-            command.appendInt32BE(initprot)
-            command.appendUInt32BE(UInt32(sections.count)) // nsects
-            command.appendUInt32BE(0) // flags
-            sections.forEach { command.append($0) }
-            return command
-        }
-
-        let plistOffset = textOffset + page / 2
-        var sections: [Data] = []
-        if let infoPlist {
-            var section = name("__info_plist") + name("__TEXT") + field(plistOffset) + field(UInt32(infoPlist.count)) // sectname, segname, addr, size
-            [plistOffset, 0, 0, 0, 0, 0, 0].forEach { section.appendUInt32BE($0) } // offset, align, reloff, nreloc, flags, reserved1, reserved2
-            if is64 {
-                section.appendUInt32BE(0) // reserved3
-            }
-            sections.append(section)
-        }
-
-        var commands: [Data] = textOffset > 0 ? [segment("__DATA", offset: 0, size: textOffset, maxprot: 3, initprot: 3)] : []
-        commands.append(segment("__TEXT", offset: textOffset, size: page, maxprot: 7, initprot: 5, sections: sections))
-        commands.append(segment("__LINKEDIT", offset: textOffset + page, size: linkeditSize, maxprot: 7, initprot: 1))
-        var versionMin = Data()
-        [UInt32(LC_VERSION_MIN_MACOSX), 16, 0x000a_0400, 0x000a_0400].forEach { versionMin.appendUInt32BE($0) } // 10.4, SDK 10.4
-        commands.append(versionMin)
-
-        var data = Data()
-        data.appendUInt32BE(is64 ? MH_MAGIC_64 : MH_MAGIC)
-        data.appendInt32BE(is64 ? CPU_TYPE_POWERPC64 : CPU_TYPE_POWERPC)
-        data.appendInt32BE(CPU_SUBTYPE_POWERPC_ALL)
-        data.appendUInt32BE(UInt32(MH_EXECUTE))
-        data.appendUInt32BE(UInt32(commands.count)) // ncmds
-        data.appendUInt32BE(UInt32(commands.reduce(0) { $0 + $1.count })) // sizeofcmds
-        data.appendUInt32BE(0) // flags
-        if is64 {
-            data.appendUInt32BE(0) // reserved
-        }
-        commands.forEach { data.append($0) }
-        data.append(Data((data.count ..< Int(textOffset + page)).map { UInt8(truncatingIfNeeded: $0 * 7) })) // segment content
-        if let infoPlist {
-            data.replaceSubrange(Int(plistOffset) ..< Int(plistOffset) + infoPlist.count, with: infoPlist)
-        }
-        data.append(Data(count: Int(linkeditSize)))
         return data
     }
 
@@ -587,19 +508,6 @@ final class CDHashTests: XCTestCase {
             }
         }
         return out
-    }
-
-    /// Run `executable` with its output discarded; true when it exits zero.
-    private static func run(_ executable: String, _ arguments: [String]) throws -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
     }
 
     /**
