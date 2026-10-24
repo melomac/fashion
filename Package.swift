@@ -16,14 +16,16 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.0"),
     ],
     targets: [
-        // CSSDeep and CTLSH compile the submodules' sources through one-line includes, so the headers SwiftPM needs
-        // are tracked here: it runs neither ssdeep's autotools nor TLSH's CMake. CTLSH also holds the C interface Swift
-        // calls TLSH's C++ through.
+        // CSSDeep and CTLSH, in Bridges/ apart from fashion's own sources, compile the submodules' sources through
+        // one-line includes, so the headers SwiftPM needs are tracked there: it runs neither ssdeep's autotools nor
+        // TLSH's CMake. CTLSH also holds the C interface Swift calls TLSH's C++ through.
         .target(
             name: "CSSDeep",
+            path: "Bridges/CSSDeep",
         ),
         .target(
             name: "CTLSH",
+            path: "Bridges/CTLSH",
             cxxSettings: [
                 .headerSearchPath("../../submodules/tlsh/include"),
                 // TLSH's layout depends on these defines, and its digests on the layout (see tlsh_version.h).

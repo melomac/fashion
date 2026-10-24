@@ -3,7 +3,7 @@
 # fashion's fuzzing harness (see README.md): libFuzzer entry points over the parsers, built with -sanitize=fuzzer,address
 # outside SwiftPM, which lets no executable depend on the fashion target.
 #
-#   Fuzz/fuzz.sh build            build .build/fuzz/bin/fuzz-* from Sources/ and the harnesses here
+#   Fuzz/fuzz.sh build            build .build/fuzz/bin/fuzz-* from Sources/, Bridges/ and the harnesses here
 #   Fuzz/fuzz.sh seed             seed .build/fuzz/corpus/* from the test fixtures, /bin/ls and a XAR
 #   Fuzz/fuzz.sh run [seconds]    run every harness for that long (900 by default), FUZZ_JOBS workers each (2)
 #   Fuzz/fuzz.sh summary          what the last run did: runs, executions per second, coverage, artifacts
@@ -104,26 +104,29 @@ build() {
     fi
 
     # The C targets, with the module maps SwiftPM writes for them, instrumented too: ssdeep and TLSH read the bytes.
-    local name header cflags=(-c -O1 -g -fsanitize=fuzzer-no-link,address -target "$(uname -m)-apple-macos13.0")
-    for name in CSSDeep CTLSH CMachOCompat; do
+    # The bridges to the submodules are in Bridges/, fashion's own C in Sources/.
+    local name include header cflags=(-c -O1 -g -fsanitize=fuzzer-no-link,address -target "$(uname -m)-apple-macos13.0")
+    for name in Bridges/CSSDeep Bridges/CTLSH Sources/CMachOCompat; do
+        include=$root/$name/include
+        name=$(basename "$name")
         mkdir -p "$build/modules/$name"
-        header=$root/Sources/$name/include/$name.h
+        header=$include/$name.h
         if [ -f "$header" ]; then
             printf 'module %s {\n    umbrella header "%s"\n    export *\n}\n' "$name" "$header" > "$build/modules/$name/module.modulemap"
         else
-            printf 'module %s {\n    umbrella "%s"\n    export *\n}\n' "$name" "$root/Sources/$name/include" > "$build/modules/$name/module.modulemap"
+            printf 'module %s {\n    umbrella "%s"\n    export *\n}\n' "$name" "$include" > "$build/modules/$name/module.modulemap"
         fi
     done
-    for file in "$root"/Sources/CSSDeep/*.c "$root"/Sources/CMachOCompat/*.c; do
+    for file in "$root"/Bridges/CSSDeep/*.c "$root"/Sources/CMachOCompat/*.c; do
         name=$build/objects/$(basename "$file" .c).o
         if stale "$name" "$file" "$(dirname "$file")/include" "$root/submodules/ssdeep"; then
             xcrun clang "${cflags[@]}" -I "$(dirname "$file")/include" "$file" -o "$name"
         fi
     done
-    for file in "$root"/Sources/CTLSH/*.cpp; do
+    for file in "$root"/Bridges/CTLSH/*.cpp; do
         name=$build/objects/$(basename "$file" .cpp).o
-        if stale "$name" "$file" "$root/Sources/CTLSH/include" "$root/submodules/tlsh"; then
-            xcrun clang++ "${cflags[@]}" -DBUCKETS_128 -DCHECKSUM_1B -I "$root/Sources/CTLSH/include" -I "$root/submodules/tlsh/include" "$file" -o "$name"
+        if stale "$name" "$file" "$root/Bridges/CTLSH/include" "$root/submodules/tlsh"; then
+            xcrun clang++ "${cflags[@]}" -DBUCKETS_128 -DCHECKSUM_1B -I "$root/Bridges/CTLSH/include" -I "$root/submodules/tlsh/include" "$file" -o "$name"
         fi
     done
 
@@ -141,7 +144,7 @@ build() {
             "${swift[@]}" "${sanitize[@]}" ${define[@]+"${define[@]}"} -c -wmo -enable-testing -module-name fashion \
                 -Xfrontend -entry-point-function-name -Xfrontend fashion_main "${includes[@]}" \
                 -emit-module -emit-module-path "$out/fashion.swiftmodule" \
-                "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/Algorithms/*.swift "$root"/Sources/fashion/Commands/*.swift -o "$out/fashion.o"
+                "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/Algorithms/*.swift "$root"/Sources/fashion/Bridges/*.swift "$root"/Sources/fashion/Commands/*.swift -o "$out/fashion.o"
         fi
     done
 
