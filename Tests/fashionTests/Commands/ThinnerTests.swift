@@ -106,7 +106,7 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(status, 2)
         XCTAssertEqual(errors, slices.map { slice in
             let bytes = data[slice.offset ..< slice.offset + slice.length]
-            return "fashion: \(ls.path)_\(slice.name): exists and differs, 10 bytes, sha256 \(self.sha256(other)) where the slice is \(bytes.count) bytes, sha256 \(self.sha256(bytes)); left alone without --overwrite"
+            return "fashion: \(ls.path)_\(slice.name): exists and differs, 10 bytes, sha256 \(self.sha256(other)) where the artifact is \(bytes.count) bytes, sha256 \(self.sha256(bytes)); left alone without --overwrite"
         })
         for slice in slices {
             let artifact = directory / "ls_\(slice.name)"

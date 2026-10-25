@@ -125,7 +125,7 @@ final class PackMachTests: XCTestCase {
         let header = try XCTUnwrap(packed.ranges(of: Data("UPX!".utf8)).last).lowerBound
         try XCTSkipUnless(packed[header + 28] == 0x53, "upx packs with filter 0x\(String(packed[header + 28], radix: 16)), not 0x53")
 
-        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), [try XCTUnwrap(ByteHash.sha256.digest(original))])
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(original))])
         let upxd = URL(fileURLWithPath: file.path + "_upx-d")
         if try execute(self.upx(), ["-q", "-d", "-o", upxd.path, file.path]) {
             XCTAssertEqual(try Data(contentsOf: upxd), original)
@@ -179,6 +179,10 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(Thinner.lines(for: packed.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
         XCTAssertEqual(try Data(contentsOf: unpacked), signed)
         _ = try codesign(["--verify", "--strict", unpacked.path])
+        // unpack names a thin file's artifact as thin does, found in place; unsign over it takes Apple's signature off.
+        XCTAssertEqual(Unpacker.lines(for: packed.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
+        XCTAssertEqual(Unsigner.lines(for: unpacked.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked.path + "_unsigned")), data)
     }
 
     func testUnpackRestoresAUniversalFile() throws {
@@ -194,6 +198,9 @@ final class PackMachTests: XCTestCase {
         XCTAssertTrue(try execute("/usr/bin/xcrun", ["lipo", "-create"] + originals.map(\.path) + ["-output", original.path]))
 
         XCTAssertEqual(try self.hashLines(universal.path, ["--unpack"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
+        // unpack writes the universal file whole, as lipo made it of the originals; thin writes its slices.
+        XCTAssertEqual(Unpacker.lines(for: universal.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [universal.path + "_unpacked"])
+        XCTAssertEqual(try Data(contentsOf: directory / "universal_unpacked"), try Data(contentsOf: original))
         XCTAssertEqual(Thinner.lines(for: universal.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: Reporter(console: Console())).count, 2)
         // The slice UPX packed is named for its unpacking; the other, as it was, keeps its name.
         XCTAssertEqual(try Data(contentsOf: directory / "universal_\(slices[0].name)_unpacked"), slices[0].data)
@@ -207,6 +214,13 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(Thinner.lines(for: resigned.path, exact: false, unsign: true, unpack: true, overwrite: false, reporter: Reporter(console: Console())).count, 2)
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[0].name)_unpacked"), slices[0].data)
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[1].name)_unsigned"), slices[1].data)
+        // unpack alone leaves the other slice signed, laid out again; unsign over the artifact gives the originals' file.
+        let reporter = Reporter(console: Console())
+        XCTAssertEqual(Unpacker.lines(for: resigned.path, exact: false, overwrite: false, reporter: reporter).map(\.text), [resigned.path + "_unpacked"])
+        XCTAssertEqual(try self.hashLines(resigned.path + "_unpacked", ["--unsign"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
+        XCTAssertEqual(Unsigner.lines(for: resigned.path + "_unpacked", exact: false, overwrite: false, reporter: reporter).map(\.text), [resigned.path + "_unpacked_unsigned"])
+        XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_unpacked_unsigned"), try Data(contentsOf: original))
+        XCTAssertEqual(reporter.errorCount, 0)
     }
 
     func testCorruptPackHeaderIsReported() throws {
