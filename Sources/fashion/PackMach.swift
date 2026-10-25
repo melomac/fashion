@@ -505,7 +505,7 @@ struct PackMach {
 
     /**
      `data` decompressed by UPX method `method` into `destination`, which it must fill: NRV2B, NRV2D and NRV2E by UCL
-     (`UCLBridge`), LZMA by the LZMA SDK (`LZMABridge`).
+     (`UCLBridge`), LZMA by liblzma (`LZMABridge`).
      */
     private static func decompress(_ data: Data, method: UInt8, into destination: UnsafeMutableRawBufferPointer) throws {
         let decompressed = data.withUnsafeBytes { source in

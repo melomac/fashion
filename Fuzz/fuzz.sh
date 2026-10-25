@@ -84,7 +84,7 @@ build() {
     # swiftc as SwiftPM runs it for the package, plus the sanitizers for the code under test.
     local swift=(xcrun swiftc -O -g -parse-as-library -swift-version 6 -target "$(uname -m)-apple-macos13.0")
     local sanitize=(-sanitize=address -Xfrontend -sanitize=fuzzer,address)
-    local includes=(-I "$build/modules" -I "$build/modules/CSSDeep" -I "$build/modules/CTLSH" -I "$build/modules/CMachOCompat")
+    local includes=(-I "$build/modules" -I "$build/modules/CSSDeep" -I "$build/modules/CTLSH" -I "$build/modules/CMachOCompat" -I "$root/Bridges/CLZMA")
 
     # ArgumentParser, which the CLI imports, from the checkout SwiftPM resolves; it is not what is fuzzed, so it is
     # neither instrumented nor sanitized.
@@ -103,10 +103,11 @@ build() {
         "${swift[@]}" -c -wmo -module-name ArgumentParser -I "$build/modules" -emit-module -emit-module-path "$build/modules/ArgumentParser.swiftmodule" "${files[@]}" -o "$build/objects/ArgumentParser.o"
     fi
 
-    # The C targets, with the module maps SwiftPM writes for them, instrumented too: ssdeep, TLSH and UPX's decoders
-    # read the bytes. The bridges to the submodules are in Bridges/, fashion's own C in Sources/.
+    # The C targets, with the module maps SwiftPM writes for them, instrumented too: ssdeep, TLSH and UCL's decoders
+    # read the bytes. The bridges to the submodules are in Bridges/, fashion's own C in Sources/. CLZMA has its own
+    # module map there, over the system's liblzma, which is not instrumented.
     local name include header cflags=(-c -O1 -g -fsanitize=fuzzer-no-link,address -target "$(uname -m)-apple-macos13.0")
-    for name in Bridges/CSSDeep Bridges/CTLSH Bridges/CUCL Bridges/CLZMA Sources/CMachOCompat; do
+    for name in Bridges/CSSDeep Bridges/CTLSH Bridges/CUCL Sources/CMachOCompat; do
         include=$root/$name/include
         name=$(basename "$name")
         mkdir -p "$build/modules/$name"
@@ -123,9 +124,9 @@ build() {
             xcrun clang "${cflags[@]}" -I "$(dirname "$file")/include" "$file" -o "$name"
         fi
     done
-    for file in "$root"/Bridges/CUCL/*.c "$root"/Bridges/CLZMA/*.c; do
+    for file in "$root"/Bridges/CUCL/*.c; do
         name=$build/objects/$(basename "$file" .c).o
-        if stale "$name" "$file" "$root/submodules/ucl" "$root/submodules/lzma-sdk"; then
+        if stale "$name" "$file" "$root/submodules/ucl"; then
             xcrun clang "${cflags[@]}" -I "$root/submodules/ucl/include" -I "$root/submodules/ucl" "$file" -o "$name"
         fi
     done

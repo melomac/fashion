@@ -7,8 +7,8 @@ The fashion binary is built from the tag matching its version (fashion --version
 
 fashion is licensed under the GNU General Public License version 3, see LICENSE.
 
-The fashion binary includes the third-party code listed below. The ssdeep, TLSH, UCL and LZMA SDK sources, with their
-license files, are in the repository's submodules/ at the commits the release tag pins; swift-argument-parser is the
+The fashion binary includes the third-party code listed below. The ssdeep, TLSH and UCL sources, with their license
+files, are in the repository's submodules/ at the commits the release tag pins; swift-argument-parser is the
 version Package.resolved pins.
 
 
@@ -84,13 +84,6 @@ The NRV decompressors, licensed under the GNU General Public License version 2 o
 used here under version 3, see LICENSE:
 
     Copyright (C) 1996-2004 Markus Franz Xaver Johannes Oberhumer
-
-
-LZMA SDK
-https://github.com/upx/upx-vendor-lzma-sdk
-
-LzmaDecode.c and LzmaDecode.h, the LZMA SDK 4.40 decoder UPX uses, written and placed in the public domain by Igor
-Pavlov.
 
 
 swift-argument-parser
