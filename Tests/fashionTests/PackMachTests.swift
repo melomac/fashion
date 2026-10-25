@@ -24,11 +24,12 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
-     The `upx` installed, on `PATH` or where Homebrew and MacPorts put it, which `xcodebuild`'s `PATH` may not hold;
-     skips the test without one, since not everyone may install it.
+     The `upx` installed, on `PATH` or where a build from source, Homebrew and MacPorts put it, which `xcodebuild`'s `PATH`
+     may not hold, in that order, so a devel build in /usr/local/bin is found before a release; skips the test without one,
+     since not everyone may install it.
      */
     private func upx() throws -> String {
-        let directories = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init) + ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+        let directories = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init) + ["/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"]
         guard let path = directories.map({ $0 + "/upx" }).first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw XCTSkip("upx unavailable: brew install upx")
         }
@@ -108,6 +109,48 @@ final class PackMachTests: XCTestCase {
                     XCTAssertEqual(try Data(contentsOf: upxd), original, "\(name) \(method)")
                 }
             }
+        }
+    }
+
+    func testUnpackUndoesTheArm64ConditionalBranchFilter() throws {
+        // Filter 0x53, which UPX added after 5.2.1 for arm64 and packs with when asked, takes the conditional branches
+        // too. An older upx packs with 0x52 when asked for it, and the test is skipped.
+        let directory = try self.directory("filter-0x53")
+        guard let (_, unsigned, original) = try self.unsignedLs(in: directory).first(where: { $0.name == "arm64e" }) else {
+            throw XCTSkip("/bin/ls has no arm64e slice")
+        }
+        let file = try self.packed(unsigned, ["--filter=0x53"])
+        let packed = try Data(contentsOf: file)
+        // The pack header's filter follows its version, format, method, level, sizes and checksums.
+        let header = try XCTUnwrap(packed.ranges(of: Data("UPX!".utf8)).last).lowerBound
+        try XCTSkipUnless(packed[header + 28] == 0x53, "upx packs with filter 0x\(String(packed[header + 28], radix: 16)), not 0x53")
+
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), [try XCTUnwrap(ByteHash.sha256.digest(original))])
+        let upxd = URL(fileURLWithPath: file.path + "_upx-d")
+        if try execute(self.upx(), ["-q", "-d", "-o", upxd.path, file.path]) {
+            XCTAssertEqual(try Data(contentsOf: upxd), original)
+        }
+    }
+
+    func testUnfilterUndoesUPXsArm64BranchFilters() throws {
+        // UPX's arm64 doctest instructions, filtered by UPX's own Filter as its Mach-O packer filters them (addvalue 0),
+        // with three bytes after the last word: 0x52 takes B and BL, the last word only with bytes after it; 0x53 takes
+        // the conditional branches too, and the last word always. The bytes after the last word stay as they are.
+        // nop, b, bl, b.ne, cbz w5, cbz x5, cbnz w7, cbnz x7, tbz, tbnz, add, b
+        let original: [UInt32] = [0xd503_201f, 0x17ff_ffff, 0x9400_0010, 0x54ff_ffe1, 0x3400_0065, 0xb4ff_ffc5, 0x35ff_ffe7, 0xb500_0047, 0x361f_fff1, 0xb7f8_0024, 0x9100_0400, 0x1400_0002]
+        let filtered: [(id: UInt8, length: Int, words: [UInt32])] = [
+            (0x52, 48, [0xd503_201f, 0x1400_0000, 0x9400_0012, 0x54ff_ffe1, 0x3400_0065, 0xb4ff_ffc5, 0x35ff_ffe7, 0xb500_0047, 0x361f_fff1, 0xb7f8_0024, 0x9100_0400, 0x1400_0002]),
+            (0x52, 51, [0xd503_201f, 0x1400_0000, 0x9400_0012, 0x54ff_ffe1, 0x3400_0065, 0xb4ff_ffc5, 0x35ff_ffe7, 0xb500_0047, 0x361f_fff1, 0xb7f8_0024, 0x9100_0400, 0x1400_000d]),
+            (0x53, 48, [0xd503_201f, 0x1400_0000, 0x9400_0012, 0x5400_0041, 0x3400_00e5, 0xb400_0065, 0x3500_00a7, 0xb500_0127, 0x3618_00f1, 0xb7f8_0144, 0x9100_0400, 0x1400_000d]),
+            (0x53, 51, [0xd503_201f, 0x1400_0000, 0x9400_0012, 0x5400_0041, 0x3400_00e5, 0xb400_0065, 0x3500_00a7, 0xb500_0127, 0x3618_00f1, 0xb7f8_0144, 0x9100_0400, 0x1400_000d]),
+        ]
+        let block = { (words: [UInt32], length: Int) in
+            Data(words.flatMap { withUnsafeBytes(of: $0.littleEndian, Array.init) } + [0xa5, 0xa5, 0xa5]).prefix(length)
+        }
+        for (id, length, words) in filtered {
+            var unfiltered = block(words, length)
+            try unfiltered.withUnsafeMutableBytes { try PackMach.unfilter($0, id: id, cto: 0) }
+            XCTAssertEqual(unfiltered, block(original, length), "0x\(String(id, radix: 16)), \(length) bytes")
         }
     }
 

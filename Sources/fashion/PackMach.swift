@@ -496,10 +496,11 @@ struct PackMach {
 
     /**
      Undo the filter UPX applied to a block before compressing it, to make branch targets repeat: the x86 call and
-     jump trick (0x46, and 0x49 with conditional jumps), the ARM and arm64 branch tricks (0x50, 0x52), and the
-     PowerPC one (0xd0), the filters its Mach-O packers use, each with `cto`, the byte that marks a filtered target.
+     jump trick (0x46, and 0x49 with conditional jumps), the ARM and arm64 branch tricks (0x50, 0x52, and 0x53 with
+     conditional branches, which UPX added after 5.2.1), and the PowerPC one (0xd0), the filters its Mach-O packers
+     use, each with `cto`, the byte that marks a filtered target.
      */
-    private static func unfilter(_ b: UnsafeMutableRawBufferPointer, id: UInt8, cto: UInt8) throws {
+    static func unfilter(_ b: UnsafeMutableRawBufferPointer, id: UInt8, cto: UInt8) throws {
         let length = b.count
         func le32(_ at: Int) -> UInt32 {
             b.loadUnaligned(fromByteOffset: at, as: UInt32.self).littleEndian
@@ -538,6 +539,28 @@ struct PackMach {
                 }
                 a += 4
             } while a < length - 4
+        case 0x53:
+            // CTarm64: B and BL as ct26arm, and the conditional branches, whose offset starts at bit 5: B.cond, CBZ and
+            // CBNZ in 19 bits, TBZ and TBNZ in 14; word by word, the last word too.
+            var a = 0
+            while a + 4 <= length {
+                let word = le32(a)
+                let mask: UInt32 = if (word >> 26) & 0x1f == 0x05 {
+                    0x03ff_ffff
+                } else if word >> 24 == 0x54 || (word >> 25) & 0x3f == 0x1a {
+                    0x00ff_ffe0
+                } else if (word >> 25) & 0x3f == 0x1b {
+                    0x0007_ffe0
+                } else {
+                    0
+                }
+                if mask != 0 {
+                    let shift = mask.trailingZeroBitCount
+                    let target = (((word >> shift) &- UInt32(a / 4)) << shift) & mask
+                    b.storeBytes(of: ((word & ~mask) | target).littleEndian, toByteOffset: a, as: UInt32.self)
+                }
+                a += 4
+            }
         case 0xd0:
             // ppcbxx: B and BL whose displacement's top 4 bits are cto.
             guard length >= 4 else {
