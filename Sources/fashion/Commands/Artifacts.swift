@@ -47,21 +47,24 @@ struct ArtifactWriter {
      The lines to print for one file: the path of each artifact written or found in place, or a diagnostic for each
      that could not be written, or that a different file stands for without `overwrite`. A file that cannot be read,
      whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead, and
-     nothing is written.
+     nothing is written. An image a modified UPX packed is warned about before its artifacts, which are written.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
         let file: File
         let artifacts: [(suffix: String, range: Range<Int>)]
+        var caveats: [Line] = []
         do {
             let opened = try File(path: path)
-            let edited = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack) : nil
+            let edited = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
+                caveats.append(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
+            }) : nil
             file = edited?.file ?? opened
             artifacts = try self.split ? Self.slices(of: file, exact: self.exact, edits: edited?.edits) : Self.whole(file, exact: self.exact, edits: edited?.edits)
         } catch {
             return [reporter.report(path: path, message: File.message(for: error), tint: Digester.tint(for: error))]
         }
 
-        return artifacts.flatMap { suffix, range -> [Line] in
+        return caveats + artifacts.flatMap { suffix, range -> [Line] in
             let artifact = path + suffix
             Self.writing.claim(artifact)
             defer {

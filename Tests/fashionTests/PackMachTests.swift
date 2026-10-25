@@ -252,6 +252,44 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    func testUnpackFindsThePackHeaderWithoutItsMarker() throws {
+        // A UPX modified to defeat upx -d writes another marker than "UPX!" everywhere it goes: the pack header, the
+        // l_info before the packed data, and the stub, which looks for it. upx -d calls the file not packed; --unpack
+        // finds the pack header by its structure and checksum, and takes the l_info's word for the marker, named in a
+        // warning. The pack header's marker replaced alone, the l_info's left, vouches for nothing: the image is hashed
+        // as it is.
+        let directory = try self.directory("marker")
+        let marker = Data("UPX!".utf8)
+        let other = Data("VQY\"".utf8)
+        for (name, unsigned, original) in try self.unsignedLs(in: directory) {
+            let packed = try Data(contentsOf: self.packed(unsigned))
+            XCTAssertGreaterThanOrEqual(packed.ranges(of: marker).count, 2, name)
+            let swapped = directory / "\(name)_swapped"
+            try packed.replacing(marker, with: other).write(to: swapped)
+            saveFixture(path: swapped.path)
+            let warning = "fashion: \(swapped.path): packed by a modified UPX, its marker \"VQY\\\"\" in place of \"UPX!\""
+            XCTAssertEqual(try self.hashLines(swapped.path, ["--unpack"]), try [warning, XCTUnwrap(ByteHash.sha256.digest(original))], name)
+            let (status, errors) = try runFashion(["--unpack", swapped.path])
+            XCTAssertEqual(status, 0, name)
+            XCTAssertEqual(errors, [warning], name)
+            let reporter = Reporter(console: Console())
+            let lines = Thinner.lines(for: swapped.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+            XCTAssertEqual(lines.map(\.text), [warning, swapped.path + "_unpacked"], name)
+            XCTAssertEqual(lines.map(\.diagnostic), [true, false], name)
+            XCTAssertEqual(reporter.errorCount, 0, name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: swapped.path + "_unpacked")), original, name)
+            XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", swapped.path + "_upx-d", swapped.path]), name)
+
+            var header = packed
+            try header.replaceSubrange(XCTUnwrap(packed.ranges(of: marker).last), with: other)
+            let alone = directory / "\(name)_header-swapped"
+            try header.write(to: alone)
+            XCTAssertEqual(try self.hashLines(alone.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(header))], name)
+            XCTAssertEqual(Thinner.lines(for: alone.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter).count, 0, name)
+            XCTAssertEqual(reporter.errorCount, 0, name)
+        }
+    }
+
     func testImagesUPXDidNotPackAreLeftAlone() throws {
         // --unpack meets every Mach-O. One of three segments, __DATA, __TEXT and a __LINKEDIT too short for a block
         // header, is where UPX gives up ("bad offLINK") though it never packed it: hashed as it is, nothing to write.

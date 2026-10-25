@@ -995,7 +995,10 @@ struct Digester {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed, or the
         // size of its edit, unpacked or without signatures, which every mode then reads as the file.
         let opened = try File(path: path)
-        let file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack)?.file ?? opened : opened
+        // A modified UPX packed it: a second look, whatever --quiet keeps off, like a signature that does not hold.
+        let file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
+            note(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
+        })?.file ?? opened : opened
         // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless
         // --quiet keeps the lines alone.
         let caveat = { (arch: String?, message: String) in

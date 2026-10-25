@@ -44,12 +44,19 @@ enum MachOEditor {
      each comes out without its code signature, as `MachO.removingSignature(end:)` leaves it; a universal file with its
      architectures so is laid out again as `lipo` lays out the architectures it is given. With `exact`, an image is cut
      where it ends before its signature comes out, so appended bytes do not keep it in. Throws for a Mach-O that does
-     not parse, a signature that does not end its image, or packed data that does not hold.
+     not parse, a signature that does not end its image, or packed data that does not hold. `caveat` hears what an
+     edit has to say about an image, named after its architecture in a universal file: that a modified UPX packed it.
      */
-    static func edit(_ file: File, exact: Bool, unsign: Bool, unpack: Bool) throws -> (file: File, edits: [Edits])? {
+    static func edit(_ file: File, exact: Bool, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> (file: File, edits: [Edits])? {
         switch try Universal.open(file) {
         case let .thin(image):
-            return try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack).map { (File(editing: file, pieces: $0.pieces), [$0.edits]) }
+            guard let edit = try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack) else {
+                return nil
+            }
+            if let message = edit.caveat {
+                caveat(nil, message)
+            }
+            return (File(editing: file, pieces: edit.pieces), [edit.edits])
         case let .fat(archs):
             let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, edits: Edits) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
@@ -59,6 +66,9 @@ enum MachOEditor {
                 }
                 guard let edit = try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack) else {
                     return (arch, whole, image.universalAlignment, [])
+                }
+                if let message = edit.caveat {
+                    caveat(arch.name, message)
                 }
                 return (arch, edit.pieces, edit.align, edit.edits)
             }
@@ -76,11 +86,12 @@ enum MachOEditor {
 
     /**
      The pieces of `image` of `file` as the edits leave it, the alignment `lipo` gives the image they make, and what they
-     did to it; nil when they change nothing. An unpacked image lives in memory, without its signature too with
-     `unsign`.
+     did to it, with `PackMach`'s word on the image when it was unpacked; nil when they change nothing. An unpacked
+     image lives in memory, without its signature too with `unsign`.
      */
-    private static func edit(_ image: MachO, of file: File, exact: Bool, unsign: Bool, unpack: Bool) throws -> (pieces: [File.Piece], align: Int, edits: Edits)? {
-        if unpack, var data = try self.unpacked(image, of: file, exact: exact) {
+    private static func edit(_ image: MachO, of file: File, exact: Bool, unsign: Bool, unpack: Bool) throws -> (pieces: [File.Piece], align: Int, edits: Edits, caveat: String?)? {
+        if unpack, let unpacked = try self.unpacked(image, of: file, exact: exact) {
+            var data = unpacked.data
             // The unpacked image is parsed in a scope of its own, so that nothing holds its bytes, up to 768 MiB, when
             // they are edited in place below.
             let align: Int
@@ -99,7 +110,7 @@ enum MachOEditor {
                 data.removeSubrange(unsigned.end...)
                 edits.formUnion(unsigned.cut ? [.exact, .unsigned] : .unsigned)
             }
-            return ([.bytes(data)], align, edits)
+            return ([.bytes(data)], align, edits, unpacked.caveat)
         }
         guard
             unsign,
@@ -107,18 +118,22 @@ enum MachOEditor {
         else {
             return nil
         }
-        return (pieces, image.universalAlignment, exact && image.logicalEnd() < image.length ? [.exact, .unsigned] : .unsigned)
+        return (pieces, image.universalAlignment, exact && image.logicalEnd() < image.length ? [.exact, .unsigned] : .unsigned, nil)
     }
 
     /**
-     What UPX packed in `image` of `file`, unpacked; nil when UPX did not pack it. A signature added after packing hides
-     the 16-byte `__LINKEDIT` UPX leaves, so `upx -d` gives up on it: the image is looked at without it.
+     What UPX packed in `image` of `file`, unpacked, with `PackMach`'s word on it; nil when UPX did not pack it. A
+     signature added after packing hides the 16-byte `__LINKEDIT` UPX leaves, so `upx -d` gives up on it: the image is
+     looked at without it.
      */
-    private static func unpacked(_ image: MachO, of file: File, exact: Bool) throws -> Data? {
+    private static func unpacked(_ image: MachO, of file: File, exact: Bool) throws -> (data: Data, caveat: String?)? {
         // A signature that cannot come out, or leaves no image behind, is no sign of UPX: the image is looked at as it is.
         let unsigned = (try? self.unsigned(image, exact: exact)) ?? nil
         let packed = unsigned.flatMap { (try? MachO(File(editing: file, pieces: $0))) ?? nil } ?? image
-        return try PackMach(packed)?.unpack()
+        guard let packMach = try PackMach(packed) else {
+            return nil
+        }
+        return try (packMach.unpack(), packMach.caveat)
     }
 
     /**

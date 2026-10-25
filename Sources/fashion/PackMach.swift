@@ -23,12 +23,17 @@ extension UnpackError: LocalizedError {
  Where UPX throws before it has found its pack header, for a header or load commands its packer would never write, the
  image is merely not packed: `--unpack` meets every Mach-O. UPX's recovery of a pack header pirates overwrote, which
  emulates the stub's entry code and scans for the packed data, is not ported: such an image is not packed either.
+ A packer modified to write another marker than "UPX!" everywhere it goes, whose files `upx -d` calls not packed, is
+ seen through: the pack header is found by its structure and checksum where UPX looks for it, and the `l_info` before
+ the packed data must vouch for it.
  */
 struct PackMach {
     private let image: MachO
     private let format: Class
     /// Where the packed data starts: UPX's `p_info`, then a `b_info` before each block.
     private let overlayOffset: Int
+    /// A word on the image when a modified UPX packed it: the marker it bears in place of "UPX!"; nil for "UPX!".
+    let caveat: String?
 
     /// A packer class UPX unpacks Mach-O with: its CPU, filetype, format id and page.
     private struct Class {
@@ -166,7 +171,7 @@ struct PackMach {
         i -= small
         guard
             i >= 1,
-            let packHeader = try PackHeader(window.dropFirst(i), fileSize: image.length),
+            let packHeader = try PackHeader(window.dropFirst(i), fileSize: image.length, format: format.format),
             packHeader.format == format.format
         else {
             return nil
@@ -174,6 +179,19 @@ struct PackMach {
 
         let at = i + packHeader.offset + packHeader.size
         let overlayOffset = at + 4 <= window.count ? Int(image.word(window, at: at)) : 0
+        if packHeader.magic != PackHeader.magic {
+            // Found without its marker, the pack header needs the word of UPX's `l_info`, the 12 bytes before the
+            // packed data: its marker, version and format must be the header's, as the packer wrote them.
+            guard
+                overlayOffset >= headerSize + headway + 12,
+                let lInfo = try? image.dataAt(overlayOffset - 12, count: 12),
+                lInfo.dropFirst(4).prefix(4).elementsEqual(packHeader.magic),
+                lInfo[lInfo.startIndex + 10] == packHeader.version,
+                lInfo[lInfo.startIndex + 11] == packHeader.format
+            else {
+                return nil
+            }
+        }
         guard (headerSize + headway) ..< image.length ~= overlayOffset else {
             throw UnpackError.cantUnpack("file corrupted")
         }
@@ -181,6 +199,12 @@ struct PackMach {
         self.image = image
         self.format = format
         self.overlayOffset = overlayOffset
+        self.caveat = packHeader.magic == PackHeader.magic ? nil : "packed by a modified UPX, its marker \(Self.quoted(packHeader.magic)) in place of \"UPX!\""
+    }
+
+    /// `bytes` quoted, a quote or backslash among them escaped, when they all print; hexadecimal otherwise.
+    private static func quoted(_ bytes: [UInt8]) -> String {
+        bytes.allSatisfy { 0x20 ... 0x7e ~= $0 } ? String(decoding: bytes, as: UTF8.self).debugDescription : "0x" + bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - unpack
@@ -589,23 +613,47 @@ extension PackMach {
      then sizes and checksums, little-endian for a little-endian format, big-endian past 128, and a checksum of its own.
      */
     private struct PackHeader {
-        /// Where the magic lies in the buffer it was found in.
+        /// UPX's marker, "UPX!", as its packer writes it.
+        static let magic = Array("UPX!".utf8)
+
+        /// Where the marker lies in the buffer it was found in.
         let offset: Int
         /// Its size, by version and format (`getPackHeaderSize`).
         let size: Int
         let version: UInt8
         let format: UInt8
+        /// Its marker: "UPX!", or what a packer modified to defeat `upx -d` writes instead.
+        let magic: [UInt8]
 
         /**
-         The pack header in `buffer`, the first "UPX!" in it, checked as `getPackHeader` checks it in a `fileSize`-byte
-         image; nil without the magic, and throws for a header that does not hold.
+         The pack header in `buffer`: the first "UPX!" in it, checked as `getPackHeader` checks it in a `fileSize`-byte
+         image, which throws for a header that does not hold; without one, the first header for `format` that holds,
+         by its own checksum, whose marker is whatever a packer modified to defeat `upx -d` wrote. Nil without either.
          */
-        init?(_ buffer: Data, fileSize: Int) throws {
-            let magic = Data("UPX!".utf8)
-            guard let range = buffer.firstRange(of: magic) else {
-                return nil
+        init?(_ buffer: Data, fileSize: Int, format: UInt8) throws {
+            let offset: Int
+            if let range = buffer.firstRange(of: Data(Self.magic)) {
+                offset = range.lowerBound
+            } else {
+                // A header with a checksum, version 10 on, for the image's format, with the overlay offset after it.
+                guard let start = buffer.indices.first(where: { start in
+                    start + 36 <= buffer.endIndex && 10 ... 13 ~= buffer[start + 4] && buffer[start + 5] == format && (try? Self.decode(buffer[start...], fileSize: fileSize)) != nil
+                }) else {
+                    return nil
+                }
+                offset = start
             }
-            let p = buffer[range.lowerBound...]
+            let fields = try Self.decode(buffer[offset...], fileSize: fileSize)
+            self.offset = offset - buffer.startIndex
+            self.size = fields.size
+            self.version = fields.version
+            self.format = fields.format
+            self.magic = Array(buffer[offset ..< offset + 4])
+        }
+
+        /// The header at the start of `p`, checked as `getPackHeader` checks it; throws, in UPX's words, for one that
+        /// does not hold.
+        private static func decode(_ p: Data, fileSize: Int) throws -> (size: Int, version: UInt8, format: UInt8) {
             let at = { (index: Int) in p[p.startIndex + index] }
             guard p.count >= 20 else {
                 throw UnpackError.cantUnpack("header corrupted 1")
@@ -653,10 +701,7 @@ extension PackMach {
             guard 2 ... 10 ~= method || method == 14 else {
                 throw UnpackError.cantUnpack("unknown compression method (try a newer version of UPX)")
             }
-            self.offset = range.lowerBound - buffer.startIndex
-            self.size = size
-            self.version = version
-            self.format = format
+            return (size, version, format)
         }
     }
 }
