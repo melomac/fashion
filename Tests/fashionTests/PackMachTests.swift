@@ -667,6 +667,37 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
+     UPX 3.91 laid an `x86_64` file out with an empty `__LINKEDIT` at its padded end; a file cut short of that padding
+     has it past the end, which the kernel refuses to load, and the parser refuses as the kernel does: reported in
+     red like any malformed Mach-O, hashed nowhere, written nowhere.
+     */
+    func testAPackedFileCutShortOfItsLinkeditIsMalformed() throws {
+        let directory = try self.directory("cut-short")
+        for (name, unsigned, _) in try self.unsignedLs(in: directory) {
+            var packed = try Data(contentsOf: self.packed(unsigned))
+            let linkedit = try XCTUnwrap(XCTUnwrap(MachO(File(data: packed))).findSegment("__LINKEDIT"))
+            let fileoff = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.fileoff))
+            let filesize = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.filesize))
+            packed.replaceSubrange(fileoff ..< fileoff + 8, with: withUnsafeBytes(of: UInt64(packed.count + 0x1000).littleEndian) { Data($0) })
+            packed.replaceSubrange(filesize ..< filesize + 8, with: Data(count: 8))
+            let file = directory / name
+            try packed.write(to: file)
+            saveFixture(path: file.path)
+            let message = "Invalid Mach-O: segment __LINKEDIT at offset \(packed.count + 0x1000) with size 0 is outside the \(packed.count)-byte slice"
+            let (status, errors) = try runFashion(["--unpack", file.path])
+            XCTAssertEqual(status, 2, name)
+            XCTAssertEqual(errors, ["fashion: \(file.path): \(message)"], name)
+            let reporter = Reporter(console: Console())
+            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+            XCTAssertEqual(lines.count, 1, name)
+            XCTAssertTrue(lines.first?.text.hasSuffix(message) ?? false, name)
+            XCTAssertEqual(lines.first?.tint, .malformed, name)
+            XCTAssertEqual(reporter.errorCount, 1, name)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
+        }
+    }
+
+    /**
      A universal file whose first slice a modified UPX packed and whose second slice's packed data does not hold:
      the warning about the first is printed, then the error about the second, as hash mode prints them.
      */

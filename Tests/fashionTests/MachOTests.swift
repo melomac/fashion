@@ -1094,6 +1094,39 @@ final class MachOTests: XCTestCase {
 #endif
     }
 
+    /**
+     The kernel refuses a segment lying past the file, whatever its size, and the file never loads: a packed file
+     cut short of its last page has its empty `__LINKEDIT` there. One at the file's very end, as UPX 3.91 placed
+     it, loads, and passes.
+     */
+    func testSliceRejectsSegmentPastTheFile() {
+        func image(fileoff: UInt64, filesize: UInt64) -> Data {
+            var data = Data()
+            data.appendUInt32(MH_MAGIC_64)
+            data.appendInt32(CPU_TYPE_X86_64)
+            data.appendInt32(0)
+            data.appendUInt32(UInt32(MH_EXECUTE))
+            data.appendUInt32(1) // ncmds
+            data.appendUInt32(72) // sizeofcmds
+            data.appendUInt32(0)
+            data.appendUInt32(0)
+            data.appendUInt32(UInt32(LC_SEGMENT_64))
+            data.appendUInt32(72)
+            data.append(Data("__LINKEDIT".utf8)); data.append(Data(repeating: 0, count: 6))
+            data.appendUInt64(0); data.appendUInt64(0); data.appendUInt64(fileoff); data.appendUInt64(filesize) // vmaddr, vmsize, fileoff, filesize
+            data.appendUInt32(1); data.appendUInt32(1); data.appendUInt32(0); data.appendUInt32(0) // maxprot, initprot, nsects, flags
+            data.append(Data(repeating: 0xab, count: 200 - data.count))
+            return data
+        }
+        XCTAssertNoThrow(try MachO(image(fileoff: 200, filesize: 0)), "at the end")
+        XCTAssertNoThrow(try MachO(image(fileoff: 100, filesize: 100)), "ending at the end")
+        for (fileoff, filesize) in [(201, 0), (100, 101), (UInt64.max, 1), (1, UInt64.max)] as [(UInt64, UInt64)] {
+            XCTAssertThrowsError(try MachO(image(fileoff: fileoff, filesize: filesize)), "\(fileoff), \(filesize)") { error in
+                XCTAssertEqual(error as? ParserError, .invalidSegmentRange(name: "__LINKEDIT", offset: fileoff, size: filesize, fileSize: 200))
+            }
+        }
+    }
+
     func testMachOEndSegmentPastLinkedit() {
         // A dSYM's __DWARF segment follows __LINKEDIT, where Security's MachO ends the image.
         var data = Data()
@@ -1276,6 +1309,10 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(
             ParserError.truncatedLoadCommand(cmd: 0x19, size: 1, expectedSize: 72).localizedDescription,
             "Invalid Mach-O: load command 0x19 is only 1 byte; its structure requires 72",
+        )
+        XCTAssertEqual(
+            ParserError.invalidSegmentRange(name: "__LINKEDIT", offset: 32768, size: 0, fileSize: 28672).localizedDescription,
+            "Invalid Mach-O: segment __LINKEDIT at offset 32768 with size 0 is outside the 28672-byte slice",
         )
     }
 

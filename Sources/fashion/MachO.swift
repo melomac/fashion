@@ -11,6 +11,7 @@ enum ParserError: Error, Equatable {
     case invalidSymbolTableRange(offset: UInt32, count: UInt32, fileSize: Int)
     case invalidStringTableRange(offset: UInt32, size: UInt32, fileSize: Int)
     case invalidStringTableIndex(index: UInt32, tableSize: UInt32)
+    case invalidSegmentRange(name: String, offset: UInt64, size: UInt64, fileSize: Int)
     case symbolNamesTooLong(limit: Int)
 }
 
@@ -35,6 +36,8 @@ extension ParserError: LocalizedError {
             "Mach-O too large: its external symbol names add up to more than \(limit) bytes"
         case let .invalidStringTableIndex(index, tableSize):
             "Invalid Mach-O: string table index \(index) is outside the \(tableSize)-byte table"
+        case let .invalidSegmentRange(name, offset, size, fileSize):
+            "Invalid Mach-O: segment \(name) at offset \(offset) with size \(size) is outside the \(fileSize)-byte slice"
         }
     }
 }
@@ -108,7 +111,8 @@ struct MachO {
     /**
      Parse a thin Mach-O as Security's `MachO` constructor does, throwing for a load-command table `parseLoadCommands`
      rejects and for a segment or symbol table command too short for its structure before the image's end
-     (`MachO::validateStructure`). Nil for data that is not a thin Mach-O at all.
+     (`MachO::validateStructure`), and as the kernel does for a segment lying past the image (`load_segment`). Nil for
+     data that is not a thin Mach-O at all.
      */
     init?(_ file: File, offset: Int = 0, length: Int? = nil, head: Data? = nil) throws {
         guard let image = try MachO(lenient: file, offset: offset, length: length, head: head) else {
@@ -133,6 +137,23 @@ struct MachO {
             }
             if command.cmd == UInt32(LC_SYMTAB) || command.isSegment(named: "__LINKEDIT") {
                 break
+            }
+        }
+
+        // The kernel refuses a segment lying past the image, whatever its size, "to make sure what we get from the
+        // file is really ours": LOAD_BADMACHO, and the file never loads. Security's MachO does not look.
+        for command in image.loadCommands {
+            let range: (offset: UInt64, size: UInt64)? = switch command.cmd {
+            case UInt32(LC_SEGMENT):
+                command.payload(as: segment_command.self).map { (UInt64(image.sw($0.fileoff)), UInt64(image.sw($0.filesize))) }
+            case UInt32(LC_SEGMENT_64):
+                command.payload(as: segment_command_64.self).map { (image.sw($0.fileoff), image.sw($0.filesize)) }
+            default:
+                nil
+            }
+            if let range, range.size > UInt64(image.length) || range.offset > UInt64(image.length) - range.size {
+                let name = String(decoding: command.data.dropFirst(8).prefix(16).prefix { $0 != 0 }, as: UTF8.self)
+                throw ParserError.invalidSegmentRange(name: name, offset: range.offset, size: range.size, fileSize: image.length)
             }
         }
 
