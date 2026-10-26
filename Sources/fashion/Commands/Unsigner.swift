@@ -32,15 +32,18 @@ struct Unsigner: ParsableCommand {
 }
 
 /**
- The work on one file: write it beside itself without its code signatures, as `MachOEditor` edits it in memory and as
- hash mode's `--unsign` reads it, whole: a universal file keeps every architecture, laid out again as `lipo` lays them
- out, where `thin --unsign` writes each as a file of its own, the signed slice beside it, where this goes straight
- to the artifact. `ls` gives `ls_unsigned`, and a thin file `sample` `sample_unsigned`, as `thin --unsign` names it
- too. A file with no signature to remove, or that is not Mach-O, has nothing to write.
+ The work on one file: write it beside itself without its code signatures. `MachOEditor` makes the edit in memory,
+ and the artifact is what hash mode's --unsign reads. The file is written whole: a universal file keeps every
+ architecture, laid out again as `lipo` lays them out. `thin --unsign` writes each architecture as a file of its own
+ instead, the signed slice beside it; this goes straight to the artifact. `ls` gives `ls_unsigned`, and a thin file
+ `sample` gives `sample_unsigned`, as `thin --unsign` names it too.
 
- With `--exact`, each image is cut where it ends (`MachO.logicalEnd()`) before its signature comes off, so bytes
- appended to it do not keep it in, as hash mode's `--exact` drops them, and the artifact is named `_exact` for it too.
- A signature that does not end its image is reported otherwise, and nothing is written for the file.
+ A file with no signature to remove, or that is not Mach-O, has nothing to write, unless --exact cuts bytes appended
+ to it: the cut alone is written then, as `_exact`.
+
+ With --exact, each image is cut where it ends (`MachO.logicalEnd()`) before its signature comes off, as hash mode's
+ --exact cuts it, so bytes appended after the signature do not keep it in; the artifact is named `_exact` for the cut
+ too. Without --exact, a signature that does not end its image is reported, and nothing is written for the file.
  */
 extension Unsigner {
     /**

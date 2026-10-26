@@ -3,7 +3,8 @@ import XCTest
 
 /**
  `fashion unsign`: a file written out beside it without its code signatures, whole: a universal file as `lipo` lays its
- unsigned architectures out, a thin file as `thin --unsign` writes it; one with no signature to remove gets nothing.
+ unsigned architectures out, a thin file as `thin --unsign` writes it; one the flags leave as it is gets nothing, and
+ one --exact cuts `_exact`.
  */
 final class UnsignerTests: XCTestCase {
     private func directory(_ name: String) throws -> URL {
@@ -77,6 +78,33 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(command.scan(), 0)
         XCTAssertEqual(try Data(contentsOf: signed / "sample_unsigned"), data)
         XCTAssertEqual(Thinner.lines(for: (signed / "sample").path, exact: false, unsign: true, unpack: false, overwrite: false, reporter: reporter).map(\.text), [(signed / "sample_unsigned").path])
+    }
+
+    /**
+     A file with no signature to remove is left alone, unless --exact cuts bytes appended to it: the cut is
+     written as `_exact`, what hash mode's --exact --unsign reads and what thin --exact writes, and unpack --exact
+     finds it in place; one that ends where its image ends gets nothing.
+     */
+    func testExactAloneCutsAnUnsignedFileIntoAnArtifact() throws {
+        let directory = try self.directory("exact-alone")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let original = try compile("sample", in: directory, ["-arch", "x86_64"])
+        let data = try Data(contentsOf: original)
+        let padded = directory / "padded"
+        try (data + Data(repeating: 0x4a, count: 8)).write(to: padded)
+
+        let reporter = Reporter(console: Console())
+        XCTAssertEqual(Unsigner.lines(for: padded.path, exact: false, overwrite: false, reporter: reporter).count, 0)
+        XCTAssertEqual(Unsigner.lines(for: original.path, exact: true, overwrite: false, reporter: reporter).count, 0)
+        let artifact = directory / "padded_exact"
+        XCTAssertEqual(Unsigner.lines(for: padded.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(try Data(contentsOf: artifact), data)
+        XCTAssertEqual(try self.hashLines(padded.path, ["--exact", "--unsign"]), try [XCTUnwrap(ByteHash.sha256.digest(data))])
+        XCTAssertEqual(Unpacker.lines(for: padded.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(Thinner.lines(for: padded.path, exact: true, unsign: false, unpack: false, overwrite: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(reporter.errorCount, 0)
     }
 
     func testExactCutsAppendedBytesBeforeTheSignatureComesOff() throws {
