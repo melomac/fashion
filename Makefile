@@ -82,6 +82,7 @@ brew: xcode
 # ----------------------------------------------------------------------------
 
 FUZZ_SECONDS ?= 900
+FUZZ_HARNESSES ?=
 
 .PHONY: fuzz
 fuzz:
@@ -93,7 +94,7 @@ fuzz-seed:
 
 .PHONY: fuzz-run
 fuzz-run: fuzz
-	Fuzz/fuzz.sh run $(FUZZ_SECONDS)
+	Fuzz/fuzz.sh run $(FUZZ_SECONDS) $(FUZZ_HARNESSES)
 
 # ----------------------------------------------------------------------------
 # Housekeeping

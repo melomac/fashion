@@ -5,8 +5,8 @@
 #
 #   Fuzz/fuzz.sh build            build .build/fuzz/bin/fuzz-* from Sources/, Bridges/ and the harnesses here
 #   Fuzz/fuzz.sh seed             seed .build/fuzz/corpus/* from the test fixtures, /bin/ls and a XAR
-#   Fuzz/fuzz.sh run [seconds]    run every harness for that long (900 by default), FUZZ_JOBS workers each (2)
-#   Fuzz/fuzz.sh summary          what the last run did: runs, executions per second, coverage, artifacts
+#   Fuzz/fuzz.sh run [seconds] [harness...]   run the harnesses named, all by default, for that long (900), FUZZ_JOBS workers each (2)
+#   Fuzz/fuzz.sh summary [harness...]         what the last run did: runs, executions per second, coverage, artifacts
 #
 set -eo pipefail
 
@@ -17,6 +17,7 @@ bin=$build/bin
 corpus=$build/corpus
 artifacts=$build/artifacts
 logs=$build/logs
+# Workers per binary: every binary run gets this many, so their product should stay near the cores (run warns past it).
 jobs=${FUZZ_JOBS:-2}
 
 # The harnesses: each is Fuzz/<name>.swift, with an LLVMFuzzerTestOneInput, and fuzzes corpus/<name>.
@@ -30,10 +31,10 @@ endings() {
     esac
 }
 
-# The binaries `build` makes: one per harness and ending.
+# The binaries `build` makes, one per harness and ending: every harness's, or those named.
 binaries() {
     local harness ending
-    for harness in $harnesses; do
+    for harness in ${*:-$harnesses}; do
         for ending in $(endings "$harness"); do
             if [ "$ending" = segments ]; then
                 echo "fuzz-$harness-segments"
@@ -50,6 +51,16 @@ max_len() {
         macho | cdhash | symhash | unpack) echo 262144 ;;
         diff) echo 512 ;;
         *) echo 65536 ;;
+    esac
+}
+
+# The largest single allocation a harness may make before libFuzzer calls it a finding. A pack info may claim an image
+# of up to the 768 MiB UPX allows (PackMach.maxSize), which unpack() allocates before it decodes a block and fashion
+# then rejects in milliseconds, the buffer never touched: under that ceiling the claim is the limit at work, not a bug.
+malloc_limit() {
+    case $1 in
+        unpack) echo 1024 ;;
+        *) echo 512 ;;
     esac
 }
 
@@ -227,12 +238,27 @@ seed() {
 }
 
 run() {
-    local seconds=${1:-900} name harness dict
+    local seconds=${1:-900} name harness dict count
+    shift || true
+    for harness in "$@"; do
+        case " $harnesses " in
+            *" $harness "*) ;;
+            *)
+                echo "no harness named $harness; there are: $harnesses" >&2
+                exit 2
+                ;;
+        esac
+    done
     if [ ! -d "$corpus" ]; then
         seed
     fi
-    echo "Running every harness for $seconds seconds with $jobs workers each..."
-    for name in $(binaries); do
+    # libFuzzer's -timeout counts wall time: oversubscribed, a slow unit passes for a hung one.
+    count=$(binaries "$@" | wc -l | tr -d ' ')
+    if [ $((jobs * count)) -gt "$(sysctl -n hw.ncpu)" ]; then
+        echo "warning: $jobs workers on each of $count binaries, $((jobs * count)) on $(sysctl -n hw.ncpu) cores; set FUZZ_JOBS lower, or name fewer harnesses" >&2
+    fi
+    echo "Running ${*:-every harness} for $seconds seconds with $jobs workers each..."
+    for name in $(binaries "$@"); do
         harness=${name#fuzz-}
         harness=${harness%-segments}
         dict=()
@@ -242,19 +268,19 @@ run() {
         rm -rf "${logs:?}/${name:?}"
         mkdir -p "$artifacts/$name" "$logs/$name"
         (cd "$logs/$name" && "$bin/$name" -jobs="$jobs" -workers="$jobs" -max_total_time="$seconds" -timeout=10 \
-            -rss_limit_mb=2048 -malloc_limit_mb=512 -use_value_profile=1 -print_final_stats=1 \
+            -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" -use_value_profile=1 -print_final_stats=1 \
             -max_len="$(max_len "$harness")" ${dict[@]+"${dict[@]}"} -artifact_prefix="$artifacts/$name/" \
             "$corpus/$harness" > "$name.log" 2>&1) &
     done
     wait
-    summary
+    summary "$@"
 }
 
 # Each worker's log (fuzz-<n>.log, next to the parent's) ends with its final stats: the runs and executions per second
 # are summed over the workers, the coverage is the most edges any of them reached.
 summary() {
     local name runs rate cov found
-    for name in $(binaries); do
+    for name in $(binaries "$@"); do
         [ -d "$logs/$name" ] || continue
         runs=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::number_of_executed_units/ { sum += $2 } END { print sum + 0 }')
         rate=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::average_exec_per_sec/ { sum += $2 } END { print sum + 0 }')
