@@ -5,9 +5,13 @@ import XCTest
  The options of the hash subcommand: what they refuse, and how targets are typed.
  */
 final class HasherTests: XCTestCase {
+    /**
+     --score -1 reads `-1` as an option; joined with "=", the value reaches validation.
+     */
     func testNegativeScoreIsRefused() {
-        // `--score -1` reads `-1` as an option; joined with "=", the value reaches validation.
         XCTAssertEqual(usageError(["--score=-1"]), "--score must be zero or greater.")
+        XCTAssertEqual(usageError(["x", "--negate"]), "--negate requires --match.")
+        XCTAssertNil(usageError(["x", "-n", "-m", "d41d8cd98f00b204e9800998ecf8427e"]))
     }
 
     func testUnsignDoesNotApplyToSymbolsOrXarToc() {

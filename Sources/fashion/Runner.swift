@@ -876,6 +876,8 @@ struct Digester {
     let mode: Mode
     let targets: Targets
     let score: Int
+    /// Whether match mode prints the files that match no target instead.
+    let negate: Bool
     let quiet: Bool
     let exact: Bool
     /// Whether a Mach-O is hashed without its code signatures, and what UPX packed unpacked, as `MachOEditor` edits it.
@@ -889,13 +891,14 @@ struct Digester {
         // The algorithms the targets name or, without any, --algo's or the mode's default.
         self.algorithms = self.targets.algorithms.isEmpty ? [command.resolvedAlgorithm] : self.targets.algorithms
         self.score = command.resolvedScore
+        self.negate = command.matchOptions.negate
         self.quiet = command.quiet
         self.exact = command.exact
         self.unsign = command.unsign
         self.unpack = command.unpack
         self.xlen = command.matchOptions.xlen
 
-        // `--algo cdhash` is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
+        // --algo cdhash is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
         let hashes = self.algorithms.compactMap(ByteHash.init)
         guard !hashes.isEmpty else {
             self.mode = .cdhash
@@ -917,8 +920,10 @@ struct Digester {
     /**
      The lines to print for one file: every digest or, in match mode, every matching one. A quiet match names the file
      once, and so does a symhash search, which reports files rather than slices (the slices of one binary usually share
-     a symhash). A match is green, a fuzzy one by its distance. The file's diagnostics come first: a file that cannot
-     be hashed is reported, in red when it is malformed, and prints nothing else.
+     a symhash). A match is green, a fuzzy one by its distance. Negated, match mode prints a file no digest of which
+     matched as plain hash mode prints it, the path alone when quiet, and nothing for one that matched. The file's
+     diagnostics come first: a file that cannot be hashed is reported, in red when it is malformed, and prints nothing
+     else.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
         var diagnostics: [Line] = []
@@ -933,6 +938,13 @@ struct Digester {
         if self.targets.isEmpty {
             lines = results.map { result in
                 Line(text: self.quiet ? result.digest : OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: result.algorithm), tint: result.tint)
+            }
+        } else if self.negate {
+            let matched = results.contains { self.targets.match($0.digest, algorithm: $0.algorithm, threshold: self.score, xlen: self.xlen) != nil }
+            if !matched, !results.isEmpty {
+                lines = self.quiet ? [Line(text: OutputFormatter.formatPath(path))] : results.map { result in
+                    Line(text: OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: result.algorithm), tint: result.tint)
+                }
             }
         } else {
             for result in results {

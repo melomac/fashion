@@ -18,6 +18,7 @@ private enum HashOptionError: Error, Equatable {
     case targetOfNoShape(String)
     case targetNotOfAlgorithm(String, Algorithm)
     case xlenWithoutTLSHTarget
+    case negateWithoutMatch
 }
 
 extension HashOptionError: LocalizedError {
@@ -47,6 +48,8 @@ extension HashOptionError: LocalizedError {
             "--match '\(target)' is not shaped like \(algorithm.rawValue) digests."
         case .xlenWithoutTLSHTarget:
             "--xlen requires a TLSH digest to --match."
+        case .negateWithoutMatch:
+            "--negate requires --match."
         }
     }
 }
@@ -194,6 +197,9 @@ struct Hasher: ParsableCommand {
         if self.matchOptions.score < 0 {
             throw ValidationError(HashOptionError.negativeScore)
         }
+        if self.matchOptions.negate, self.matchOptions.match.isEmpty {
+            throw ValidationError(HashOptionError.negateWithoutMatch)
+        }
     }
 
     // MARK: - Run
@@ -212,7 +218,7 @@ extension Hasher {
     /**
      Scan the paths and return a process exit code:
      - `0` success,
-     - `1` match mode found nothing,
+     - `1` match mode printed nothing: no file matched, or with --negate every file did,
      - `2` one or more paths could not be enumerated or hashed.
 
      `trapSignals` logs the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
@@ -225,7 +231,7 @@ extension Hasher {
         logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
         if !digester.targets.isEmpty {
-            logger.info("Match mode with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
+            logger.info("Match mode\(self.matchOptions.negate ? ", negated," : "", privacy: .public) with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
         }
 
         let run = self.scan.run(trapSignals: trapSignals, activity: "hashing") { digester.lines(for: $0, reporter: $1) }
@@ -250,6 +256,9 @@ struct MatchOptions: ParsableArguments {
 
     @Flag(help: "Compare TLSH digests without the file length they record, like the tlsh tool's -xlen.")
     var xlen = false
+
+    @Flag(name: .shortAndLong, help: "Print only not matched files.")
+    var negate = false
 }
 
 struct SymbolOptions: ParsableArguments {

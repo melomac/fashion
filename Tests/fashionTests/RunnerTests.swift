@@ -236,6 +236,35 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try Hasher.parse([directory.path, "--quiet", "--match", digest(.md5, "none").replacingOccurrences(of: "0", with: "1"), "--match", XCTUnwrap(other), "--score", "0"]).scan(), 1)
     }
 
+    /**
+     --negate turns match mode around: a file no digest of which matched prints as hash mode prints it, every
+     algorithm the targets name, or its path alone with --quiet; one that matched, by any of its digests, prints
+     nothing. The run exits 0 when it printed, 1 when every file matched.
+     */
+    func testNegateNamesTheFilesThatMatchNone() throws {
+        let directory = FileManager.default.temporaryDirectory / "fashion-runner-negate-\(UUID())"
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let files = ["md5": Data("hello".utf8), "both": Data("hello world".utf8), "none": Data("nothing".utf8)]
+        for (name, data) in files {
+            try data.write(to: directory / name)
+        }
+        let digest = { (hash: ByteHash, name: String) in try XCTUnwrap(hash.digest(files[name]!)) }
+        let targets = try ["--match", digest(.md5, "md5"), "--match", digest(.sha256, "both")]
+        func lines(_ name: String, _ arguments: [String] = []) throws -> [String] {
+            try Digester(Hasher.parse([directory.path, "--negate"] + targets + arguments)).lines(for: (directory / name).path, reporter: Reporter(console: Console())).map(\.text)
+        }
+        XCTAssertEqual(try lines("md5"), [])
+        XCTAssertEqual(try lines("both"), [])
+        XCTAssertEqual(try lines("none"), try ["\(digest(.md5, "none"))  \((directory / "none").path)", "\(digest(.sha256, "none"))  \((directory / "none").path)"])
+        XCTAssertEqual(try lines("none", ["--quiet"]), [(directory / "none").path])
+        XCTAssertEqual(try lines("md5", ["--quiet"]), [])
+        XCTAssertEqual(try Hasher.parse([directory.path, "--quiet", "--negate"] + targets).scan(), 0)
+        XCTAssertEqual(try Hasher.parse([directory.path, "--quiet", "--negate"] + targets + ["--match", digest(.md5, "none")]).scan(), 1)
+    }
+
     func testExactMatchIsGreen() throws {
         // A digest searched for is full green when found, whatever the algorithm, an ad-hoc cdhash included, which is
         // dimmed otherwise. Without --match, lines keep their own tint.
