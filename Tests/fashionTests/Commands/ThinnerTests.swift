@@ -239,6 +239,36 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try Thinner.parse([fat.path]).scan(), 2)
     }
 
+    /**
+     A slice whose Mach-O does not parse, its sizeofcmds past the slice, is written as the fat table places it,
+     as lipo -thin writes it: the table alone decides the bytes. With --exact, which reads the slice as a Mach-O
+     to cut it, the file is reported red, and nothing is written.
+     */
+    func testMalformedSliceIsWrittenAsTheFatTablePlacesIt() throws {
+        let directory = try self.directory("malformed-slice")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        var (fat, _) = try self.fatX86(appended: Data())
+        let sizeofcmds = try 4096 + XCTUnwrap(MemoryLayout<mach_header>.offset(of: \.sizeofcmds))
+        fat.replaceSubrange(sizeofcmds ..< sizeofcmds + 4, with: [0xff, 0xff, 0xff, 0xff])
+        let file = directory / "fat"
+        try fat.write(to: file)
+        let artifact = directory / "fat_x86_64"
+
+        let reporter = Reporter(console: Console())
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: false, overwrite: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(reporter.errorCount, 0)
+        XCTAssertEqual(try Data(contentsOf: artifact), fat[4096...])
+        try FileManager.default.removeItem(at: artifact)
+
+        let lines = Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, overwrite: false, reporter: reporter)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertEqual(lines.first?.tint, .malformed)
+        XCTAssertEqual(reporter.errorCount, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["fat"])
+    }
+
     /// The x86_64 slice of `/bin/ls`; skips when the OS's `ls` has no such slice.
     private func lsX86() throws -> Data {
         let data = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))

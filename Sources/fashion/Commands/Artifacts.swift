@@ -112,7 +112,7 @@ struct ArtifactWriter {
         /// The cut alone, as a state of an image the editor left alone, when it shortens the image.
         func cut(_ image: MachO) -> MachOEditor.State? {
             let end = image.logicalEnd()
-            guard exact, end < image.length else {
+            guard end < image.length else {
                 return nil
             }
             return MachOEditor.State(edits: .exact, pieces: [.range(image.offset ..< image.offset + end)])
@@ -122,7 +122,8 @@ struct ArtifactWriter {
         case let .fat(archs):
             return try archs.enumerated().flatMap { index, arch -> [(suffix: String, bytes: File)] in
                 var chain = states?[index] ?? []
-                if chain.isEmpty, let image = try MachO(file, offset: arch.offset, length: arch.length), let cut = cut(image) {
+                // The fat table alone decides a slice's bytes, as for lipo -thin: it is read as a Mach-O only to cut it.
+                if chain.isEmpty, exact, let image = try MachO(file, offset: arch.offset, length: arch.length), let cut = cut(image) {
                     chain = [cut]
                 }
                 let whole = (suffix: "_\(arch.name)", bytes: File(editing: file, pieces: [.range(arch.offset ..< arch.offset + arch.length)]))
@@ -130,7 +131,7 @@ struct ArtifactWriter {
             }
         case let .thin(image):
             var chain = states?[0] ?? []
-            if chain.isEmpty, let cut = cut(image) {
+            if chain.isEmpty, exact, let cut = cut(image) {
                 chain = [cut]
             }
             return chain.map { (Self.suffix($0.edits), File(editing: file, pieces: $0.pieces)) }
