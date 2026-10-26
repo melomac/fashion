@@ -1,5 +1,6 @@
 @testable import fashion
 import XCTest
+import zlib
 
 /**
  `--unpack`: a Mach-O UPX packed, given back as it was before packing, as `upx -d` gives it back, and where `upx -d`
@@ -101,6 +102,26 @@ final class PackMachTests: XCTestCase {
             total += uncompressed
         }
         return blocks
+    }
+
+    /// The Adler-32 of the blocks' packed bytes of `packed`, in order, as the packer sums them into `c_adler`.
+    private func cAdler(of packed: Data) throws -> UInt32 {
+        var sum: uLong = 1
+        for block in try self.blocks(of: packed) {
+            sum = packed[block.offset ..< block.offset + block.compressed].withUnsafeBytes { adler32(sum, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt(block.compressed)) }
+        }
+        return UInt32(sum)
+    }
+
+    /// `packed` with its pack header's `c_adler` summed over its blocks' packed bytes as they are, as the packer summed
+    /// them, and the header's own checksum with it.
+    private func resummed(_ packed: Data) throws -> Data {
+        var packed = packed
+        let header = try XCTUnwrap(packed.ranges(of: Data("UPX!".utf8)).last).lowerBound
+        let sum = try self.cAdler(of: packed)
+        packed.replaceSubrange(header + 12 ..< header + 16, with: withUnsafeBytes(of: sum.littleEndian) { Data($0) })
+        packed[header + 31] = UInt8(packed[header + 4 ..< header + 31].reduce(0) { $0 + Int($1) } % 251)
+        return packed
     }
 
     /// `stream`, an NRV2B stream read 32 bits at a time, decompressed into `count` bytes.
@@ -588,20 +609,33 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    /**
+     Test the UPX 3.91 XOR behind OSX/Keydnap's backdoor.
+
+     ```text
+     8d2bd504125d815339af52558a38f804048a56a213424378af83fd3c0d4c131c  icloudsyncd
+     ```
+
+     Use "ASS7" for its marker and XORed each filtered block with 0x01 before it is unfiltered, in its stub and during
+     `upx -d`. Marc-Étienne Léveillé shared the [patch](https://github.com/eset/malware-research/blob/master/keydnap/keydnap_upx.patch)
+     to decompress the backdoor.
+
+     Stock `upx -d`, the marker restored, unfilters the blocks as they are and writes a wrong image, with nothing
+     said, as it checks no Mach-O against the pack header's checksum of the original.
+
+     A test sample, "ESE7" for marker and 0xe7 for XOR key, is made from what UPX packed with NRV2B by XORing the
+     literals of each filtered block: `unpack` finds the key by the checksum, warns with the marker and the key, and
+     gives the original back.
+
+     With the key alone, the marker left as "UPX!", the warning names the key alone, and stock `upx -d`, which takes the
+     file for its own, writes a wrong image of it without a word.
+     */
     func testUnpackSeesThroughTheXORAModifiedUPXAddsBeforeUnfiltering() throws {
-        // The UPX 3.91 behind OSX/Keydnap's backdoor, icloudsyncd, 8d2bd504125d815339af52558a38f804048a56a213424378af83fd3c0d4c131c,
-        // wrote "ASS7" for its marker and XORed each filtered block with 0x01 before it is unfiltered, in its stub and in
-        // its upx -d alike: Marc-Étienne Léveillé (ESET) published the patch,
-        // https://github.com/eset/malware-research/blob/master/keydnap/keydnap_upx.patch.
-        // Stock upx -d, the marker restored, unfilters the blocks as they are and writes a wrong image, with nothing
-        // said, as it checks no Mach-O against the pack header's checksum of the original. A sample of our own, "ESE7"
-        // for its marker and 0xe7 for its key, is made from what UPX packed with NRV2B by XORing the literals of each
-        // filtered block: --unpack finds the key by the checksum, warns with the marker and the key, and gives the
-        // original back; the key alone, the marker left, is warned about alone, and upx -d writes a wrong image for it.
         let directory = try self.directory("xor")
         let key: UInt8 = 0xe7
         for (name, unsigned, original) in try self.unsignedLs(in: directory) {
             var packed = try Data(contentsOf: self.packed(unsigned, ["--nrv2b"]))
+            XCTAssertEqual(try self.resummed(packed), packed, "\(name): c_adler is the packer's sum of the blocks' packed bytes in order")
             var filtered = 0
             for block in try self.blocks(of: packed) where block.compressed < block.uncompressed && block.filter != 0 {
                 XCTAssertEqual(block.method, 2, "\(name): NRV2B, 32 bits at a time")
@@ -612,6 +646,8 @@ final class PackMachTests: XCTestCase {
                 filtered += 1
             }
             XCTAssertGreaterThan(filtered, 0, name)
+            // The literals changed, c_adler is set as the packer would have set it over them.
+            packed = try self.resummed(packed)
             let xor = "its filtered blocks XORed with 0xe7 before they are unfiltered"
             for (suffix, marker, modified) in [("_xor", "UPX!", "packed by a modified UPX, \(xor)"), ("_xor_swapped", "ESE7", "packed by a modified UPX, its marker \"ESE7\" in place of \"UPX!\" and \(xor)")] {
                 let file = directory / "\(name)\(suffix)"
@@ -634,6 +670,40 @@ final class PackMachTests: XCTestCase {
                 } else {
                     XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", upxd, file.path]), name)
                 }
+            }
+        }
+    }
+
+    /**
+     The pack header's `c_adler`, the packer's sum of the packed bytes, is checked before the image is: a literal of
+     an NRV2B block changed decompresses all the same, to another image, and is refused for it in red, in UPX's
+     words with both sums, before any key is tried; a `c_adler` that is not the packer's, as much.
+     */
+    func testPackedBytesThatFailTheirChecksumAreRefused() throws {
+        let directory = try self.directory("c-adler")
+        for (name, unsigned, _) in try self.unsignedLs(in: directory) {
+            let packed = try Data(contentsOf: self.packed(unsigned, ["--nrv2b"]))
+            let block = try XCTUnwrap(self.blocks(of: packed).first { $0.compressed < $0.uncompressed && $0.filter != 0 })
+            var damaged = packed
+            damaged.replaceSubrange(block.offset ..< block.offset + block.compressed, with: Self.xoringLiterals(of: packed[block.offset ..< block.offset + block.compressed], with: 0x01))
+            var header = packed
+            let at = try XCTUnwrap(packed.ranges(of: Data("UPX!".utf8)).last).lowerBound
+            header[at + 12] ^= 0xff
+            header[at + 31] = UInt8(header[at + 4 ..< at + 31].reduce(0) { $0 + Int($1) } % 251)
+            for (suffix, data) in [("_damaged", damaged), ("_header", header)] {
+                let file = directory / "\(name)\(suffix)"
+                try data.write(to: file)
+                saveFixture(path: file.path)
+                let (status, errors) = try runFashion(["--unpack", file.path])
+                XCTAssertEqual(status, 2, name)
+                let sum = try self.cAdler(of: data)
+                let said = data[at + 12 ..< at + 16].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
+                XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: checksum error: the packed bytes sum to \(String(format: "0x%x", sum)), the pack header says \(String(format: "0x%x", said))"], name)
+                let reporter = Reporter(console: Console())
+                let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+                XCTAssertEqual(lines.map(\.tint), [.malformed], name)
+                XCTAssertEqual(reporter.errorCount, 1, name)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
             }
         }
     }
