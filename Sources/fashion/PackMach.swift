@@ -59,7 +59,8 @@ struct PackMach {
 
     /// The most load commands UPX takes (`MAX_N_CMDS`).
     private static let maxCommands = 256
-    /// The largest file UPX packs, and so the largest it unpacks to (`UPX_RSIZE_MAX`): the image is made in memory.
+    /// The largest file UPX packs, and so the largest it unpacks to (`UPX_RSIZE_MAX`): the image is made in memory,
+    /// and an LZMA block costs its size again while it is decoded, liblzma's dictionary (`LZMABridge`).
     private static let maxSize = 768 << 20
 
     // MARK: - canUnpack
@@ -247,17 +248,22 @@ struct PackMach {
         guard first.compressed <= first.uncompressed else {
             throw UnpackError.cantUnpack("header corrupted")
         }
-        var headers = Data(count: first.uncompressed)
-        try headers.withUnsafeMutableBytes { try Self.decompress(self.read(at: blocks + 12, count: first.compressed), method: first.method, into: $0) }
-        let packedHeader = try self.image.dataAt(0, count: 16)
-        guard headers.prefix(16).elementsEqual(packedHeader.prefix(16)) else {
-            throw UnpackError.cantUnpack("file header corrupted")
+        // The block is decoded into a buffer of its own, up to the block size, which the commands copy their bytes out
+        // of, so that it goes before the image is made rather than stay beside it.
+        let commands: [Command]
+        do {
+            var headers = Data(count: first.uncompressed)
+            try headers.withUnsafeMutableBytes { try Self.decompress(self.read(at: blocks + 12, count: first.compressed), method: first.method, into: $0) }
+            let packedHeader = try self.image.dataAt(0, count: 16)
+            guard headers.prefix(16).elementsEqual(packedHeader.prefix(16)) else {
+                throw UnpackError.cantUnpack("file header corrupted")
+            }
+            let ncmds = Int(self.image.word(headers, at: 16))
+            guard 1 ... Self.maxCommands ~= ncmds else {
+                throw UnpackError.cantUnpack("bad Mach_header.ncmds = \(ncmds)")
+            }
+            commands = try self.commands(in: headers, from: headerSize, count: ncmds)
         }
-        let ncmds = Int(self.image.word(headers, at: 16))
-        guard 1 ... Self.maxCommands ~= ncmds else {
-            throw UnpackError.cantUnpack("bad Mach_header.ncmds = \(ncmds)")
-        }
-        let commands = try self.commands(in: headers, from: headerSize, count: ncmds)
         let segments = commands.compactMap(\.segment).sorted(by: Segment.precedes)
         // UPX writes a segment wherever its headers place it; it must lie in the image made here.
         guard segments.allSatisfy({ $0.filesize == 0 || ($0.fileoff <= fileSize && $0.filesize <= fileSize - $0.fileoff) }) else {
@@ -377,7 +383,8 @@ struct PackMach {
     }
 
     /**
-     The load commands of the decompressed headers, as `unpack` walks them: each must fit what is left of them.
+     The load commands of the decompressed headers, as `unpack` walks them, each a copy of its bytes: each must fit what
+     is left of them.
      */
     private func commands(in headers: Data, from start: Int, count: Int) throws -> [Command] {
         var commands: [Command] = []
@@ -394,7 +401,7 @@ struct PackMach {
             else {
                 throw UnpackError.cantUnpack("bad packed Mach load_command @0x\(String(offset, radix: 16))")
             }
-            let command = MachO.LoadCommand(cmd: cmd, data: headers.bytes(in: offset ..< offset + cmdsize))
+            let command = MachO.LoadCommand(cmd: cmd, data: headers.subdata(in: offset ..< offset + cmdsize))
             commands.append(Command(segment: Segment(command, in: self.image)))
             offset += cmdsize
         }

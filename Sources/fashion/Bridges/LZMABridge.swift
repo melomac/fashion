@@ -29,8 +29,9 @@ enum LZMABridge {
         options.lc = lc
         options.lp = lp
         options.pb = pb
-        // The dictionary is the window a match reaches back in: the block, no match reaching before its start, within
-        // what liblzma allocates.
+        // The dictionary is the window a match reaches back in: the block, no match reaching before its start, since
+        // UPX caps it at the block and writes no size for it. liblzma allocates it beside the output, the block's size
+        // again, and decodes into it before it copies each byte out, where UPX's decoder decodes into the output.
         options.dict_size = UInt32(clamping: min(max(destination.count, Int(LZMA_DICT_SIZE_MIN)), Int(LZMA_DICT_SIZE_MAX)))
         // liblzma 5.4 decodes a raw stream of known size without end marker as LZMA1EXT, and checks the encoder flushed
         // where the stream ends. Before it, LZMA1 stops where the output ends, reading up to a byte past the stream.
