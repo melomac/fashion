@@ -206,10 +206,12 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    /**
+     Signed after packing, the image no longer has the 16-byte `__LINKEDIT` UPX leaves, so upx -d gives up on it;
+     unpack looks past the signature. A signed image that UPX packed comes back signed, and without its signature
+     too with --unsign.
+     */
     func testUnpackSeesPastASignatureAddedAfterPacking() throws {
-        // Signed after packing, the image no longer has the 16-byte __LINKEDIT UPX leaves, so upx -d gives up on it;
-        // --unpack looks past the signature. A signed image that UPX packed comes back signed, and without its signature
-        // too with --unsign.
         let directory = try self.directory("signed")
         let (name, unsigned, data) = try XCTUnwrap(self.unsignedLs(in: directory).first)
         let file = try self.resigned(self.packed(unsigned))
@@ -237,6 +239,34 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(Unpacker.lines(for: packed.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
         XCTAssertEqual(Unsigner.lines(for: unpacked.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked.path + "_unsigned")), data)
+    }
+
+    /**
+     Bytes appended after a signature added after packing keep it in: unsign refuses the file, as codesign
+     does, and --unpack alone, which would look past the signature, finds no UPX behind it and leaves the file
+     as it is, with nothing said; --exact drops the bytes first, and the sample unpacks.
+     */
+    func testUnpackAloneLeavesASignatureAppendedBytesFollowIn() throws {
+        let directory = try self.directory("signed-padded")
+        let (name, unsigned, data) = try XCTUnwrap(self.unsignedLs(in: directory).first)
+        let signed = try self.resigned(self.packed(unsigned))
+        let file = directory / "ls_\(name)_padded"
+        let padded = try Data(contentsOf: signed) + Data(repeating: 0x4a, count: 8)
+        try padded.write(to: file)
+
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(padded))])
+        let (status, errors) = try runFashion(["--unpack", file.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [])
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack", "--exact"]), try [XCTUnwrap(ByteHash.sha256.digest(data))])
+        XCTAssertEqual(try runFashion(["--unpack", "--unsign", file.path]).errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"])
+
+        let reporter = Reporter(console: Console())
+        XCTAssertEqual(Unpacker.lines(for: file.path, exact: false, overwrite: false, reporter: reporter).count, 0)
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter).count, 0)
+        XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_exact_unsigned_unpacked"])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact_unsigned_unpacked")), data)
+        XCTAssertEqual(reporter.errorCount, 0)
     }
 
     func testUnpackRestoresAUniversalFile() throws {

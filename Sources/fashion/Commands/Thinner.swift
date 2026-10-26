@@ -42,21 +42,24 @@ struct Thinner: ParsableCommand {
  `codesign --arch` spells it, `ls_x86_64` and `ls_arm64e` for `ls`. The fat table alone decides the bytes, as it does
  for `lipo -thin`. A thin file, or one that is not Mach-O, has nothing to write.
 
- With `--exact`, each slice is read as a Mach-O and cut where its image ends (`MachO.logicalEnd()`), so bytes appended
- to it are dropped, as hash mode's `--exact` drops them; a thin Mach-O followed by appended bytes then becomes an
- artifact too, where one that ends where its image ends has nothing to write.
+ With --exact, each slice is read as a Mach-O and cut where its image ends (`MachO.logicalEnd()`), so bytes appended
+ to it are dropped, as hash mode's --exact drops them. A thin Mach-O with appended bytes gets an artifact then, the
+ cut; one that ends where its image ends has nothing to write.
 
- With `--unsign`, the file is read without its code signatures, and with `--unpack`, with what UPX packed unpacked, as
- `MachOEditor` edits it in memory, after the `--exact` cut, and every state a slice goes through is written: the slice
- as the fat table places it, then cut, then without its signature, which comes out before an image is unpacked
- anyway, then unpacked, then the unpacked image cut and without its own signature, as far as the flags take it. So a
- thin Mach-O they change becomes an artifact too, where `unsign` and `unpack` write the file as the edits leave it,
- whole. A signature that does not end its image, appended bytes after it say, is reported and nothing is written for
- the file: `--exact` cuts those bytes off first.
+ With --unsign, the file is read without its code signatures; with --unpack, with what UPX packed unpacked. Both are
+ edits `MachOEditor` makes in memory, after the --exact cut. Every state a slice goes through is written: the slice
+ as the fat table places it, then cut, then without its signature, then unpacked, then the unpacked image cut and
+ without its own signature, as far as the flags go. A signature added after packing comes out before the image is
+ unpacked, so --unpack alone writes that state too. A thin Mach-O the flags change gets its artifacts the same way,
+ where `unsign` and `unpack` write the file as the edits leave it, whole.
 
- `ArtifactWriter` names and writes them, split: `ls_x86_64`, `ls_x86_64_unsigned`, `ls_x86_64_unsigned_unpacked` after
- the architecture of a universal file's slice, or `sample_unsigned` after the name of a thin file, which needs no
- architecture.
+ A signature that appended bytes follow cannot come out as it is: under --unsign the file is reported and nothing is
+ written for it; under --unpack alone the signature stays, the image is looked at as it is, and no UPX is found
+ behind it. --exact cuts those bytes off first.
+
+ `ArtifactWriter` names and writes the artifacts, split: `ls_x86_64`, `ls_x86_64_unsigned`,
+ `ls_x86_64_unsigned_unpacked` after the architecture of a universal file's slice, or `sample_unsigned` after the
+ name of a thin file, which needs no architecture.
  */
 extension Thinner {
     /**

@@ -32,17 +32,23 @@ struct Unpacker: ParsableCommand {
 }
 
 /**
- The work on one file: write it beside itself with what UPX packed unpacked, as `upx -d` unpacks it, as `MachOEditor`
- edits it in memory and as hash mode's `--unpack` reads it, whole: a universal file keeps every architecture, laid out
- again as `lipo` lays them out, where `thin --unpack` writes each as a file of its own, and every state on the way,
- where this goes straight to the artifact. `sample` gives `sample_unpacked`, or `sample_unsigned_unpacked` when a
- signature added after packing had to come out first, as `thin --unpack` names a thin file's last artifact too, with
- the signature it had before packing, if any: `unsign` over the artifact takes it off, into
- `sample_unsigned_unpacked_unsigned`, as `thin --unpack --unsign` would. A file UPX did not pack, or that is not
- Mach-O, has nothing to write; packed data that does not hold is reported (red).
+ The work on one file: write it beside itself with what UPX packed unpacked, as `upx -d` unpacks it. `MachOEditor`
+ makes the edit in memory, and the artifact is what hash mode's --unpack reads. The file is written whole: a universal
+ file keeps every architecture, laid out again as `lipo` lays them out. `thin --unpack` writes each architecture as a
+ file of its own instead, and every state on the way; this goes straight to the last.
 
- With `--exact`, an image is cut where it ends (`MachO.logicalEnd()`), so bytes appended to it do not keep a signature
- added after packing in, as hash mode's `--exact` drops them.
+ `sample` gives `sample_unpacked`. A signature added after packing hides what UPX left, so it comes out first, and the
+ artifact is `sample_unsigned_unpacked`, as `thin --unpack` names its last artifact. The unpacked code keeps the
+ signature it had before packing, if any: `unsign` over the artifact takes it off, into
+ `sample_unsigned_unpacked_unsigned`, as `thin --unpack --unsign` would.
+
+ A file UPX did not pack, or that is not Mach-O, has nothing to write. Packed data that does not hold is reported, in
+ red.
+
+ With --exact, an image is cut where it ends (`MachO.logicalEnd()`) before anything else, as hash mode's --exact cuts
+ it, so bytes appended after a signature do not keep it in. Without --exact, such a signature cannot come out, hides
+ what UPX left, and the file is left as it is with nothing said, as hash mode's --unpack alone hashes it; --unsign
+ refuses it there.
  */
 extension Unpacker {
     /**
