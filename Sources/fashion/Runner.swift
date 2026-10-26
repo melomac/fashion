@@ -10,8 +10,9 @@ import System
    |
    v
  Hasher.run() -> scan()         built once per scan:
- Thinner.run() -> scan()          Digester    hash: per-file options, read once
-                                  Thinner     thin: a slice per architecture
+ Thinner.run() -> scan()          Digester        hash: per-file options, read once
+ Unsigner.run() -> scan()         ArtifactWriter  thin: every state of a slice, a file each
+ Unpacker.run() -> scan()                         unsign, unpack: the file as the edits leave it
                                   Console     owns stdout and stderr, and the status line
                                   Reporter    counts, diagnostics, unified log, end of run
                                   SignalTrap  INT/TERM/PIPE: log the end, die of the signal
@@ -28,7 +29,8 @@ import System
  | by fashion_fts_compare   |       +---------+       |     cdhash | slices | file     |
  | walk errors -> Reporter  |                         |   -> [DigestResult]            |
  +--------------------------+                         |   -> match / quiet -> lines    |
-                                                      |   thin: Thinner.lines, the     |
+                                                      |   thin, unsign, unpack:        |
+                                                      |   ArtifactWriter.lines, the    |
                                                       |   artifacts written -> lines   |
                                                       |   diagnostics: Reporter, lines |
                                                       | reporter.fileProcessed()       |

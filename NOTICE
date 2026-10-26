@@ -69,8 +69,9 @@ UPX
 https://github.com/upx/upx
 
 Sources/fashion/PackMach.swift translates UPX's Mach-O unpacker (p_mach.cpp, packhead.cpp, the filters and the
-decompression wrappers of UPX 5.2.1), licensed under the GNU General Public License version 2 or (at your option) any
-later version, used here under version 3, see LICENSE:
+decompression wrappers of UPX 5.2.1, and the arm64 filter 0x53 of its development branch, pull request 18934),
+licensed under the GNU General Public License version 2 or (at your option) any later version, used here under
+version 3, see LICENSE:
 
     Copyright (C) Markus Franz Xaver Johannes Oberhumer
     Copyright (C) Laszlo Molnar

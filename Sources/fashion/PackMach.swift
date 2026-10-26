@@ -17,11 +17,12 @@ extension UnpackError: LocalizedError {
 
 /**
  A Mach-O image UPX packed, named after UPX's `PackMachBase`, whose `canUnpack` and `unpack` it mirrors (`p_mach.cpp`,
- UPX 5.2.1): `init` finds the pack header UPX leaves before `__LINKEDIT`, and the offset of the packed data it records;
- `unpack()` decompresses the image UPX packed, block by block, as `upx -d` writes it.
+ UPX 5.2.1, and its development branch for the arm64 filter 0x53): `init` finds the pack header UPX leaves before
+ `__LINKEDIT`, and the offset of the packed data it records; `unpack()` decompresses the image UPX packed, block by
+ block, as `upx -d` writes it.
 
  Where UPX throws before it has found its pack header, for a header or load commands its packer would never write, the
- image is merely not packed: `--unpack` meets every Mach-O. UPX's recovery of a pack header pirates overwrote, which
+ image is merely not packed: `unpack` meets every Mach-O. UPX's recovery of a pack header pirates overwrote, which
  emulates the stub's entry code and scans for the packed data, is not ported: such an image is not packed either.
  A packer modified to write another marker than "UPX!" everywhere it goes, whose files `upx -d` calls not packed, is
  seen through: the pack header is found by its structure and checksum where UPX looks for it, and the `l_info` before
