@@ -2,16 +2,22 @@
 import XCTest
 
 /**
- liblzma's decoder as UPX's stream needs it: a stream after UPX's two bytes of properties decompresses to the text it
- was made from, consumed whole. Properties out of range, or whose first byte does not hold lc + lp, a stream cut short or
- followed by more, and another size, do not hold.
+ The LZMA SDK's decoder as UPX calls it: a stream after UPX's two bytes of properties decompresses to the text it was
+ made from, consumed whole. Properties out of range, or whose first byte does not hold lc + lp, a stream cut short or
+ followed by more, one short of its last byte, and another size, do not hold.
  */
 final class LZMABridgeTests: XCTestCase {
     private let text = Data("fashion unpacks what UPX packed, block by block; fashion unpacks what UPX packed, block by block.\n".utf8)
 
     /// The text compressed with lc 3, lp 0 and pb 2, after UPX's properties: (lc + lp) << 3 | pb, then lp << 4 | lc.
-    /// liblzma's LZMA1 encoder made the stream for a known size, flushed without the end marker, as UPX's encoder does.
-    private let stream = "1a030033184acd2c085daf94501343f98993f8408b93f1a389cba51e87d233b978c4de4005ad4f9b70132932c9125228c57ed1d9542c00"
+    /// xz's LZMA1 encoder made the stream, cut where the SDK's decoder stops, before the end marker UPX does not write.
+    private let stream = "1a030033184acd2c085daf94501343f98993f8408b93f1a389cba51e87d233b978c4de4005ad4f9b70132932c9125228c57ed1da63c43f"
+
+    /// A shorter text, whose stream, made by liblzma's LZMA1EXT encoder for the known size and flushed without the end
+    /// marker as UPX's encoder flushes, ends with the byte the encoder's last normalization left: it decodes no symbol,
+    /// and the decoder reads it anyway, as `upx -d` does, before it calls the stream whole.
+    private let shortText = Data("fashion unpacks what UPX packed, block by block.\n\n".utf8)
+    private let shortStream = "1a030033184acd2c085daf94501343f98993f8408b93f1a389cba51e87d233b978c4de4005ad4f9b70132932c8e898ce92140000"
 
     /// `stream` decompressed into `count` bytes: the bridge's verdict, and the bytes when it holds.
     private func decompress(_ stream: Data, count: Int) -> (Bool, Data) {
@@ -46,5 +52,13 @@ final class LZMABridgeTests: XCTestCase {
         XCTAssertFalse(self.decompress(stream + Data([0]), count: self.text.count).0, "followed by more")
         XCTAssertFalse(self.decompress(stream, count: self.text.count - 1).0, "into fewer bytes")
         XCTAssertFalse(self.decompress(stream, count: self.text.count + 1).0, "into more bytes")
+    }
+
+    func testStreamShortOfItsLastByteIsRefused() throws {
+        let stream = try XCTUnwrap(Data(hex: self.shortStream))
+        let (result, output) = self.decompress(stream, count: self.shortText.count)
+        XCTAssertTrue(result)
+        XCTAssertEqual(output, self.shortText)
+        XCTAssertFalse(self.decompress(stream.dropLast(1), count: self.shortText.count).0, "short of its last byte")
     }
 }

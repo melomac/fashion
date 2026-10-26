@@ -3,7 +3,7 @@ import Foundation
 
 /**
  `MachOEditor.edit` with `--unpack`: UPX's pack header looked for in each image and checked, the packed data decompressed
- by UCL or liblzma and unfiltered, a signature removed before and after or left on the unpacked image, and a universal
+ by UCL or the LZMA SDK and unfiltered, a signature removed before and after or left on the unpacked image, and a universal
  file laid out again, whole and `--exact`. The edit is then read as the scan reads it: streamed whole, walked as a
  Mach-O, its cdhashes and symhashes taken, each read crossing the pieces it is made of, in memory and on disk.
  */

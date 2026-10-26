@@ -60,8 +60,7 @@ struct PackMach {
 
     /// The most load commands UPX takes (`MAX_N_CMDS`).
     private static let maxCommands = 256
-    /// The largest file UPX packs, and so the largest it unpacks to (`UPX_RSIZE_MAX`): the image is made in memory,
-    /// and an LZMA block costs its size again while it is decoded, liblzma's dictionary (`LZMABridge`).
+    /// The largest file UPX packs, and so the largest it unpacks to (`UPX_RSIZE_MAX`): the image is made in memory.
     private static let maxSize = 768 << 20
 
     // MARK: - canUnpack
@@ -518,7 +517,7 @@ struct PackMach {
 
     /**
      `data` decompressed by UPX method `method` into `destination`, which it must fill: NRV2B, NRV2D and NRV2E by UCL
-     (`UCLBridge`), LZMA by liblzma (`LZMABridge`).
+     (`UCLBridge`), LZMA by the LZMA SDK (`LZMABridge`).
      */
     private static func decompress(_ data: Data, method: UInt8, into destination: UnsafeMutableRawBufferPointer) throws {
         let decompressed = data.withUnsafeBytes { source in

@@ -164,6 +164,26 @@ final class PackMachTests: XCTestCase {
         return end - header - 36
     }
 
+    /**
+     UPX's LZMA takes up to 8 literal context bits and 4 literal position bits, which its runtime options set
+     (--crp-lzma-lc, --crp-lzma-lp): a stream with more than 4 together decodes as upx -d decodes it, where
+     liblzma, which decoded LZMA for a while, refuses lc + lp past 4 and could not be told otherwise.
+     */
+    func testUnpackDecodesLZMAWithMoreLiteralBitsThanFour() throws {
+        let directory = try self.directory("literal-bits")
+        for (name, unsigned, original) in try self.unsignedLs(in: directory) {
+            let digest = try XCTUnwrap(ByteHash.sha256.digest(original))
+            for (lc, lp) in [(4, 1), (8, 4)] {
+                let folder = directory / "lc\(lc)lp\(lp)"
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let source = folder / unsigned.lastPathComponent
+                try FileManager.default.copyItem(at: unsigned, to: source)
+                let file = try self.packed(source, ["--lzma", "--crp-lzma-lc=\(lc)", "--crp-lzma-lp=\(lp)"])
+                XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), [digest], "\(name), lc \(lc), lp \(lp)")
+            }
+        }
+    }
+
     func testUnpackUndoesTheArm64ConditionalBranchFilter() throws {
         // Filter 0x53, which UPX added after 5.2.1 for arm64 and packs with when asked, takes the conditional branches
         // too. An older upx packs with 0x52 when asked for it, and the test is skipped.

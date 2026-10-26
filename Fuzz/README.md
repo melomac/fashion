@@ -12,7 +12,7 @@ here feed libFuzzer's inputs through those parsers under AddressSanitizer, one e
 | `symhash`  | `SymHash.compute`: the symbol and string tables, the names windowed out of them, sorted and in table order |
 | `diff`     | the digests `--match` is given: their shape, which names their algorithm, their typing into `Targets`, `TLSHBridge.diff` and `SSDeepBridge.compare` |
 | `bytehash` | ssdeep's, TLSH's and git's hashers over the bytes, streamed from a file and whole in memory              |
-| `unpack`   | `MachOEditor.edit`: UPX's pack header, with its marker and without, UCL's decoders and liblzma, the unfilters, signature removal, the universal rebuild; then the edit read as the scan reads it, walked, cdhashed and symhashed across its pieces |
+| `unpack`   | `MachOEditor.edit`: UPX's pack header, with its marker and without, UCL's and LZMA's decoders, the unfilters, signature removal, the universal rebuild; then the edit read as the scan reads it, walked, cdhashed and symhashed across its pieces |
 
 An input reaches a parser as a `File`, the way a test fixture does: written over one scratch file per process and
 opened from there (`support.swift`). `macho`, `cdhash` and `unpack` are built with both `--exact` endings (see
@@ -57,8 +57,7 @@ A crash, an input that takes more than 10 seconds (`timeout-`), one that pushes 
 The harness is built outside SwiftPM: an executable target cannot depend on the `fashion` executable target, so
 `fuzz.sh build` compiles `Sources/fashion` the way SwiftPM compiles it for the tests (testable, its entry point renamed
 to `fashion_main`), ArgumentParser from the checkout SwiftPM resolves, the C targets with the module maps SwiftPM would
-write, and links each harness against them. LZMA is decoded by the liblzma macOS ships, declared by `Bridges/CLZMA`'s
-own module map: linked, neither instrumented nor sanitized, so the fuzzer drives it but sees no coverage inside it.
+write, and links each harness against them.
 
 Xcode's toolchain ships AddressSanitizer's runtime but not libFuzzer's, and `swiftc` refuses `-sanitize=fuzzer` for
 want of it, so the flag goes straight to the frontend (`-Xfrontend -sanitize=fuzzer,address`) and the archive,
