@@ -45,10 +45,11 @@ struct Unpacker: ParsableCommand {
  A file UPX did not pack, or that is not Mach-O, has nothing to write, unless --exact cuts bytes appended to it: the
  cut alone is written then, as `_exact`. Packed data that does not hold is reported, in red.
 
- With --exact, an image is cut where it ends (`MachO.logicalEnd()`) before anything else, as hash mode's --exact cuts
- it, so bytes appended after a signature do not keep it in. Without --exact, such a signature cannot come out, hides
- what UPX left, and the file is left as it is with nothing said, as hash mode's --unpack alone hashes it; --unsign
- refuses it there.
+ With --exact, an image UPX packed is cut where it ends (`MachO.logicalEnd()`) before anything else, as hash mode's
+ --exact cuts it, so bytes appended after a signature do not keep it in. An image of a universal file the flags leave
+ alone keeps its appended bytes, since hash mode reads the file whole. Without --exact, such a signature cannot come
+ out, hides what UPX left, and the file is left as it is with nothing said, as hash mode's --unpack alone hashes it;
+ --unsign refuses it there.
  */
 extension Unpacker {
     /**

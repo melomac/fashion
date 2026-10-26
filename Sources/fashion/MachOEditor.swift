@@ -62,7 +62,8 @@ enum MachOEditor {
      `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing, since it
      hides what UPX left, then with `unsign` the unpacked image's own signature comes out; a universal file with its
      architectures so is laid out again as `lipo` lays out the architectures it is given. With `exact`, an image is cut
-     where it ends before its signature comes out, so appended bytes do not keep it in, the unpacked image too. Throws
+     where it ends before its signature comes out, so appended bytes do not keep it in, the unpacked image too; one the
+     edits leave alone is left as it is, appended bytes included, since the cut alone is no edit. Throws
      for a Mach-O that does not parse, with `unsign` for a signature that does not end its image, which `unpack` alone
      leaves in, the image looked at as it is, and for packed data that does not hold.
      `caveat` hears what an edit has to say about an image, named after its architecture in a universal file: that a

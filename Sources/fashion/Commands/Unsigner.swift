@@ -41,9 +41,11 @@ struct Unsigner: ParsableCommand {
  A file with no signature to remove, or that is not Mach-O, has nothing to write, unless --exact cuts bytes appended
  to it: the cut alone is written then, as `_exact`.
 
- With --exact, each image is cut where it ends (`MachO.logicalEnd()`) before its signature comes off, as hash mode's
+ With --exact, an image whose signature comes off is cut where it ends (`MachO.logicalEnd()`) first, as hash mode's
  --exact cuts it, so bytes appended after the signature do not keep it in; the artifact is named `_exact` for the cut
- too. Without --exact, a signature that does not end its image is reported, and nothing is written for the file.
+ too. An image of a universal file the flags leave alone keeps its appended bytes, laid out as the fat table places
+ it, since hash mode reads the file whole; `thin --exact` cuts each. Without --exact, a signature that does not end
+ its image is reported, and nothing is written for the file.
  */
 extension Unsigner {
     /**

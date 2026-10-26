@@ -107,6 +107,47 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
+    /**
+     A universal file whose `x86_64` image is signed and whose `arm64` image is unsigned with 8 bytes appended:
+     --exact cuts the image a signature comes off, not the one the flags leave alone, which is laid out again as
+     the fat table places it, appended bytes included, as hash mode reads the file whole; thin --exact writes
+     that image cut, and its line under --slices is the cut's, so the whole artifact is not what `lipo` makes of
+     thin's exact slices.
+     */
+    func testExactLeavesAnArchitectureTheFlagsLeaveAloneAsTheFatTablePlacesIt() throws {
+        let directory = try self.directory("exact-untouched")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let x86 = try compile("x86", in: directory, ["-arch", "x86_64"])
+        let arm = try compile("arm", in: directory, ["-arch", "arm64"])
+        let signed = directory / "x86_signed"
+        try FileManager.default.copyItem(at: x86, to: signed)
+        _ = try codesign(["-s", "-", signed.path])
+        let armData = try Data(contentsOf: arm)
+        let padded = directory / "arm_padded"
+        try (armData + Data(repeating: 0x4a, count: 8)).write(to: padded)
+        let fat = directory / "fat"
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", signed.path, padded.path, "-output", fat.path]), "cannot run lipo")
+
+        let reporter = Reporter(console: Console())
+        let artifact = directory / "fat_unsigned"
+        XCTAssertEqual(Unsigner.lines(for: fat.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [artifact.path])
+        let written = try Data(contentsOf: artifact)
+        XCTAssertEqual(try self.hashLines(fat.path, ["--exact", "--unsign"]), try [XCTUnwrap(ByteHash.sha256.digest(written))])
+        guard case let .fat(archs) = try Universal.open(data: written), archs.count == 2 else {
+            return XCTFail("the artifact is not universal")
+        }
+        XCTAssertEqual(Universal.sliceData(fileData: written, arch: archs[0]), try Data(contentsOf: x86))
+        XCTAssertEqual(Universal.sliceData(fileData: written, arch: archs[1]), armData + Data(repeating: 0x4a, count: 8))
+
+        let lines = Thinner.lines(for: fat.path, exact: true, unsign: true, unpack: false, overwrite: false, reporter: reporter).map(\.text)
+        XCTAssertEqual(Set(lines), Set(["fat_x86_64", "fat_x86_64_unsigned", "fat_arm64", "fat_arm64_exact"].map { (directory / $0).path }))
+        XCTAssertEqual(try Data(contentsOf: directory / "fat_arm64_exact"), armData)
+        XCTAssertEqual(try self.hashLines(fat.path, ["--exact", "--unsign", "--slices"]).last, try XCTUnwrap(ByteHash.sha256.digest(armData)))
+        XCTAssertEqual(reporter.errorCount, 0)
+    }
+
     func testExactCutsAppendedBytesBeforeTheSignatureComesOff() throws {
         // Eight bytes after the signature would be cut off with it: reported and nothing written, as codesign fails
         // too, unless --exact cuts them off first, which names the artifact for it.
