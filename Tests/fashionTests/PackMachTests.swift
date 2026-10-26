@@ -112,6 +112,58 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    /**
+     UPX pads `__TEXT` to its page after the pack header and the overlay offset, from no zero byte to a page less
+     one, and reads them back from `__LINKEDIT` in a window that spans the page and the header's object in memory;
+     the window read here spanned the page and the header's 36 bytes, and gave up on a header that a page less
+     3 bytes of zeros followed, as UPX gives up at its own window's start, 176 bytes earlier. Bytes appended to
+     the image are packed as its last gap: the first opens the gap's block, 16 bytes at once, and each after it
+     moves the padding by one, in steps of 4 as UPX aligns what it writes, so the count that pads to a page less
+     one is read off the padding one byte leaves, the counts around it cover a step either way, and every one
+     must unpack to the image and its appended bytes.
+     */
+    func testUnpackFindsThePackHeaderBehindAPageOfPadding() throws {
+        let directory = try self.directory("page-padding")
+        for (name, unsigned, original) in try self.unsignedLs(in: directory) {
+            let page = try XCTUnwrap(MachO(File(path: unsigned.path))).segmentAlignment
+            var state: UInt64 = 1
+            let bytes = Data((0 ..< page + 32).map { _ in
+                state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                return UInt8(truncatingIfNeeded: state >> 33)
+            })
+            func packed(_ count: Int) throws -> (file: URL, digest: String) {
+                let source = directory / "\(name)_\(count)"
+                let data = original + bytes.prefix(count)
+                try data.write(to: source)
+                return try (self.packed(source), XCTUnwrap(ByteHash.sha256.digest(data)))
+            }
+            let one = try self.padding(of: packed(1).file)
+            let landing = (one + 2) % page
+            var paddings: [Int] = []
+            for count in max(1, landing - 8) ... landing + 16 {
+                let (file, digest) = try packed(count)
+                let padding = try self.padding(of: file)
+                paddings.append(padding)
+                XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), [digest], "\(name), \(count) bytes appended, \(padding) of padding")
+                if page - 3 ... page - 1 ~= padding {
+                    break
+                }
+            }
+            XCTAssertTrue(paddings.contains { page - 3 ... page - 1 ~= $0 }, "\(name): no packing padded within 3 bytes of the page: \(paddings)")
+        }
+    }
+
+    /// The zero bytes UPX wrote after the pack header and the overlay offset of `file`, up to `__LINKEDIT`.
+    private func padding(of file: URL) throws -> Int {
+        let data = try Data(contentsOf: file)
+        let header = try XCTUnwrap(data.ranges(of: Data("UPX!".utf8)).last).lowerBound
+        let image = try XCTUnwrap(MachO(File(path: file.path)))
+        let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT")).load(segment_command_64.self)
+        let end = Int(image.sw(linkedit.fileoff))
+        XCTAssertTrue(data[header + 36 ..< end].allSatisfy { $0 == 0 }, "bytes other than zero between the pack header and __LINKEDIT")
+        return end - header - 36
+    }
+
     func testUnpackUndoesTheArm64ConditionalBranchFilter() throws {
         // Filter 0x53, which UPX added after 5.2.1 for arm64 and packs with when asked, takes the conditional branches
         // too. An older upx packs with 0x52 when asked for it, and the test is skipped.

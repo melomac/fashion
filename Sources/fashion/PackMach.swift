@@ -135,10 +135,15 @@ struct PackMach {
             return nil
         }
 
-        // A page and the pack header after it, then the overlay offset, read back from where UPX left them; UPX reads
-        // before the file's start for a __TEXT shorter than that, and gives up, where the window starts there instead.
+        // A page and the pack header after it, then the overlay offset, read back from where UPX left them, in the
+        // window UPX reads: the page, `sizeof(PackHeader)`, the 208 bytes of the object it decodes the header into
+        // rather than the 32 it wrote, and the offset's 4. The scan below steps back from the last byte that is not
+        // zero, the offset's, over the header's 32 bytes and the offset's 4, and gives up at the window's first byte,
+        // as UPX does at its own, 176 bytes earlier: a window a page and 36 bytes long gave up on a header that a page
+        // less 3 bytes of zeros followed, which `upx -d` unpacks. UPX reads before the file's start for a __TEXT
+        // shorter than that, and gives up, where the window starts there instead.
         let small = 32 + 4
-        var count = (1 << format.pageShift) + small
+        var count = (1 << format.pageShift) + 208 + 4
         var start: Int
         if style == 392 {
             if image.filetype == MH_DYLIB {
