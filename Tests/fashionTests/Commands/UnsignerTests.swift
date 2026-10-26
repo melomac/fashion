@@ -37,7 +37,8 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(try self.hashLines(ls.path, ["--unsign"]), try [ByteHash.sha256.digest(unsigned)])
         XCTAssertEqual(try self.hashLines(artifact.path, ["--unsign"]), try [ByteHash.sha256.digest(unsigned)])
 
-        let slices = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, overwrite: false, reporter: reporter).map(\.text)
+        // thin leaves the signed slices beside the unsigned ones: lipo gets the unsigned ones.
+        let slices = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, overwrite: false, reporter: reporter).map(\.text).filter { $0.hasSuffix("_unsigned") }
         XCTAssertGreaterThan(slices.count, 1)
         let lipo = directory / "lipo"
         try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create"] + slices + ["-output", lipo.path]), "cannot run lipo")

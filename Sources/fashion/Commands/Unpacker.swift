@@ -34,10 +34,12 @@ struct Unpacker: ParsableCommand {
 /**
  The work on one file: write it beside itself with what UPX packed unpacked, as `upx -d` unpacks it, as `MachOEditor`
  edits it in memory and as hash mode's `--unpack` reads it, whole: a universal file keeps every architecture, laid out
- again as `lipo` lays them out, where `thin --unpack` writes each as a file of its own. `sample` gives
- `sample_unpacked`, as `thin --unpack` names a thin file too, with the signature it had before packing, if any: `unsign`
- over the artifact takes it off, into `sample_unpacked_unsigned`, as `thin --unpack --unsign` would. A file UPX did
- not pack, or that is not Mach-O, has nothing to write; packed data that does not hold is reported (red).
+ again as `lipo` lays them out, where `thin --unpack` writes each as a file of its own, and every state on the way,
+ where this goes straight to the artifact. `sample` gives `sample_unpacked`, or `sample_unsigned_unpacked` when a
+ signature added after packing had to come out first, as `thin --unpack` names a thin file's last artifact too, with
+ the signature it had before packing, if any: `unsign` over the artifact takes it off, into
+ `sample_unsigned_unpacked_unsigned`, as `thin --unpack --unsign` would. A file UPX did not pack, or that is not
+ Mach-O, has nothing to write; packed data that does not hold is reported (red).
 
  With `--exact`, an image is cut where it ends (`MachO.logicalEnd()`), so bytes appended to it do not keep a signature
  added after packing in, as hash mode's `--exact` drops them.

@@ -23,11 +23,17 @@ extension ArtifactError: LocalizedError {
  `unpack`, cut where its image ends with `exact`, as hash mode reads it under the same flags, then `split` into one
  file per architecture of a universal file, as `thin` writes them, or written whole, as `unsign` and `unpack` do.
 
- An artifact is named after the file for what was done to it, in the order it was done: `_unpacked`, `_exact`, then
- `_unsigned`, after the architecture of a slice `split` out, `ls_x86_64_unsigned`, or after the name of the file
- itself, `sample_unsigned` or `ls_unsigned`. A slice nothing was done to keeps its name, `ls_x86_64`, and a file
- nothing was done to yields no artifact, since it would be the file. A later run with other flags over an artifact
- names what it makes as one run with them all would: `ls_x86_64` unsigned is `ls_x86_64_unsigned` either way.
+ Split, every state an image goes through is an artifact: a universal file's slice as the fat table places it, then
+ cut, then without its signature, then unpacked, then the unpacked image cut and without its own signature, as far as
+ the flags take it; so `thin` leaves the way behind it, `ls_x86_64`, `ls_x86_64_unsigned`,
+ `ls_x86_64_unsigned_unpacked`, where `unsign` and `unpack` write the file as the edits leave it, whole.
+
+ An artifact is named after the file for what was done to it, in the order it was done: `_exact`, `_unsigned`, then
+ `_unpacked`, and the unpacked image's own `_exact` and `_unsigned`, after the architecture of a slice `split` out,
+ `ls_x86_64_unsigned`, or after the name of the file itself, `sample_unsigned` or `ls_unsigned`. A slice nothing was
+ done to keeps its name, `ls_x86_64`, and a file nothing was done to yields no artifact, since it would be the file.
+ A later run with other flags over an artifact names what it makes as one run with them all would: `ls_x86_64`
+ unsigned is `ls_x86_64_unsigned` either way.
 
  An artifact already in place, byte for byte, is left as it is and noted in the unified log alone, so a second run over
  a tree is as quiet on the terminal as the first was. A different file under an artifact's name is left alone and
@@ -50,28 +56,26 @@ struct ArtifactWriter {
      nothing is written. An image a modified UPX packed is warned about before its artifacts, which are written.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
-        let file: File
-        let artifacts: [(suffix: String, range: Range<Int>)]
+        let artifacts: [(suffix: String, bytes: File)]
         var caveats: [Line] = []
         do {
             let opened = try File(path: path)
             let edited = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
                 caveats.append(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
             }) : nil
-            file = edited?.file ?? opened
-            artifacts = try self.split ? Self.slices(of: file, exact: self.exact, edits: edited?.edits) : Self.whole(file, exact: self.exact, edits: edited?.edits)
+            artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
         } catch {
             return [reporter.report(path: path, message: File.message(for: error), tint: Digester.tint(for: error))]
         }
 
-        return caveats + artifacts.flatMap { suffix, range -> [Line] in
+        return caveats + artifacts.flatMap { suffix, bytes -> [Line] in
             let artifact = path + suffix
             Self.writing.claim(artifact)
             defer {
                 Self.writing.release(artifact)
             }
             do {
-                switch try Self.write(range, of: file, to: artifact, overwrite: self.overwrite) {
+                switch try Self.write(bytes, to: artifact, overwrite: self.overwrite) {
                 case .written:
                     return [Line(text: OutputFormatter.formatPath(artifact))]
                 case let .identical(identity):
@@ -91,66 +95,66 @@ struct ArtifactWriter {
 
     // MARK: - Private
 
-    /// The suffix an artifact's name takes for `edits`, in the order the edits are made: unpacked, then cut, then
-    /// without the signature.
+    /// The suffix an artifact's name takes for `edits`, in the order the edits are done.
     private static func suffix(_ edits: MachOEditor.Edits) -> String {
-        let suffixes: [(MachOEditor.Edits, String)] = [(.unpacked, "_unpacked"), (.exact, "_exact"), (.unsigned, "_unsigned")]
-        return suffixes.filter { edits.contains($0.0) }.map(\.1).joined()
+        MachOEditor.Edits.suffixes.filter { edits.contains($0.0) }.map(\.1).joined()
     }
 
     /**
-     The artifacts a file yields split, each with the suffix its name takes after the file's: a universal file's slice
-     its architecture, then for any artifact what was done to it, `edits`, the edits of a file `MachOEditor` made, and
-     the `exact` cut, which takes the bytes appended to an image off. Every slice of a universal file, as the fat table
-     places it or cut, a slice that is not Mach-O staying whole; a thin image when it was edited or cut. Throws for a
-     Mach-O that does not parse.
+     The artifacts a file yields split, each with the suffix its name takes after the file's, and its bytes as an edit
+     of `file`: a universal file's slice its architecture, as the fat table places it, then each state `MachOEditor`
+     took it through, `states`, for what was done to it. A slice the editor left alone, or a thin image, gets the
+     `exact` cut here, which takes the bytes appended to an image off, when it shortens it; a thin file's artifacts
+     are named by what was done to it alone, since one nothing was done to would be the file. Throws for a Mach-O
+     that does not parse.
      */
-    private static func slices(of file: File, exact: Bool, edits: [MachOEditor.Edits]?) throws -> [(suffix: String, range: Range<Int>)] {
-        func suffix(_ index: Int, cut: Bool) -> String {
-            var done = edits.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? []
-            if cut {
-                done.insert(.exact)
+    private static func slices(of file: File, exact: Bool, states: [[MachOEditor.State]]?) throws -> [(suffix: String, bytes: File)] {
+        /// The cut alone, as a state of an image the editor left alone, when it shortens the image.
+        func cut(_ image: MachO) -> MachOEditor.State? {
+            let end = image.logicalEnd()
+            guard exact, end < image.length else {
+                return nil
             }
-            return Self.suffix(done)
+            return MachOEditor.State(edits: .exact, pieces: [.range(image.offset ..< image.offset + end)])
         }
 
         switch try Universal.open(file) {
         case let .fat(archs):
-            return try archs.enumerated().map { index, arch in
-                var length = arch.length
-                if exact, let image = try MachO(file, offset: arch.offset, length: arch.length) {
-                    length = image.logicalEnd()
+            return try archs.enumerated().flatMap { index, arch -> [(suffix: String, bytes: File)] in
+                var chain = states?[index] ?? []
+                if chain.isEmpty, let image = try MachO(file, offset: arch.offset, length: arch.length), let cut = cut(image) {
+                    chain = [cut]
                 }
-                return ("_\(arch.name)" + suffix(index, cut: length < arch.length), arch.offset ..< arch.offset + length)
+                let whole = (suffix: "_\(arch.name)", bytes: File(editing: file, pieces: [.range(arch.offset ..< arch.offset + arch.length)]))
+                return [whole] + chain.map { ("_\(arch.name)" + Self.suffix($0.edits), File(editing: file, pieces: $0.pieces)) }
             }
         case let .thin(image):
-            // A thin file's artifact is named by what was done to it alone: one nothing was done to would be the file.
-            let end = exact ? image.logicalEnd() : image.length
-            let name = suffix(0, cut: end < image.length)
-            guard !name.isEmpty else {
-                return []
+            var chain = states?[0] ?? []
+            if chain.isEmpty, let cut = cut(image) {
+                chain = [cut]
             }
-            return [(name, 0 ..< end)]
+            return chain.map { (Self.suffix($0.edits), File(editing: file, pieces: $0.pieces)) }
         case .notMachO:
             return []
         }
     }
 
     /**
-     The artifact a file yields whole: the file as `edits` left it, every architecture of a universal file laid out
+     The artifact a file yields whole: the file as the edits left it, every architecture of a universal file laid out
      again, cut where it ends with `exact` as hash mode cuts it (`Universal.fileEnd`), named for what was done to any
-     of its images; none when nothing was done, since it would be the file. Throws for a Mach-O that does not parse.
+     of its images, the last of its `states`; none when nothing was done, since it would be the file. Throws for a
+     Mach-O that does not parse.
      */
-    private static func whole(_ file: File, exact: Bool, edits: [MachOEditor.Edits]?) throws -> [(suffix: String, range: Range<Int>)] {
+    private static func whole(_ file: File, exact: Bool, states: [[MachOEditor.State]]?) throws -> [(suffix: String, bytes: File)] {
         let end = try exact ? Universal.fileEnd(file) : file.size
-        var done = edits?.reduce(into: MachOEditor.Edits()) { $0.formUnion($1) } ?? []
+        var done = states?.reduce(into: MachOEditor.Edits()) { $0.formUnion($1.last?.edits ?? []) } ?? []
         if end < file.size {
             done.insert(.exact)
         }
         guard !done.isEmpty else {
             return []
         }
-        return [(Self.suffix(done), 0 ..< end)]
+        return [(Self.suffix(done), end < file.size ? File(editing: file, pieces: [.range(0 ..< end)]) : file)]
     }
 
     /// What became of an artifact's path.
@@ -208,15 +212,15 @@ struct ArtifactWriter {
     }
 
     /**
-     Write `range` of `file` to `path`: a new file, or with `overwrite` a new file renamed over the regular file already
+     Write `file` to `path`: a new file, or with `overwrite` a new file renamed over the regular file already
      there when it holds other bytes, as `lipo` writes its output; the same bytes are left as they are. The rename gives
      the name another inode rather than writing into the old one, so another link to it, to a file elsewhere say, keeps
      its bytes and its mode, and a write that fails leaves the old file as it was.
      */
-    private static func write(_ range: Range<Int>, of file: File, to path: String, overwrite: Bool) throws -> Outcome {
+    private static func write(_ file: File, to path: String, overwrite: Bool) throws -> Outcome {
         do {
             let fd = try FileDescriptor.open(path, .writeOnly, options: [.create, .exclusiveCreate], permissions: Self.permissions)
-            try Self.copy(range, of: file, to: fd, at: path)
+            try Self.copy(file, to: fd, at: path)
             return .written
         } catch let error as Errno where error == .fileExists {
             // What is there decides.
@@ -228,7 +232,7 @@ struct ArtifactWriter {
             throw ArtifactError.notRegularFileInTheWay
         }
         let before = try Self.identity(of: File(path: path))
-        let after = try Self.identity(of: file, range: range)
+        let after = try Self.identity(of: file)
         if before.size == after.size, before.digest == after.digest {
             return .identical(after)
         }
@@ -238,7 +242,7 @@ struct ArtifactWriter {
 
         let replacement = "\(path).fashion-\(UUID().uuidString)"
         let fd = try FileDescriptor.open(replacement, .writeOnly, options: [.create, .exclusiveCreate], permissions: Self.permissions)
-        try Self.copy(range, of: file, to: fd, at: replacement)
+        try Self.copy(file, to: fd, at: replacement)
         guard rename(replacement, path) == 0 else {
             let error = Errno(rawValue: errno)
             unlink(replacement)
@@ -248,11 +252,11 @@ struct ArtifactWriter {
     }
 
     /**
-     Stream `range` of `file` into `fd` and close it; a write that fails leaves no file at `path`.
+     Stream `file` into `fd` and close it; a write that fails leaves no file at `path`.
      */
-    private static func copy(_ range: Range<Int>, of file: File, to fd: FileDescriptor, at path: String) throws {
+    private static func copy(_ file: File, to fd: FileDescriptor, at path: String) throws {
         do {
-            try file.stream(range) { chunk in
+            try file.stream(0 ..< file.size) { chunk in
                 _ = try fd.writeAll(chunk)
             }
             try fd.close()
@@ -264,10 +268,10 @@ struct ArtifactWriter {
     }
 
     /**
-     The size and SHA-256 of `range` of `file`, the whole file by default, the digest as `fashion -q` prints it.
+     The size and SHA-256 of `file`, the digest as `fashion -q` prints it.
      */
-    private static func identity(of file: File, range: Range<Int>? = nil) throws -> Identity {
+    private static func identity(of file: File) throws -> Identity {
         let sha256 = ByteHash(.sha256)! // nil for cdhash alone
-        return try Identity(size: range?.count ?? file.size, digest: ByteHash.digests([sha256], file, range: range).first?.digest ?? "")
+        return try Identity(size: file.size, digest: ByteHash.digests([sha256], file).first?.digest ?? "")
     }
 }

@@ -47,12 +47,16 @@ struct Thinner: ParsableCommand {
  artifact too, where one that ends where its image ends has nothing to write.
 
  With `--unsign`, the file is read without its code signatures, and with `--unpack`, with what UPX packed unpacked, as
- `MachOEditor` edits it in memory, after the `--exact` cut: a thin Mach-O they change becomes an artifact too, as
- `unsign` and `unpack` write it. A signature that does not end its image, appended bytes after it say, is reported and
- nothing is written for the file: `--exact` cuts those bytes off first.
+ `MachOEditor` edits it in memory, after the `--exact` cut, and every state a slice goes through is written: the slice
+ as the fat table places it, then cut, then without its signature, which comes out before an image is unpacked
+ anyway, then unpacked, then the unpacked image cut and without its own signature, as far as the flags take it. So a
+ thin Mach-O they change becomes an artifact too, where `unsign` and `unpack` write the file as the edits leave it,
+ whole. A signature that does not end its image, appended bytes after it say, is reported and nothing is written for
+ the file: `--exact` cuts those bytes off first.
 
- `ArtifactWriter` names and writes them, split: `ls_x86_64_unsigned` after the architecture of a universal file's slice, or
- `sample_unsigned` after the name of a thin file, which needs no architecture.
+ `ArtifactWriter` names and writes them, split: `ls_x86_64`, `ls_x86_64_unsigned`, `ls_x86_64_unsigned_unpacked` after
+ the architecture of a universal file's slice, or `sample_unsigned` after the name of a thin file, which needs no
+ architecture.
  */
 extension Thinner {
     /**
