@@ -1,0 +1,39 @@
+# What a block of UPX's packed data starts with, as the decompress harness reads it: the method, the size it decompresses
+# to in three bytes, the filter and its cto, then the data, LZMA's two property bytes first. Methods 2 to 10 are UCL's
+# NRV2B, NRV2D and NRV2E, each in 32-bit, 8-bit and 16-bit widths; 14 is LZMA.
+block_nrv2b_8="\x03\x00\x01\x00\x00\x00"
+block_nrv2d_8="\x06\x00\x01\x00\x00\x00"
+block_nrv2e_8="\x09\x00\x01\x00\x00\x00"
+block_nrv2e_le32="\x08\x00\x01\x00\x00\x00"
+block_lzma="\x0e\x00\x01\x00\x00\x00"
+block_lzma_ctoj="\x0e\x00\x10\x00\x46\x05"
+block_lzma_ctarm64="\x0e\x00\x10\x00\x53\x00"
+# The filters UPX's Mach-O packers name, with the cto the x86 ones mark their targets with.
+filter_ctoj="\x46\x05"
+filter_ctok="\x49\x05"
+filter_ct24arm="\x50\x00"
+filter_ct26arm="\x52\x00"
+filter_ctarm64="\x53\x00"
+filter_ppcbxx="\xd0\x0b"
+# LZMA's two property bytes: lc + lp in the first's high bits, pb below; lp then lc in the second. UPX writes lc 3 and
+# lp 0 unless told otherwise, up to lc 8 and lp 4, which its decoder takes and liblzma does not.
+lzma_props_default="\x1a\x03"
+lzma_props_pb0="\x18\x03"
+lzma_props_zero="\x00\x00"
+lzma_props_lc8="\x40\x08"
+lzma_props_lc4_lp1="\x2a\x14"
+lzma_props_lc3_lp4="\x3a\x43"
+lzma_props_lc8_lp4="\x62\x48"
+lzma_props_lc0_lp4_pb4="\x24\x40"
+# The branches the filters look for: x86 call and jump with cto, conditional jump, arm BL, arm64 B, BL, B.cond, CBZ,
+# TBZ, PowerPC bl.
+x86_call="\xe8\x05"
+x86_jmp="\xe9\x05"
+x86_jcc="\x0f\x85\x05"
+arm_bl="\x00\x00\x00\xeb"
+arm64_b="\x00\x00\x00\x14"
+arm64_bl="\x00\x00\x00\x94"
+arm64_bcond="\x01\x00\x00\x54"
+arm64_cbz="\x05\x00\x00\x34"
+arm64_tbz="\x05\x00\x00\x36"
+ppc_bl="\x48\x00\x00\x01"

@@ -13,9 +13,10 @@ here feed libFuzzer's inputs through those parsers under AddressSanitizer, one e
 | `diff`     | the digests `--match` is given: their shape, which names their algorithm, their typing into `Targets`, `TLSHBridge.diff` and `SSDeepBridge.compare` |
 | `bytehash` | ssdeep's, TLSH's and git's hashers over the bytes, streamed from a file and whole in memory              |
 | `unpack`   | `MachOEditor.edit`: UPX's pack header, with its marker and without, UCL's and LZMA's decoders, the unfilters, signature removal, the universal rebuild; then the edit read as the scan reads it, walked, cdhashed and symhashed across its pieces |
+| `decompress` | one block of UPX's packed data, fed straight to `UCLBridge.decompress` and `LZMABridge.decompress` by its method, up to 1 MiB out, then `PackMach.unfilter` over what came out, where `unpack` reaches them behind a whole packed Mach-O |
 
 An input reaches a parser as a `File`, the way a test fixture does: written over one scratch file per process and
-opened from there (`support.swift`). `macho`, `cdhash` and `unpack` are built with both `--exact` endings (see
+opened from there (`support.swift`); `decompress` takes its bytes as they are, a block's `b_info` then its data. `macho`, `cdhash` and `unpack` are built with both `--exact` endings (see
 Package.swift): `fuzz-macho`, `fuzz-cdhash` and `fuzz-unpack` with `SECURITY_STRICT_VALIDATION`, the `-segments` ones
 without.
 
@@ -37,7 +38,8 @@ oversubscribed machine a slow unit passes for a hung one; the script warns past 
 
 The corpora are seeded with every fixture the tests build (hand-made, compiled or codesigned: `FASHION_FIXTURES` in
 TestHelpers.swift keeps them while `swift test` runs), with `/bin/ls` whole and by slice, with a XAR of this directory,
-and with TLSH and ssdeep digests of real files. The packed images among them come from the `upx` installed; one packed
+and with TLSH and ssdeep digests of real files, and `decompress` with every block of the packed images, cut out by
+`b_info`. The packed images among them come from the `upx` installed; one packed
 with filter 0x53 for arm64 needs a UPX newer than 5.2.1, which packs with 0x52. The `.dict` files give libFuzzer the
 magics, load commands, segment names and code-signature versions it would otherwise have to guess, and `unpack.dict`
 UPX's: its marker, versions, formats, methods, filters and LZMA's properties.

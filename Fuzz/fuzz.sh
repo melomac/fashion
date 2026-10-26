@@ -21,7 +21,7 @@ logs=$build/logs
 jobs=${FUZZ_JOBS:-2}
 
 # The harnesses: each is Fuzz/<name>.swift, with an LLVMFuzzerTestOneInput, and fuzzes corpus/<name>.
-harnesses="macho cdhash xar symhash diff bytehash unpack"
+harnesses="macho cdhash xar symhash diff bytehash unpack decompress"
 
 # The --exact endings a harness is built with (see Package.swift): both for those that read a Mach-O's logical end.
 endings() {
@@ -218,6 +218,31 @@ seed() {
                 ;;
         esac
         cp "$file" "$corpus/bytehash/"
+    done
+
+    # The blocks of the packed images, each as the decompress harness takes it: its b_info's method, size, filter and
+    # cto, then its data. The pack header's overlay offset finds the p_info, the blocks follow it, each after the last.
+    local packed
+    for packed in "$corpus"/unpack/*; do
+        xcrun python3 -I - "$packed" "$corpus/decompress" <<'PYTHON'
+import hashlib, struct, sys
+data, out = open(sys.argv[1], "rb").read(), sys.argv[2]
+header = data.rfind(b"UPX!")
+if header < 0 or header + 36 > len(data):
+    sys.exit()
+at = struct.unpack_from("<I", data, header + 32)[0] + 12
+while at + 12 <= len(data):
+    size, packed = struct.unpack_from("<ii", data, at)
+    method, filter, cto = data[at + 8], data[at + 9], data[at + 10]
+    if size <= 0 or packed <= 0 or packed > size or at + 12 + packed > len(data):
+        break
+    if method == 0:  # stored as it is, nothing to decode
+        at += 12 + packed
+        continue
+    block = bytes([method]) + min(size, 1 << 20).to_bytes(3, "little") + bytes([filter, cto]) + data[at + 12 : at + 12 + packed]
+    open(f"{out}/{hashlib.sha256(block).hexdigest()}", "wb").write(block)
+    at += 12 + packed
+PYTHON
     done
 
     # Digests to compare, from the fashion the tests built: each against the other, and against itself.

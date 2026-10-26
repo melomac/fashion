@@ -60,6 +60,9 @@ lzma_props_default="\x1a\x03"
 lzma_props_pb0="\x18\x03"
 lzma_props_zero="\x00\x00"
 lzma_props_lc8="\x40\x08"
+lzma_props_lc4_lp1="\x2a\x14"
+lzma_props_lc3_lp4="\x3a\x43"
+lzma_props_lc8_lp4="\x62\x48"
 # The branches the filters look for: x86 call and jump with cto, conditional jump, arm BL, arm64 B, BL, B.cond, CBZ, TBZ,
 # PowerPC bl.
 x86_call="\xe8\x01"
