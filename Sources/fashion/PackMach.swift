@@ -54,8 +54,8 @@ struct PackMach {
         Class(cpuType: CPU_TYPE_ARM64, filetype: UInt32(MH_EXECUTE), format: 37, pageShift: 14),
         Class(cpuType: CPU_TYPE_POWERPC, filetype: UInt32(MH_EXECUTE), format: 131, pageShift: 12),
         Class(cpuType: CPU_TYPE_POWERPC, filetype: UInt32(MH_DYLIB), format: 138, pageShift: 12),
-        Class(cpuType: CPU_TYPE_POWERPC64, filetype: UInt32(MH_EXECUTE), format: 139, pageShift: 12),
-        Class(cpuType: CPU_TYPE_POWERPC64, filetype: UInt32(MH_DYLIB), format: 142, pageShift: 12),
+        Class(cpuType: CPU_TYPE_POWERPC64, filetype: UInt32(MH_EXECUTE), format: 139, pageShift: 16),
+        Class(cpuType: CPU_TYPE_POWERPC64, filetype: UInt32(MH_DYLIB), format: 142, pageShift: 16),
     ]
 
     /// The most load commands UPX takes (`MAX_N_CMDS`).
@@ -539,6 +539,21 @@ struct PackMach {
      */
     static func unfilter(_ b: UnsafeMutableRawBufferPointer, id: UInt8, cto: UInt8) throws {
         let length = b.count
+        // A block shorter than the filter's `min_buf_len`, or longer than its `max_buf_len`, UPX's `Filter` leaves as it
+        // is (`filter.cpp`); its packer writes no filter for such a block, so only a crafted one meets this.
+        let (shortest, longest): (Int, Int) = switch id {
+        case 0x46, 0x49: (6, 0x00ff_ffff)
+        case 0x50: (8, 0x01ff_ffff)
+        case 0x52, 0x53: (8, 0x03ff_ffff)
+        case 0xd0: (8, 0)
+        default: (0, 0)
+        }
+        guard
+            length >= shortest,
+            longest == 0 || length <= longest
+        else {
+            return
+        }
         func le32(_ at: Int) -> UInt32 {
             b.loadUnaligned(fromByteOffset: at, as: UInt32.self).littleEndian
         }
@@ -695,7 +710,9 @@ extension PackMach {
             }
             guard
                 compressed >= 2,
-                uncompressed >= 2
+                uncompressed >= 2,
+                compressed <= PackMach.maxSize,
+                uncompressed <= PackMach.maxSize
             else {
                 throw UnpackError.cantUnpack("header corrupted 4")
             }

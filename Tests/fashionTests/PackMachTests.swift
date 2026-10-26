@@ -207,6 +207,26 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
+     UPX's Filter leaves a block longer than its filter takes as it is, 16 MiB less one for the x86 call trick and
+     64 MiB less one for the arm64 branch tricks: a branch after the first word of a block just over is left as
+     it is, where one in a block at the limit is taken.
+     */
+    func testUnfilterLeavesBlocksLongerThanUPXFiltersAlone() throws {
+        let cases: [(id: UInt8, limit: Int, filtered: [UInt8], unfiltered: [UInt8])] = [
+            (0x46, 0x00ff_ffff, [0xe8, 0x00, 0x00, 0x00, 0x20], [0xe8, 0x1b, 0x00, 0x00, 0x00]),
+            (0x52, 0x03ff_ffff, [0x10, 0x00, 0x00, 0x14], [0x0f, 0x00, 0x00, 0x14]),
+        ]
+        for (id, limit, filtered, unfiltered) in cases {
+            for (length, taken) in [(limit, true), (limit + 1, false)] {
+                var block = Data(count: length)
+                block.replaceSubrange(4 ..< 4 + filtered.count, with: filtered)
+                try block.withUnsafeMutableBytes { try PackMach.unfilter($0, id: id, cto: 0) }
+                XCTAssertEqual(Array(block[4 ..< 4 + filtered.count]), taken ? unfiltered : filtered, "0x\(String(id, radix: 16)), \(length) bytes")
+            }
+        }
+    }
+
+    /**
      Signed after packing, the image no longer has the 16-byte `__LINKEDIT` UPX leaves, so upx -d gives up on it;
      unpack looks past the signature. A signed image that UPX packed comes back signed, and without its signature
      too with --unsign.
@@ -363,9 +383,11 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
+    /**
+     A pack header whose checksum does not hold is malformed UPX data: red, counted, nothing written. So is a
+     header block that claims more than a block, 2 GiB less a byte, refused before any of it is made room for.
+     */
     func testCorruptPackHeaderIsReported() throws {
-        // A pack header whose checksum does not hold is malformed UPX data: red, counted, nothing written. So is a
-        // header block that claims more than a block, 2 GiB less a byte, refused before any of it is made room for.
         let directory = try self.directory("corrupt")
         let (_, unsigned, _) = try XCTUnwrap(self.unsignedLs(in: directory).first)
         let packed = try Data(contentsOf: self.packed(unsigned))
@@ -376,8 +398,13 @@ final class PackMachTests: XCTestCase {
         let overlay = Int(packed.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: header + 32, as: UInt32.self) }.littleEndian)
         var huge = packed
         huge.replaceSubrange(overlay + 12 ..< overlay + 16, with: withUnsafeBytes(of: UInt32(0x7fff_ffff).littleEndian) { Data($0) })
+        // A pack header claiming more than UPX packs, 4 GiB less a byte, its checksum made to hold, is refused as UPX
+        // refuses it.
+        var big = packed
+        big.replaceSubrange(header + 16 ..< header + 20, with: [0xff, 0xff, 0xff, 0xff])
+        big[header + 31] = UInt8(big[header + 4 ..< header + 31].reduce(0) { $0 + Int($1) } % 251)
 
-        for (name, data, message) in [("corrupt", corrupt, "header corrupted 3"), ("huge", huge, "file header corrupted")] {
+        for (name, data, message) in [("corrupt", corrupt, "header corrupted 3"), ("huge", huge, "file header corrupted"), ("big", big, "header corrupted 4")] {
             let file = directory / name
             try data.write(to: file)
             let reporter = Reporter(console: Console())
