@@ -254,16 +254,23 @@ struct ArtifactWriter {
     }
 
     /**
-     Stream `file` into `fd` and close it; a write that fails leaves no file at `path`.
+     Stream `file` into `fd` and close it; a write that fails leaves no file at `path`, a close that fails either. The
+     descriptor is closed once: a close that fails has given its number up all the same, and another thread may hold it
+     by then.
      */
     private static func copy(_ file: File, to fd: FileDescriptor, at path: String) throws {
         do {
             try file.stream(0 ..< file.size) { chunk in
                 _ = try fd.writeAll(chunk)
             }
-            try fd.close()
         } catch {
             try? fd.close()
+            unlink(path)
+            throw error
+        }
+        do {
+            try fd.close()
+        } catch {
             unlink(path)
             throw error
         }
