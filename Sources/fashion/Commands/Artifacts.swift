@@ -65,7 +65,8 @@ struct ArtifactWriter {
             }) : nil
             artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
         } catch {
-            return [reporter.report(path: path, message: File.message(for: error), tint: Digester.tint(for: error))]
+            // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
+            return caveats + [reporter.report(path: path, message: File.message(for: error), tint: Digester.tint(for: error))]
         }
 
         return caveats + artifacts.flatMap { suffix, bytes -> [Line] in

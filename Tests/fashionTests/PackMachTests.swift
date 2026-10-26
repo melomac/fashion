@@ -378,6 +378,38 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    /**
+     A universal file whose first slice a modified UPX packed and whose second slice's packed data does not hold:
+     the warning about the first is printed, then the error about the second, as hash mode prints them.
+     */
+    func testACaveatOutlivesALaterSlicesError() throws {
+        let directory = try self.directory("caveat-then-error")
+        let slices = try self.unsignedLs(in: directory)
+        try XCTSkipIf(slices.count < 2, "/bin/ls has no x86_64 and arm64e slices")
+        let marker = Data("UPX!".utf8)
+        let swapped = directory / "swapped"
+        try Data(contentsOf: self.packed(slices[0].file)).replacing(marker, with: Data("VQY\"".utf8)).write(to: swapped)
+        var corrupted = try Data(contentsOf: self.packed(slices[1].file))
+        let block = try XCTUnwrap(corrupted.firstRange(of: marker)).lowerBound + 64
+        for index in block ..< block + 64 {
+            corrupted[index] ^= 0xff
+        }
+        let corrupt = directory / "corrupt"
+        try corrupted.write(to: corrupt)
+        let file = directory / "fat"
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", swapped.path, corrupt.path, "-output", file.path]), "cannot run lipo")
+
+        let warning = "fashion: \(file.path) (\(slices[0].name)): packed by a modified UPX, its marker \"VQY\\\"\" in place of \"UPX!\""
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]).first, warning)
+        let reporter = Reporter(console: Console())
+        for lines in [Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter), Unpacker.lines(for: file.path, exact: false, overwrite: false, reporter: reporter)] {
+            XCTAssertEqual(lines.map(\.diagnostic), [true, true])
+            XCTAssertEqual(lines.first?.text, warning)
+            XCTAssertEqual(lines.last?.tint, .malformed)
+        }
+        XCTAssertEqual(reporter.errorCount, 2)
+    }
+
     func testImagesUPXDidNotPackAreLeftAlone() throws {
         // --unpack meets every Mach-O. One of three segments, __DATA, __TEXT and a __LINKEDIT too short for a block
         // header, is where UPX gives up ("bad offLINK") though it never packed it: hashed as it is, nothing to write.
