@@ -56,13 +56,13 @@ final class PackMachTests: XCTestCase {
         return settings.first { $0.count == 2 && $0[0] == "CODE_SIGN_IDENTITY" }?[1] ?? "-"
     }()
 
-    /// `file` signed into `<file>_resigned` beside it, made anew: a sample signed after packing, by `identity`, without
+    /// `file` signed into `<file><suffix>` beside it, made anew: a sample signed after packing, by `identity`, without
     /// the timestamp a Developer ID signature asks a server for.
-    private func resigned(_ file: URL) throws -> URL {
-        let resigned = URL(fileURLWithPath: file.path + "_resigned")
+    private func resigned(_ file: URL, by identity: String = PackMachTests.identity, as suffix: String = "_resigned") throws -> URL {
+        let resigned = URL(fileURLWithPath: file.path + suffix)
         try? FileManager.default.removeItem(at: resigned)
         try FileManager.default.copyItem(at: file, to: resigned)
-        _ = try codesign(["-s", Self.identity, "--timestamp=none", resigned.path])
+        _ = try codesign(["-s", identity, "--timestamp=none", resigned.path])
         saveFixture(path: resigned.path)
         return resigned
     }
@@ -214,9 +214,13 @@ final class PackMachTests: XCTestCase {
     func testUnpackSeesPastASignatureAddedAfterPacking() throws {
         let directory = try self.directory("signed")
         let (name, unsigned, data) = try XCTUnwrap(self.unsignedLs(in: directory).first)
-        let file = try self.resigned(self.packed(unsigned))
-        XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", file.path + "_upx-d", file.path]))
-        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [ByteHash.sha256.digest(data)])
+        // Signed ad hoc, and by the Developer ID local.xcconfig names where it does, whose signature is the longer.
+        let sample = try self.packed(unsigned)
+        for identity in Set(["-", Self.identity]) {
+            let file = try self.resigned(sample, by: identity, as: identity == "-" ? "_resigned_adhoc" : "_resigned")
+            XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", file.path + "_upx-d", file.path]), identity)
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [ByteHash.sha256.digest(data)], identity)
+        }
 
         let ls = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
         guard case let .fat(slices) = try Universal.open(data: ls), let slice = slices.first(where: { $0.name == name }) else {
@@ -267,6 +271,54 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_exact_unsigned_unpacked"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact_unsigned_unpacked")), data)
         XCTAssertEqual(reporter.errorCount, 0)
+    }
+
+    /**
+     Bytes appended to an image before packing are packed as its last gap and come back with it: unpack hashes
+     them as upx -d writes them, and --exact cuts them off the unpacked image, as it cuts them off any image,
+     which 1.5 did only when a signature came off it; thin writes the unpacked image, then the cut. Signed after
+     packing, the signature comes out first, and the states are named for it.
+     */
+    func testExactCutsBytesAppendedToTheUnpackedImage() throws {
+        let directory = try self.directory("overlay")
+        for (name, _, original) in try self.unsignedLs(in: directory) {
+            let padded = original + Data(repeating: 0x4a, count: 8)
+            let source = directory / "\(name)_padded"
+            try padded.write(to: source)
+            let file = try self.packed(source)
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(padded))], name)
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack", "--exact"]), try [XCTUnwrap(ByteHash.sha256.digest(original))], name)
+            let reporter = Reporter(console: Console())
+            XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: false, unpack: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_unpacked", file.path + "_unpacked_exact"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), padded, name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked_exact")), original, name)
+            XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_unpacked_exact"], name)
+            let signed = try self.resigned(file)
+            XCTAssertEqual(try self.hashLines(signed.path, ["--unpack", "--exact"]), try [XCTUnwrap(ByteHash.sha256.digest(original))], name)
+            XCTAssertEqual(Unpacker.lines(for: signed.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [signed.path + "_unsigned_unpacked_exact"], name)
+            XCTAssertEqual(reporter.errorCount, 0, name)
+        }
+    }
+
+    /**
+     `fashion unpack`, parsed as the root command parses it, over a folder: the packed file gets its artifact,
+     the others nothing; run again it finds the artifact in place, and --overwrite replaces a file in its way.
+     */
+    func testUnpackSubcommandRunsOverATree() throws {
+        let directory = try self.directory("subcommand")
+        let (_, unsigned, original) = try XCTUnwrap(self.unsignedLs(in: directory).first)
+        let file = try self.packed(unsigned)
+        let artifact = URL(fileURLWithPath: file.path + "_unpacked")
+        let command = try XCTUnwrap(Fashion.parseAsRoot(["unpack", directory.path]) as? Unpacker)
+        XCTAssertEqual(command.scan(), 0)
+        XCTAssertEqual(try Data(contentsOf: artifact), original)
+        let (status, errors) = try runFashion(["unpack", directory.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [])
+        try Data("other".utf8).write(to: artifact)
+        XCTAssertEqual(try runFashion(["unpack", file.path]).status, 2)
+        XCTAssertEqual(try runFashion(["unpack", "--overwrite", file.path]).status, 0)
+        XCTAssertEqual(try Data(contentsOf: artifact), original)
     }
 
     func testUnpackRestoresAUniversalFile() throws {
@@ -424,11 +476,13 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
+    /**
+     The whole chain over every slice of /bin/ls: thin --unsign writes each beside each without its signature, UPX
+     packs each, codesign signs each again, and thin --unpack takes that signature out and gives each back.
+     --match, given the digests of the fat file's slices with --unsign, finds every unpacked artifact, and the
+     packed files themselves only with --unpack.
+     */
     func testUnpackedSlicesMatchTheFatFilesUnsignedSlices() throws {
-        // The whole chain over every slice of /bin/ls: thin --unsign writes each beside each without its signature, UPX
-        // packs each, codesign signs each again ad hoc, and thin --unpack takes that signature out and gives each back.
-        // --match, given the digests of the fat file's slices with --unsign, finds every unpacked artifact, and the
-        // packed files themselves only with --unpack.
         let directory = try self.directory("chain")
         let ls = directory / "ls"
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: ls)
