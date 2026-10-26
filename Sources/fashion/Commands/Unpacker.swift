@@ -10,17 +10,17 @@ private let logger = Logger(subsystem: "fashion", category: "unpack")
 struct Unpacker: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "unpack",
-        abstract: "Write Mach-O code UPX packed out beside it as it was before packing.",
+        abstract: "Write and restore a UPX-packed Mach-O image, unpacked without UPX.",
         helpNames: .shortAndLong,
     )
 
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(help: "Write the exact Mach-O image, dropping appended bytes.")
+    @Flag(help: "Write an exact Mach-O image, dropping appended bytes.")
     var exact = false
 
-    @Flag(help: "Replace a different file found under an artifact's name; otherwise it is reported and left alone.")
+    @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
     var overwrite = false
 
     mutating func run() throws {

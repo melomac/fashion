@@ -10,17 +10,17 @@ private let logger = Logger(subsystem: "fashion", category: "unsign")
 struct Unsigner: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "unsign",
-        abstract: "Write Mach-O code out beside it without its signature, restored as it was before.",
+        abstract: "Write and restore a Mach-O image, removing the code signature.",
         helpNames: .shortAndLong,
     )
 
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(help: "Write the exact Mach-O image, dropping appended bytes.")
+    @Flag(help: "Write an exact Mach-O image, dropping appended bytes.")
     var exact = false
 
-    @Flag(help: "Replace a different file found under an artifact's name; otherwise it is reported and left alone.")
+    @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
     var overwrite = false
 
     mutating func run() throws {

@@ -70,7 +70,7 @@ extension Algorithm: ExpressibleByArgument {
         case .git256: "Git blob (SHA-256)"
         case .ssdeep: "ssdeep fuzzy hash"
         case .tlsh: "Trend Micro Locality Sensitive Hash"
-        case .cdhash: "CodeDirectory hash (AD-HOC for unsigned slices)"
+        case .cdhash: "CodeDirectory hash (ADHOC for unsigned slices)"
         }
     }
 }
@@ -95,19 +95,19 @@ struct Hasher: ParsableCommand {
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(name: .shortAndLong, help: "Quiet output: digests alone, or matched paths, and no TLSH caveat.")
+    @Flag(name: .shortAndLong, help: "Quiet output: digests alone, or matched paths.")
     var quiet = false
 
     @Flag(help: "Hash individual Mach-O architectures.")
     var slices = false
 
-    @Flag(help: "Hash the exact Mach-O image, ignoring appended bytes.")
+    @Flag(help: "Hash an exact Mach-O image, dropping appended bytes.")
     var exact = false
 
-    @Flag(help: "Hash Mach-O code without its signature, restored as it was before.")
+    @Flag(help: "Hash a Mach-O image, removing the code signature.")
     var unsign = false
 
-    @Flag(help: "Hash Mach-O code UPX packed as it was before packing.")
+    @Flag(help: "Hash a UPX-packed Mach-O image, unpacked without UPX.")
     var unpack = false
 
     // MARK: - Grouped Options

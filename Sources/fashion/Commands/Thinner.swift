@@ -17,16 +17,16 @@ struct Thinner: ParsableCommand {
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(help: "Write the exact Mach-O image, dropping appended bytes.")
+    @Flag(help: "Write an exact Mach-O image, dropping appended bytes.")
     var exact = false
 
-    @Flag(help: "Write Mach-O code without its signature, restored as it was before.")
+    @Flag(help: "Write and restore a Mach-O image, removing the code signature.")
     var unsign = false
 
-    @Flag(help: "Write Mach-O code UPX packed as it was before packing.")
+    @Flag(help: "Write and restore a UPX-packed Mach-O image, unpacked without UPX.")
     var unpack = false
 
-    @Flag(help: "Replace a different file found under an artifact's name; otherwise it is reported and left alone.")
+    @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
     var overwrite = false
 
     mutating func run() throws {

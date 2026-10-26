@@ -66,7 +66,7 @@ struct ScanOptions: ParsableArguments {
     @Option(name: .shortAndLong, help: "Number of concurrent workers (default: 1, 0 = all CPUs).")
     var jobs: Int?
 
-    @Flag(name: .customShort("J"), help: "All CPUs, as --jobs 0.")
+    @Flag(name: .customShort("J"), help: "All CPUs, short for --jobs 0.")
     var allJobs = false
 
     @Flag(name: [.customShort("L"), .long], help: "Follow symlinks.")
