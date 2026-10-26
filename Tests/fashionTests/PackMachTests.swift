@@ -439,6 +439,41 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    /**
+     UCL's decoders that read 32 bits at a time, the ones UPX's Mach-O packers use, fetch their next word before
+     they check the input, so a block cut inside a word, which no packer writes, has them read up to 3 bytes past
+     it: UPX's buffer has room after a block for it, and so has the one read here, where the decompress fuzz
+     harness found the read going past an exact one. Its block, 48 bytes of NRV2B claiming 16 KiB, spliced in
+     as the first block, does not hold: red, nothing written. The harness is where the sanitizer sees the read,
+     its buffer exact; the block read here lands in what Foundation rounds an allocation up to.
+     */
+    func testBlockWhoseLastWordIsPartialIsRefused() throws {
+        let directory = try self.directory("partial-word")
+        let (_, unsigned, _) = try XCTUnwrap(self.unsignedLs(in: directory).first)
+        var packed = try Data(contentsOf: self.packed(unsigned))
+        let header = try XCTUnwrap(packed.ranges(of: Data("UPX!".utf8)).last).lowerBound
+        // The overlay offset follows the 32-byte pack header; its p_info is 12 bytes, then the first block's b_info,
+        // its sizes, method, filter and cto, then the block.
+        let overlay = Int(packed.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: header + 32, as: UInt32.self) }.littleEndian)
+        let block = try XCTUnwrap(Data(hex: "975d76cb50002e0304c0010000ff5455c9200032aaaa642a19555555958caaa3aa4a46925155250040a8a80100000000"))
+        var info = Data()
+        info.appendUInt32(16384)
+        info.appendUInt32(UInt32(block.count))
+        info.append(contentsOf: [2, 0, 0, 0])
+        packed.replaceSubrange(overlay + 12 ..< overlay + 24 + block.count, with: info + block)
+        let file = directory / "partial"
+        try packed.write(to: file)
+
+        let reporter = Reporter(console: Console())
+        let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertEqual(lines.first?.tint, .malformed)
+        XCTAssertEqual(reporter.errorCount, 1)
+        let (status, errors) = try runFashion(["--unpack", file.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: compressed data violation"])
+    }
+
     func testUnpackFindsThePackHeaderWithoutItsMarker() throws {
         // A UPX modified to defeat upx -d writes another marker than "UPX!" everywhere it goes: the pack header, the
         // l_info before the packed data, and the stub, which looks for it. upx -d calls the file not packed; --unpack

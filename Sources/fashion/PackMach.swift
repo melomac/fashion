@@ -253,7 +253,7 @@ struct PackMach {
         let commands: [Command]
         do {
             var headers = Data(count: first.uncompressed)
-            try headers.withUnsafeMutableBytes { try Self.decompress(self.read(at: blocks + 12, count: first.compressed), method: first.method, into: $0) }
+            try headers.withUnsafeMutableBytes { try Self.decompress(self.block(at: blocks + 12, count: first.compressed), count: first.compressed, method: first.method, into: $0) }
             let packedHeader = try self.image.dataAt(0, count: 16)
             guard headers.prefix(16).elementsEqual(packedHeader.prefix(16)) else {
                 throw UnpackError.cantUnpack("file header corrupted")
@@ -361,6 +361,19 @@ struct PackMach {
         let cto: UInt8
     }
 
+    /**
+     A block of `count` bytes of packed data at `offset`, with `UCLBridge.slack` bytes after it, the image's where it
+     holds them and zeros where the block ends it: what UCL's decoders may read past the block, as UPX's buffer lets
+     them.
+     */
+    private func block(at offset: Int, count: Int) throws -> Data {
+        let slack = UCLBridge.slack
+        if count <= self.image.length - offset - slack {
+            return try self.read(at: offset, count: count + slack)
+        }
+        return try self.read(at: offset, count: count) + Data(count: slack)
+    }
+
     /// `count` bytes of the packed image at `offset`, which must hold them.
     private func read(at offset: Int, count: Int) throws -> Data {
         guard
@@ -429,18 +442,18 @@ struct PackMach {
             else {
                 throw UnpackError.cantUnpack("corrupt b_info")
             }
-            let block = try self.read(at: cursor + 12, count: info.compressed)
+            let block = try self.block(at: cursor + 12, count: info.compressed)
             cursor += 12 + info.compressed
             if info.compressed < info.uncompressed {
                 try output.withUnsafeMutableBytes { buffer in
                     let destination = UnsafeMutableRawBufferPointer(rebasing: buffer[offset ..< offset + info.uncompressed])
-                    try Self.decompress(block, method: info.method, into: destination)
+                    try Self.decompress(block, count: info.compressed, method: info.method, into: destination)
                     if info.filter != 0 {
                         try Self.unfilter(destination, id: info.filter, cto: info.cto)
                     }
                 }
             } else {
-                output.replaceSubrange(offset ..< offset + info.uncompressed, with: block)
+                output.replaceSubrange(offset ..< offset + info.uncompressed, with: block.prefix(info.compressed))
             }
             offset += info.uncompressed
             wanted -= info.uncompressed
@@ -516,12 +529,13 @@ struct PackMach {
     // MARK: - Decompression (compress.cpp)
 
     /**
-     `data` decompressed by UPX method `method` into `destination`, which it must fill: NRV2B, NRV2D and NRV2E by UCL
-     (`UCLBridge`), LZMA by the LZMA SDK (`LZMABridge`).
+     The first `count` bytes of `data`, a block with its slack after it, decompressed by UPX method `method` into
+     `destination`, which it must fill: NRV2B, NRV2D and NRV2E by UCL (`UCLBridge`), LZMA by the LZMA SDK
+     (`LZMABridge`).
      */
-    private static func decompress(_ data: Data, method: UInt8, into destination: UnsafeMutableRawBufferPointer) throws {
+    private static func decompress(_ data: Data, count: Int, method: UInt8, into destination: UnsafeMutableRawBufferPointer) throws {
         let decompressed = data.withUnsafeBytes { source in
-            method == 14 ? LZMABridge.decompress(source, into: destination) : UCLBridge.decompress(source, method: method, into: destination) ?? false
+            method == 14 ? LZMABridge.decompress(UnsafeRawBufferPointer(rebasing: source.prefix(count)), into: destination) : UCLBridge.decompress(source, count: count, method: method, into: destination) ?? false
         }
         guard decompressed else {
             throw UnpackError.cantUnpack("compressed data violation")

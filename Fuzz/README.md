@@ -13,7 +13,7 @@ here feed libFuzzer's inputs through those parsers under AddressSanitizer, one e
 | `diff`     | the digests `--match` is given: their shape, which names their algorithm, their typing into `Targets`, `TLSHBridge.diff` and `SSDeepBridge.compare` |
 | `bytehash` | ssdeep's, TLSH's and git's hashers over the bytes, streamed from a file and whole in memory              |
 | `unpack`   | `MachOEditor.edit`: UPX's pack header, with its marker and without, UCL's and LZMA's decoders, the unfilters, signature removal, the universal rebuild; then the edit read as the scan reads it, walked, cdhashed and symhashed across its pieces |
-| `decompress` | one block of UPX's packed data, fed straight to `UCLBridge.decompress` and `LZMABridge.decompress` by its method, up to 1 MiB out, then `PackMach.unfilter` over what came out, where `unpack` reaches them behind a whole packed Mach-O |
+| `decompress` | one block of UPX's packed data, fed straight to `UCLBridge.decompress` and `LZMABridge.decompress` by its method, with the slack UCL's decoders may read past a block, up to 1 MiB out, then `PackMach.unfilter` over what came out, where `unpack` reaches them behind a whole packed Mach-O |
 
 An input reaches a parser as a `File`, the way a test fixture does: written over one scratch file per process and
 opened from there (`support.swift`); `decompress` takes its bytes as they are, a block's `b_info` then its data. `macho`, `cdhash` and `unpack` are built with both `--exact` endings (see

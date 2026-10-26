@@ -4,7 +4,8 @@ import XCTest
 /**
  UCL's NRV decompressors as UPX calls them: each method's stream, made by UCL's own compressor (`ucl_nrv2*_99_compress`
  at level 10, its bit buffer 32, 8 or 16 bits wide), decompresses to the text it was made from. A stream cut short, or
- decompressed to another size, does not hold, and LZMA is no method of UCL's.
+ decompressed to another size, does not hold, and LZMA is no method of UCL's. A block cut where a word is fetched has
+ the decoders read past it, as far as the slack the bridge asks for after a block, and no further.
  */
 final class UCLBridgeTests: XCTestCase {
     private let text = Data("fashion unpacks what UPX packed, block by block; fashion unpacks what UPX packed, block by block.\n".utf8)
@@ -23,13 +24,34 @@ final class UCLBridgeTests: XCTestCase {
         10: "ffff66617368696f6e20756e7061636b7320bbff7768617420555058201d656435fb2c20626c6f100a79889d113b206124bc2e0a4992a824ff",
     ]
 
-    /// `stream` decompressed by `method` into `count` bytes: the bridge's verdict, and the bytes when it holds.
+    /// `stream` decompressed by `method` into `count` bytes, the slack the bridge asks for after it: the bridge's
+    /// verdict, and the bytes when it holds.
     private func decompress(_ stream: Data, method: UInt8, count: Int) -> (Bool?, Data) {
         var output = Data(count: count)
-        let result = stream.withUnsafeBytes { source in
-            output.withUnsafeMutableBytes { UCLBridge.decompress(source, method: method, into: $0) }
+        let result = (stream + Data(count: UCLBridge.slack)).withUnsafeBytes { source in
+            output.withUnsafeMutableBytes { UCLBridge.decompress(source, count: stream.count, method: method, into: $0) }
         }
         return (result, output)
+    }
+
+    /// Blocks the decompress fuzz harness found the decoders reading past, each cut where a word is fetched: the
+    /// method, the size it claims, and its bytes.
+    private let partial: [(method: UInt8, count: Int, hex: String)] = [
+        (2, 16384, "975d76cb50002e0304c0010000ff5455c9200032aaaa642a19555555958caaa3aa4a46925155250040a8a80100000000"),
+        (2, 16384, "975d76cb50002e0304c0010000ff5455c9200032aaaa642a"),
+        (5, 16384, "5cbb6ccb50002e0604c0010001ff5155258300c9a8aa92aa645455bd558300c9a8aa92aa645455555532aaa2002a4992ff"),
+        (8, 16384, "4cdb7ccd50002e0604c0010001ff4255959c0025a1aa4aaa925055545549a812aaaa242afe555592242c8a00a82449ff"),
+    ]
+
+    /**
+     The 32-bit decoders fetch a whole word before they check the input, from wherever the bits ran out among
+     the bytes read one at a time: with the slack after the block they read no further, and the block does not
+     hold.
+     */
+    func testBlocksCutWhereAWordIsFetchedAreRefused() throws {
+        for (method, count, hex) in self.partial {
+            XCTAssertEqual(try self.decompress(XCTUnwrap(Data(hex: hex)), method: method, count: count).0, false, "method \(method)")
+        }
     }
 
     func testEachMethodDecompressesItsStream() throws {
