@@ -398,11 +398,14 @@ final class ThinnerTests: XCTestCase {
             let group = DispatchGroup()
             for name in ["fat", "fat_x86_64"] {
                 group.enter()
-                Thread {
+                let thread = Thread {
                     let lines = Thinner.lines(for: (directory / name).path, exact: true, unsign: false, unpack: false, write: false, reporter: reporter)
                     texts.withLock { $0 += lines.map(\.text) }
                     group.leave()
-                }.start()
+                }
+                // The test waits at its own QoS: a thread below it would be an inversion, which Xcode flags.
+                thread.qualityOfService = .userInitiated
+                thread.start()
             }
             group.wait()
             XCTAssertEqual(reporter.errorCount, 0)
