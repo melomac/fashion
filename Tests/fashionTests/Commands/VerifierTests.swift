@@ -203,7 +203,7 @@ final class VerifierTests: XCTestCase {
         _ = try codesign(["--remove-signature", apple.path])
         let vmsize = try XCTUnwrap(XCTUnwrap(MachO(File(path: apple.path))).findSegment("__LINKEDIT")).load(segment_command_64.self).vmsize
         self.assertVerify(apple.path, ["\(apple.path): __LINKEDIT's vmsize \(vmsize.hex) is a signature's 16 KiB rounding on an image without one: a signature came out"])
-        XCTAssertEqual(Unsigner.lines(for: signed.path, exact: false, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"])
+        XCTAssertEqual(Unsigner.lines(for: signed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"])
         self.assertVerify(signed.path + "_unsigned", [])
     }
 

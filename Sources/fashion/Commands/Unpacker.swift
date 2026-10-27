@@ -18,9 +18,6 @@ struct Unpacker: ParsableCommand {
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(help: "Write an exact Mach-O image, dropping appended bytes.")
-    var exact = false
-
     @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
     var write = false
 
@@ -43,14 +40,16 @@ struct Unpacker: ParsableCommand {
  signature it had before packing, if any: `unsign` over the artifact takes it off, into
  `sample_unsigned_unpacked_unsigned`, as `thinr --unpack --unsign` would.
 
- A file UPX did not pack, or that is not Mach-O, has nothing to write, unless --exact cuts bytes appended to it: the
- cut alone is written then, as `_exact`. Packed data that does not hold is reported, in red.
+ A file UPX did not pack, or that is not Mach-O, has nothing to write. Packed data that does not hold is reported, in
+ red.
 
- With --exact, an image UPX packed is cut where it ends (`MachO.logicalEnd()`) before anything else, as hash mode's
- --exact cuts it, so bytes appended after a signature do not keep it in. An image of a universal file the flags leave
- alone keeps its appended bytes, since hash mode reads the file whole. Without --exact, such a signature cannot come
- out, hides what UPX left, and the file is left as it is with nothing said, as hash mode's --unpack alone hashes it;
- --unsign refuses it there.
+ Bytes appended past a signature added after packing hide what UPX left: hash mode's --unpack hashes such a file as it
+ is, with nothing said, and its --unsign refuses it. Here the bytes are cut off first, as --exact cuts them
+ (`MachO.logicalEnd()`), the signature comes out, and the artifact is named `_exact_unsigned_unpacked` for it, what
+ hash mode's --exact --unpack reads. An image of a universal file nothing is done to keeps its appended bytes, since
+ the file is read whole. A file cut short of its last page, as a file UPX 3.91 packed and that lost it, is padded to
+ be read, as --exact pads it, and named `_exact` for that too. The unpacked image keeps the bytes appended to it
+ before packing, as `upx -d` gives them back; `thinr --exact --unpack` cuts them.
  */
 extension Unpacker {
     /**
@@ -58,15 +57,15 @@ extension Unpacker {
      or written. `trapSignals` as `Hasher.scan(trapSignals:)`.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        logger.info("Unpack\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("Unpack\(self.scan.sort ? " sorted" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, write) = (self.exact, self.write)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, exact: exact, write: write, reporter: $1) }
+        let write = self.write
+        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, write: write, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
     /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unpacked, whole.
-    static func lines(for path: String, exact: Bool, write: Bool, reporter: Reporter) -> [Line] {
-        ArtifactWriter(exact: exact, unsign: false, unpack: true, split: false, write: write).lines(for: path, reporter: reporter)
+    static func lines(for path: String, write: Bool, reporter: Reporter) -> [Line] {
+        ArtifactWriter(exact: false, unsign: false, unpack: true, split: false, write: write).lines(for: path, reporter: reporter)
     }
 }

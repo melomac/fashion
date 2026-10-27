@@ -38,6 +38,12 @@ extension ArtifactError: LocalizedError {
  The names add up: a later run with other flags over an artifact makes what one run with all the flags would,
  `ls_x86_64` unsigned being `ls_x86_64_unsigned` either way.
 
+ Without `exact`, the cut and the padding come where an edit needs them (`MachOEditor.Exact.asNeeded`), and the
+ artifact is named `_exact` for them all the same. Bytes appended past an image's end keep its signature from coming
+ out: hash mode's --unsign refuses such a file, as `codesign` does, and its --unpack finds no UPX behind the
+ signature. `unsign` cuts the bytes off and writes `sample_exact_unsigned`; `unpack` cuts them off and unpacks. A
+ file cut short of its last page is padded to be read, when an edit comes of it.
+
  An artifact already in place, byte for byte, is left as it is and only noted in the unified log, so a second run
  over a tree is as quiet on the terminal as the first. A different file under an artifact's name is left alone and
  reported, with its size and SHA-256 and the artifact's, unless `write` replaces it; the unified log records that
@@ -64,7 +70,7 @@ struct ArtifactWriter {
         do {
             let read = try File(path: path)
             // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it.
-            let edited = try self.unsign || self.unpack || self.exact ? MachOEditor.edit(read, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
+            let edited = try self.unsign || self.unpack || self.exact ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
                 caveats.append(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
             }) : nil
             let opened = edited?.source ?? read

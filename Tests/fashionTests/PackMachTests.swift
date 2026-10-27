@@ -383,17 +383,18 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: unpacked), signed)
         _ = try codesign(["--verify", "--strict", unpacked.path])
         // unpack writes the file as thin leaves it, found in place; unsign over it takes Apple's signature off.
-        XCTAssertEqual(Unpacker.lines(for: packed.path, exact: false, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
-        XCTAssertEqual(Unsigner.lines(for: unpacked.path, exact: false, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
+        XCTAssertEqual(Unpacker.lines(for: packed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
+        XCTAssertEqual(Unsigner.lines(for: unpacked.path, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked.path + "_unsigned")), data)
     }
 
     /**
-     Bytes appended after a signature added after packing keep it in: unsign refuses the file, as codesign
-     does, and --unpack alone, which would look past the signature, finds no UPX behind it and leaves the file
-     as it is, with nothing said; --exact drops the bytes first, and the sample unpacks.
+     Bytes appended after a signature added after packing keep it in: hash mode's --unsign refuses the file, as
+     codesign does, and its --unpack alone, which would look past the signature, finds no UPX behind it and hashes
+     the file as it is, with nothing said, unless --exact drops the bytes first; unpack drops them itself, as thin
+     --unpack does, the cut and the unsigned image states on the way, and names the artifacts for it.
      */
-    func testUnpackAloneLeavesASignatureAppendedBytesFollowIn() throws {
+    func testUnpackCutsBytesAppendedPastASignatureAddedAfterPacking() throws {
         let directory = try self.directory("signed-padded")
         let (name, unsigned, data) = try XCTUnwrap(self.unsignedLs(in: directory).first)
         let signed = try self.resigned(self.packed(unsigned))
@@ -409,18 +410,20 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(try runFashion(["--unpack", "--unsign", file.path]).errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"])
 
         let reporter = Reporter(console: Console())
-        XCTAssertEqual(Unpacker.lines(for: file.path, exact: false, write: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, write: false, reporter: reporter).map(\.text), [file.path + "_exact_unsigned_unpacked"])
+        XCTAssertEqual(Unpacker.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_exact_unsigned_unpacked"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact_unsigned_unpacked")), data)
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).map(\.text), ["_exact", "_exact_unsigned", "_exact_unsigned_unpacked"].map { file.path + $0 })
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact")), try Data(contentsOf: signed))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unsigned_unpacked"))
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
     /**
      Bytes appended to an image before packing are packed as its last gap and come back with it: unpack hashes
      them as upx -d writes them, and --exact cuts them off the unpacked image, as it cuts them off any image,
-     which 1.5 did only when a signature came off it; thin writes the unpacked image, then the cut. Signed after
-     packing, the signature comes out first, and the states are named for it.
+     which 1.5 did only when a signature came off it; thin writes the unpacked image, then the cut, where unpack
+     keeps them, as upx -d gives them back. Signed after packing, the signature comes out first, and the states are
+     named for it.
      */
     func testExactCutsBytesAppendedToTheUnpackedImage() throws {
         let directory = try self.directory("overlay")
@@ -435,10 +438,35 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: false, unpack: true, write: false, reporter: reporter).map(\.text), [file.path + "_unpacked", file.path + "_unpacked_exact"], name)
             XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), padded, name)
             XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked_exact")), original, name)
-            XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, write: false, reporter: reporter).map(\.text), [file.path + "_unpacked_exact"], name)
+            XCTAssertEqual(Unpacker.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_unpacked"], name)
             let signed = try self.resigned(file)
             XCTAssertEqual(try self.hashLines(signed.path, ["--unpack", "--exact"]), try [XCTUnwrap(ByteHash.sha256.digest(original))], name)
-            XCTAssertEqual(Unpacker.lines(for: signed.path, exact: true, write: false, reporter: reporter).map(\.text), [signed.path + "_unsigned_unpacked_exact"], name)
+            XCTAssertEqual(Unpacker.lines(for: signed.path, write: false, reporter: reporter).map(\.text), [signed.path + "_unsigned_unpacked"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: signed.path + "_unsigned_unpacked")), padded, name)
+            XCTAssertEqual(reporter.errorCount, 0, name)
+        }
+    }
+
+    /**
+     An image signed, then given appended bytes, then packed: its own signature comes back with the bytes past it,
+     which keep it in, so hash mode's --unpack --unsign refuses the file, as its --unsign refuses the image, unless
+     --exact cuts the unpacked image first; thin --unsign --unpack cuts it as needed, the unpacked image's own cut a
+     state of its own, and the signature comes out.
+     */
+    func testTheUnpackedImagesOwnSignatureComesOutPastBytesAppendedBeforePacking() throws {
+        let directory = try self.directory("inner-appended")
+        for (name, unsigned, original) in try self.unsignedLs(in: directory) {
+            let signed = try self.resigned(unsigned)
+            let source = directory / "\(name)_signed_padded"
+            try (Data(contentsOf: signed) + Data(repeating: 0x4a, count: 8)).write(to: source)
+            let file = try self.packed(source)
+            XCTAssertEqual(try runFashion(["--unpack", "--unsign", file.path]).errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"], name)
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack", "--unsign", "--exact"]), try [XCTUnwrap(ByteHash.sha256.digest(original))], name)
+            let reporter = Reporter(console: Console())
+            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: true, write: false, reporter: reporter).map(\.text), ["_unpacked", "_unpacked_exact", "_unpacked_exact_unsigned"].map { file.path + $0 }, name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), try Data(contentsOf: source), name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked_exact")), try Data(contentsOf: signed), name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked_exact_unsigned")), original, name)
             XCTAssertEqual(reporter.errorCount, 0, name)
         }
     }
@@ -480,7 +508,7 @@ final class PackMachTests: XCTestCase {
 
         XCTAssertEqual(try self.hashLines(universal.path, ["--unpack"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
         // unpack writes the universal file whole, as lipo made it of the originals; thin writes its slices.
-        XCTAssertEqual(Unpacker.lines(for: universal.path, exact: false, write: false, reporter: Reporter(console: Console())).map(\.text), [universal.path + "_unpacked"])
+        XCTAssertEqual(Unpacker.lines(for: universal.path, write: false, reporter: Reporter(console: Console())).map(\.text), [universal.path + "_unpacked"])
         XCTAssertEqual(try Data(contentsOf: directory / "universal_unpacked"), try Data(contentsOf: original))
         XCTAssertEqual(Thinner.lines(for: universal.path, exact: false, unsign: false, unpack: true, write: false, reporter: Reporter(console: Console())).count, 3)
         // The slice UPX packed is written as it is and named for its unpacking; the other, as it was, keeps its name.
@@ -501,9 +529,9 @@ final class PackMachTests: XCTestCase {
         // the artifact gives the originals' file.
         let reporter = Reporter(console: Console())
         let unpacked = resigned.path + "_unsigned_unpacked"
-        XCTAssertEqual(Unpacker.lines(for: resigned.path, exact: false, write: false, reporter: reporter).map(\.text), [unpacked])
+        XCTAssertEqual(Unpacker.lines(for: resigned.path, write: false, reporter: reporter).map(\.text), [unpacked])
         XCTAssertEqual(try self.hashLines(unpacked, ["--unsign"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
-        XCTAssertEqual(Unsigner.lines(for: unpacked, exact: false, write: false, reporter: reporter).map(\.text), [unpacked + "_unsigned"])
+        XCTAssertEqual(Unsigner.lines(for: unpacked, write: false, reporter: reporter).map(\.text), [unpacked + "_unsigned"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked + "_unsigned")), try Data(contentsOf: original))
         XCTAssertEqual(reporter.errorCount, 0)
     }
@@ -747,53 +775,89 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
-     UPX 3.91 laid an `x86_64` file out with an empty `__LINKEDIT` at its padded end; a file cut short of that padding
-     has it past the end, which the kernel refuses to load, and the parser refuses as the kernel does: reported in
-     red like any malformed Mach-O, hashed nowhere, written nowhere.
+     UPX 3.91 laid an `x86_64` file out with `__TEXT` ending just past the pack header and an empty `__LINKEDIT` at the
+     page after it, the file padded with zeros up to there; one that lost that padding has the segment past its end,
+     which the kernel refuses to load, and the parser refuses as the kernel does: reported in red like any malformed
+     Mach-O, hashed nowhere, written nowhere, unless --exact gives it its page back, which unpack does as needed, the
+     pack header then where UPX looks for it, and unsign for nothing.
      */
     func testAPackedFileCutShortOfItsLinkeditIsMalformed() throws {
         let directory = try self.directory("cut-short")
-        for (name, unsigned, _) in try self.unsignedLs(in: directory) {
+        for (name, unsigned, data) in try self.unsignedLs(in: directory) {
             var packed = try Data(contentsOf: self.packed(unsigned))
+            func store(_ value: some FixedWidthInteger, at offset: Int) {
+                packed.replaceSubrange(offset ..< offset + MemoryLayout.size(ofValue: value), with: withUnsafeBytes(of: value.littleEndian) { Data($0) })
+            }
+            // Today's UPX pads __TEXT to its page and writes 16 bytes of __LINKEDIT after it, where 3.91 ended __TEXT
+            // just past the pack header and put an empty __LINKEDIT at the page after it, laid out so here. Its
+            // __PAGEZERO comes out too: three segments read as 3.92's layout, which keeps the pack header in
+            // __LINKEDIT, where 3.91's, which has another segment, is read back from before __LINKEDIT.
+            let pagezero = try XCTUnwrap(XCTUnwrap(MachO(File(data: packed))).findSegment("__PAGEZERO"))
+            let ncmds = packed.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 16, as: UInt32.self) }
+            let sizeofcmds = packed.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 20, as: UInt32.self) }
+            packed.insert(contentsOf: Data(count: pagezero.data.count), at: MemoryLayout<mach_header_64>.size + Int(sizeofcmds))
+            packed.removeSubrange(pagezero.data.indices)
+            store(ncmds - 1, at: 16)
+            store(sizeofcmds - UInt32(pagezero.data.count), at: 20)
             let image = try XCTUnwrap(MachO(File(data: packed)))
             let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT"))
-            let text = try XCTUnwrap(image.findSegment("__TEXT")).load(segment_command_64.self)
-            let fileoff = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.fileoff))
-            let filesize = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.filesize))
-            packed.replaceSubrange(fileoff ..< fileoff + 8, with: withUnsafeBytes(of: UInt64(packed.count + 0x1000).littleEndian) { Data($0) })
-            packed.replaceSubrange(filesize ..< filesize + 8, with: Data(count: 8))
+            let text = try XCTUnwrap(image.findSegment("__TEXT"))
+            let end = try (XCTUnwrap(packed.lastIndex { $0 != 0 }) + 16) & ~15
+            let pageSize = name == "x86_64" ? 0x1000 : 0x4000
+            let page = (end / pageSize + 1) * pageSize
+            func field(_ segment: MachO.LoadCommand, _ field: PartialKeyPath<segment_command_64>) throws -> Int {
+                try segment.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: field))
+            }
+            try store(UInt64(end), at: field(text, \.filesize))
+            try store(UInt64(page), at: field(linkedit, \.fileoff))
+            try store(UInt64(0), at: field(linkedit, \.filesize))
+            packed = packed.prefix(end)
             let file = directory / name
             try packed.write(to: file)
             saveFixture(path: file.path)
-            let message = "Invalid Mach-O: segment __LINKEDIT at offset \((packed.count + 0x1000).hex) with size 0x0 is outside the \(packed.count.hex)-byte slice"
+            let message = "Invalid Mach-O: segment __LINKEDIT at offset \(page.hex) with size 0x0 is outside the \(end.hex)-byte slice"
             let (status, errors) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 2, name)
             XCTAssertEqual(errors, ["fashion: \(file.path): \(message)"], name)
+            // thin --unsign pads it as needed, finds no signature, and has padded it for nothing: the file as it is.
             let reporter = Reporter(console: Console())
-            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
+            let lines = Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter)
             XCTAssertEqual(lines.count, 1, name)
             XCTAssertTrue(lines.first?.text.hasSuffix(message) ?? false, name)
             XCTAssertEqual(lines.first?.tint, .malformed, name)
             XCTAssertEqual(reporter.errorCount, 1, name)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_exact"), name)
 
             // With --exact, the page comes back and the file is named for it: hashed as its headers lay it out, padded,
             // and written so as _exact, where the image ends at __LINKEDIT; cut back to the bytes the segments
-            // reference, __TEXT's, where every range counts, and written so as _exact.
-            let caveat = "fashion: \(file.path): cut short of its last page, 0x1000 bytes before __LINKEDIT at \((packed.count + 0x1000).hex): padded with zeros"
+            // reference, __TEXT's, the file as it is, where every range counts, and written so as _exact.
+            let caveat = "fashion: \(file.path): cut short of its last page, \((page - end).hex) bytes before __LINKEDIT at \(page.hex): padded with zeros"
             let padded = Reporter(console: Console())
             let exacted = Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: false, reporter: padded).map(\.text)
 #if SECURITY_STRICT_VALIDATION
-            XCTAssertEqual(try self.hashLines(file.path, ["--exact"]), try [caveat, XCTUnwrap(ByteHash.sha256.digest(packed + Data(count: 0x1000)))], name)
-            XCTAssertEqual(exacted, [caveat, file.path + "_exact"], name)
-            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact")), packed + Data(count: 0x1000), name)
+            let exact = packed + Data(count: page - end)
 #else
-            let referenced = packed.prefix(Int(text.fileoff + text.filesize))
-            XCTAssertEqual(try self.hashLines(file.path, ["--exact"]), try [caveat, XCTUnwrap(ByteHash.sha256.digest(referenced))], name)
-            XCTAssertEqual(exacted, [caveat, file.path + "_exact"], name)
-            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact")), referenced, name)
+            let exact = packed
 #endif
+            XCTAssertEqual(try self.hashLines(file.path, ["--exact"]), try [caveat, XCTUnwrap(ByteHash.sha256.digest(exact))], name)
+            XCTAssertEqual(exacted, [caveat, file.path + "_exact"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact")), exact, name)
             XCTAssertEqual(padded.errorCount, 0, name)
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack", "--exact"]), try [caveat, XCTUnwrap(ByteHash.sha256.digest(data))], name)
+
+            // Without the flag, unpack pads the file as needed to read it, as thin --unpack does, --exact's _exact
+            // found in place and the padding said; unsign, finding no signature, has padded it for nothing: the file
+            // as it is is malformed, with no word of the padding.
+            let asNeeded = Reporter(console: Console())
+            XCTAssertEqual(Unpacker.lines(for: file.path, write: false, reporter: asNeeded).map(\.text), [caveat, file.path + "_exact_unpacked"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact_unpacked")), data, name)
+            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: asNeeded).map(\.text), [caveat, file.path + "_exact", file.path + "_exact_unpacked"], name)
+            XCTAssertEqual(asNeeded.errorCount, 0, name)
+            let forNothing = Reporter(console: Console())
+            let left = Unsigner.lines(for: file.path, write: false, reporter: forNothing)
+            XCTAssertEqual(left.count, 1, name)
+            XCTAssertTrue(left.first?.text.hasSuffix(message) ?? false, name)
+            XCTAssertEqual(forNothing.errorCount, 1, name)
         }
     }
 
@@ -821,7 +885,7 @@ final class PackMachTests: XCTestCase {
         let warning = "fashion: \(file.path) (\(slices[0].name)): packed by a modified UPX, its marker \"VQY\\\"\" in place of \"UPX!\""
         XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]).first, warning)
         let reporter = Reporter(console: Console())
-        for lines in [Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter), Unpacker.lines(for: file.path, exact: false, write: false, reporter: reporter)] {
+        for lines in [Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter), Unpacker.lines(for: file.path, write: false, reporter: reporter)] {
             XCTAssertEqual(lines.map(\.diagnostic), [true, true])
             XCTAssertEqual(lines.first?.text, warning)
             XCTAssertEqual(lines.last?.tint, .malformed)

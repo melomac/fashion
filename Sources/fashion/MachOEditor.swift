@@ -56,28 +56,55 @@ enum MachOEditor {
     }
 
     /**
+     How far the `exact` cut goes: nowhere (`never`), or everywhere, each image cut where its load commands end it
+     (`always`), as hash mode has it without and with --exact; or where a stage needs it alone (`asNeeded`), as `thinr`,
+     `unsign` and `unpack` have it without --exact: a file cut short of its last page padded to be read at all, an
+     image cut where bytes appended past its end keep its signature from coming out, and the unpacked image likewise,
+     each named `_exact` for it as the flag would name it.
+     */
+    enum Exact {
+        case never, asNeeded, always
+
+        /// The cut as the flag alone has it, for a stage that needs none.
+        var flagged: Exact {
+            self == .always ? .always : .never
+        }
+    }
+
+    /**
      The file as the edits leave it, the states each image went through, one per edit, in the order of a
      universal file's architectures, an image the edits leave alone with none, and the file the states are pieces of,
      `file` or its padding (`padded`); nil when they change nothing. With
      `unsign`, each image comes out without its code signature, as `MachO.removingSignature(end:)` leaves it; with
      `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing, since it
      hides what UPX left, then with `unsign` the unpacked image's own signature comes out; a universal file with its
-     architectures so is laid out again as `lipo` lays out the architectures it is given. With `exact`, an image is cut
-     where it ends before its signature comes out, so appended bytes do not keep it in, the unpacked image too; one the
-     edits leave alone is left as it is, appended bytes included, since the cut alone is no edit. Throws
-     for a Mach-O that does not parse, with `unsign` for a signature that does not end its image, which `unpack` alone
-     leaves in, the image looked at as it is, and for packed data, or the image unpacked from it, that does not hold.
+     architectures so is laid out again as `lipo` lays out the architectures it is given. With `exact` `always`, an
+     image is cut where it ends before its signature comes out, so appended bytes do not keep it in, the unpacked image
+     too; one the edits leave alone is left as it is, appended bytes included, since the cut alone is no edit. As
+     needed, the cut and the padding come where a stage needs them alone, the padding held back until an edit comes of
+     it. Throws for a Mach-O that does not parse, with `unsign` for a signature that does not end its image and that no
+     cut frees, which `unpack` alone leaves in, the image looked at as it is, and for packed data, or the image unpacked from it, that does not hold.
      `caveat` hears what an edit has to say about an image, named after its architecture in a universal file: that a
      modified UPX packed it, and how.
      */
-    static func edit(_ file: File, exact: Bool, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> (file: File, states: [[State]], source: File)? {
+    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> (file: File, states: [[State]], source: File)? {
         let read = file
-        let file = try exact ? self.padded(file, caveat: { caveat(nil, $0) }) : file
+        var held: [String] = []
+        let file = try exact == .never ? file : self.padded(file, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
         switch try Universal.open(file) {
         case let .thin(image):
-            guard let edit = try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { caveat(nil, $0) }) else {
+            var said: [String] = []
+            defer {
+                said.forEach { caveat(nil, $0) }
+            }
+            guard let edit = try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { said.append($0) }) else {
+                // Padded as needed for nothing: the file as it is, which the parser refuses, says why.
+                if file !== read {
+                    _ = try Universal.open(read)
+                }
                 return nil
             }
+            said = held + said
             return (File(editing: file, pieces: edit.states.last!.pieces), [edit.states], file)
         case let .fat(archs):
             let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in
@@ -122,16 +149,16 @@ enum MachOEditor {
 
     /**
      The states `image` of `file` goes through as the edits are done, the last as they leave it, the first the image
-     `padded` where `file` was cut short of its last page, and the alignment
-     `lipo` gives the image they make; nil when they change nothing, an image the `exact` cut alone would shorten
-     included, which is left as it is. `caveat` hears `PackMach`'s word on the image: that a modified UPX packed it, or
-     that UPX packed it and it is left as it is, and why. An unpacked image lives in memory, the states after it sharing
-     its bytes.
+     `padded` where `file` was cut short of its last page, cut where it ends as the padding is the cut's doing, and the
+     alignment `lipo` gives the image they make; nil when they change nothing, an image the `exact` cut alone would
+     shorten included, which is left as it is, and the padded image as needed. `caveat` hears `PackMach`'s word on the
+     image: that a modified UPX packed it, or that UPX packed it and it is left as it is, and why. An unpacked image
+     lives in memory, the states after it sharing its bytes.
      */
-    private static func edit(_ image: MachO, of file: File, exact: Bool, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void) throws -> (states: [State], align: Int)? {
+    private static func edit(_ image: MachO, of file: File, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void) throws -> (states: [State], align: Int)? {
         var states: [State] = []
         var edits: Edits = padded ? [.exact] : []
-        let end = exact ? image.logicalEnd() : image.length
+        let end = padded ? image.logicalEnd() : self.cut(image, exact: exact)
         if end < image.length {
             edits.insert(.exact)
             states.append(State(edits: edits, pieces: [.range(image.offset ..< image.offset + end)]))
@@ -169,7 +196,8 @@ enum MachOEditor {
                     throw UnpackError.cantUnpack("file header corrupted")
                 }
                 align = unpacked.universalAlignment
-                let end = exact ? unpacked.logicalEnd() : unpacked.length
+                // Its own cut, as needed for its own signature to come out.
+                let end = self.cut(unpacked, exact: unsign ? exact : exact.flagged)
                 if end < unpacked.length {
                     edits.insert(.exactUnpacked)
                     states.append(State(edits: edits, pieces: [.bytes(data[..<end])]))
@@ -180,10 +208,34 @@ enum MachOEditor {
                 }
             }
         }
-        guard !edits.isDisjoint(with: [.unsigned, .unpacked]) || padded else {
+        guard !edits.isDisjoint(with: [.unsigned, .unpacked]) || (padded && exact == .always) else {
             return nil
         }
         return (states, align)
+    }
+
+    /**
+     Where `image` is cut before its signature comes out, as `exact` has it: where its load commands end it, or as it
+     is; and as needed, where they end it when its signature does not end the image as it is, bytes appended past them
+     keeping it in, which the cut takes off, tried as it is first. A signature inside the image, which no cut frees, is
+     left for the removal itself to refuse, as is whatever else it has to say.
+     */
+    private static func cut(_ image: MachO, exact: Exact) -> Int {
+        switch exact {
+        case .always:
+            return image.logicalEnd()
+        case .never:
+            return image.length
+        case .asNeeded:
+            do {
+                _ = try image.removingSignature(end: image.length)
+            } catch EditError.signatureNotAtEnd where image.logicalEnd() < image.length {
+                return image.logicalEnd()
+            } catch {
+                // Said when the removal is done for good.
+            }
+            return image.length
+        }
     }
 
     /**

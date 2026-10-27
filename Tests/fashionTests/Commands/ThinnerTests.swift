@@ -682,10 +682,11 @@ final class ThinnerTests: XCTestCase {
 
     /**
      Up to 7 bytes after the signature go with it, as `codesign` lets them go. Any more would be cut off with it, so
-     the file is reported in Security's words and nothing is written, as codesign fails too, unless --exact cuts
-     them off first.
+     hash mode's --unsign reports the file in Security's words and hashes nothing, as codesign fails too, where thinr
+     --unsign cuts them off first, as --exact would, the cut a state of its own: the slice as it is, cut, then without
+     its signature, what thinr --exact --unsign writes, found in place then; unsign writes the whole, named for it.
      */
-    func testUnsignLeavesAppendedBytesToExact() throws {
+    func testUnsignCutsAppendedBytesAsNeeded() throws {
         let directory = try self.directory("unsign-appended")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -709,23 +710,21 @@ final class ThinnerTests: XCTestCase {
         try (slice + junk).write(to: oracle)
         XCTAssertThrowsError(try codesign(["--remove-signature", oracle.path]))
         let reporter = Reporter(console: Console())
-        let lines = Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter)
-        XCTAssertEqual(lines.count, 1)
-        XCTAssertEqual(lines.first?.tint, .error)
-        XCTAssertEqual(lines.first?.diagnostic, true)
-        XCTAssertEqual(reporter.errorCount, 1)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: artifact.path))
-        for arguments in [["thinr", "--unsign"], ["--unsign"]] {
-            let (status, errors) = try runFashion(arguments + [file.path])
-            XCTAssertEqual(status, 2)
-            XCTAssertEqual(errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"])
-        }
-
-        // Every state along the way: the slice as it is, cut, then without its signature.
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [(directory / "eight_x86_64").path, (directory / "eight_x86_64_exact").path, artifact.path])
+        let states = [(directory / "eight_x86_64").path, (directory / "eight_x86_64_exact").path, artifact.path]
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text), states)
+        XCTAssertEqual(reporter.errorCount, 0)
         XCTAssertEqual(try Data(contentsOf: directory / "eight_x86_64"), slice + junk)
         XCTAssertEqual(try Data(contentsOf: directory / "eight_x86_64_exact"), slice)
         XCTAssertEqual(try Data(contentsOf: artifact), unsigned)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: (directory / "eight_x86_64_unsigned").path))
+        let (status, errors) = try runFashion(["--unsign", file.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"])
+        XCTAssertEqual(try runFashion(["thinr", "--unsign", file.path]).status, 0)
+
+        // The same states with the flag, found in place; the whole file as unsign writes it, named for its slice.
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), states)
+        XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: Reporter(console: Console())).map(\.text), [(directory / "eight_exact_unsigned").path])
         XCTAssertEqual(try self.hashLines(file.path, ["--unsign", "--exact", "--slices"]), try self.hashLines((directory / "plain").path, ["--unsign", "--slices"]))
     }
 

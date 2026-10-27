@@ -1012,7 +1012,7 @@ struct Digester {
         // A modified UPX packed it, or the file is cut short of its last page: a second look, whatever --quiet keeps
         // off, like a signature that does not hold.
         let opened = try self.exact ? MachOEditor.padded(read, caveat: { note(reporter.warn(path: path, message: $0)) }) : read
-        let file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
+        let file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
             note(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
         })?.file ?? opened : opened
         // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless

@@ -55,9 +55,12 @@ struct Thinner: ParsableCommand {
  unpacked, so --unpack alone writes that state too. A thin Mach-O the flags change gets its artifacts the same way,
  where `unsign` and `unpack` write the file as the edits leave it, whole.
 
- A signature that appended bytes follow cannot come out as it is: under --unsign the file is reported and nothing is
- written for it; under --unpack alone the signature stays, the image is looked at as it is, and no UPX is found
- behind it. --exact cuts those bytes off first.
+ Bytes appended past an image's end keep its signature from coming out. They are cut off as needed, without --exact:
+ for --unsign to take the signature off, and for --unpack to find UPX behind it. The cut is a state of its own, named
+ `_exact` as --exact would name it; the unpacked image's own signature gets the same. A file cut short of its last
+ page is padded to be read, as --exact pads it, when an edit comes of it. A signature inside its image, which no cut
+ frees, is reported under --unsign and nothing is written for the file; under --unpack alone it stays, and the image
+ is looked at as it is.
 
  `ArtifactWriter` names and writes the artifacts, split: `ls_x86_64`, `ls_x86_64_unsigned`,
  `ls_x86_64_unsigned_unpacked` after the architecture of a universal file's slice, or `sample_unsigned` after the
