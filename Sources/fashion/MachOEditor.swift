@@ -17,7 +17,7 @@ extension EditError: LocalizedError {
 }
 
 /**
- A Mach-O file as `--unsign` and `--unpack` edit it, named after Security's `MachOEditor`, which `codesign
+ A Mach-O file as `unsign` and `unpack` edit it, named after Security's `MachOEditor`, which `codesign
  --remove-signature` drives: the file is edited in memory (`File(editing:pieces:)`), as Security edits its copy before
  it writes it, so hash mode digests the edit and `thin` writes it out.
 

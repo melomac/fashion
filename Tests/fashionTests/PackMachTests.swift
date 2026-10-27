@@ -3,9 +3,9 @@ import XCTest
 import zlib
 
 /**
- `--unpack`: a Mach-O UPX packed, given back as it was before packing, as `upx -d` gives it back, and where `upx -d`
+ `unpack`: a Mach-O UPX packed, given back as it was before packing, as `upx -d` gives it back, and where `upx -d`
  gives up, behind a signature added after packing. The packed fixtures are made at test time by the `upx` installed,
- with `--force-macos`, since UPX 4.2 no longer packs for macOS by default, and signed after packing by the Developer ID
+ with --force-macos, since UPX 4.2 no longer packs for macOS by default, and signed after packing by the Developer ID
  `local.xcconfig` names, or ad hoc without one.
  */
 final class PackMachTests: XCTestCase {
@@ -179,9 +179,11 @@ final class PackMachTests: XCTestCase {
         return block
     }
 
+    /**
+     Each compression method UPX packs Mach-O with, `x86_64` and arm64, each in a folder of its own: unpack gives
+     the image back byte for byte, as upx -d does, and thin writes it out. An image UPX did not pack is left as it is.
+     */
     func testUnpackRestoresWhatUPXPacked() throws {
-        // Each compression method UPX packs Mach-O with, x86_64 and arm64, each in a folder of its own: --unpack gives
-        // the image back byte for byte, as upx -d does, and thin writes it out. An image UPX did not pack is left as it is.
         let directory = try self.directory("methods")
         for (name, unsigned, original) in try self.unsignedLs(in: directory) {
             let digest = try XCTUnwrap(ByteHash.sha256.digest(original))
@@ -199,7 +201,7 @@ final class PackMachTests: XCTestCase {
                 XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [artifact.path])
                 XCTAssertEqual(try Data(contentsOf: artifact), original, "\(name) \(method)")
                 // upx -d, the oracle, into a file of its own, where it unpacks: for a __TEXT of a single page it looks for
-                // its pack header from before the file's start and gives up, where --unpack starts looking at the file's
+                // its pack header from before the file's start and gives up, where unpack starts looking at the file's
                 // start.
                 let upxd = URL(fileURLWithPath: file.path + "_upx-d")
                 if try execute(self.upx(), ["-q", "-d", "-o", upxd.path, file.path]) {
@@ -281,9 +283,11 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    /**
+     Filter 0x53, which UPX added after 5.2.1 for arm64 and packs with when asked, takes the conditional branches
+     too. An older upx packs with 0x52 when asked for it, and the test is skipped.
+     */
     func testUnpackUndoesTheArm64ConditionalBranchFilter() throws {
-        // Filter 0x53, which UPX added after 5.2.1 for arm64 and packs with when asked, takes the conditional branches
-        // too. An older upx packs with 0x52 when asked for it, and the test is skipped.
         let directory = try self.directory("filter-0x53")
         guard let (_, unsigned, original) = try self.unsignedLs(in: directory).first(where: { $0.name == "arm64e" }) else {
             throw XCTSkip("/bin/ls has no arm64e slice")
@@ -301,11 +305,13 @@ final class PackMachTests: XCTestCase {
         }
     }
 
+    /**
+     UPX's arm64 doctest instructions, filtered by UPX's own Filter as its Mach-O packer filters them (addvalue 0),
+     with three bytes after the last word: 0x52 takes B and BL, the last word only with bytes after it; 0x53 takes
+     the conditional branches too, and the last word always. The bytes after the last word stay as they are.
+     nop, b, bl, b.ne, cbz w5, cbz x5, cbnz w7, cbnz x7, tbz, tbnz, add, b
+     */
     func testUnfilterUndoesUPXsArm64BranchFilters() throws {
-        // UPX's arm64 doctest instructions, filtered by UPX's own Filter as its Mach-O packer filters them (addvalue 0),
-        // with three bytes after the last word: 0x52 takes B and BL, the last word only with bytes after it; 0x53 takes
-        // the conditional branches too, and the last word always. The bytes after the last word stay as they are.
-        // nop, b, bl, b.ne, cbz w5, cbz x5, cbnz w7, cbnz x7, tbz, tbnz, add, b
         let original: [UInt32] = [0xd503_201f, 0x17ff_ffff, 0x9400_0010, 0x54ff_ffe1, 0x3400_0065, 0xb4ff_ffc5, 0x35ff_ffe7, 0xb500_0047, 0x361f_fff1, 0xb7f8_0024, 0x9100_0400, 0x1400_0002]
         let filtered: [(id: UInt8, length: Int, words: [UInt32])] = [
             (0x52, 48, [0xd503_201f, 0x1400_0000, 0x9400_0012, 0x54ff_ffe1, 0x3400_0065, 0xb4ff_ffc5, 0x35ff_ffe7, 0xb500_0047, 0x361f_fff1, 0xb7f8_0024, 0x9100_0400, 0x1400_0002]),
@@ -458,8 +464,10 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: artifact), original)
     }
 
+    /**
+     A universal file with a slice UPX packed comes back as lipo made it of the originals, and thin writes them.
+     */
     func testUnpackRestoresAUniversalFile() throws {
-        // A universal file with a slice UPX packed comes back as lipo made it of the originals, and thin writes them.
         let directory = try self.directory("universal")
         let slices = try self.unsignedLs(in: directory)
         try XCTSkipIf(slices.count < 2, "/bin/ls has no x86_64 and arm64e slices")
@@ -480,7 +488,7 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: directory / "universal_\(slices[0].name)_unpacked"), slices[0].data)
         XCTAssertEqual(try Data(contentsOf: directory / "universal_\(slices[1].name)"), slices[1].data)
 
-        // Signed after its slices were packed, which lays the universal file out again: --unpack takes each slice's
+        // Signed after its slices were packed, which lays the universal file out again: unpack takes each slice's
         // signature out first, and with --unsign gives the file lipo made of the originals; thin writes every state of
         // both slices, the packed one unsigned then unpacked, since its signature had to come out to unpack it.
         let resigned = try self.resigned(universal)
@@ -571,12 +579,14 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: compressed data violation"])
     }
 
+    /**
+     A UPX modified to defeat upx -d writes another marker than "UPX!" everywhere it goes: the pack header, the
+     `l_info` before the packed data, and the stub, which looks for it. upx -d calls the file not packed; unpack
+     finds the pack header by its structure and checksum, and takes the `l_info`'s word for the marker, named in a
+     warning. The pack header's marker replaced alone, the `l_info`'s left, vouches for nothing: the image is hashed
+     as it is.
+     */
     func testUnpackFindsThePackHeaderWithoutItsMarker() throws {
-        // A UPX modified to defeat upx -d writes another marker than "UPX!" everywhere it goes: the pack header, the
-        // l_info before the packed data, and the stub, which looks for it. upx -d calls the file not packed; --unpack
-        // finds the pack header by its structure and checksum, and takes the l_info's word for the marker, named in a
-        // warning. The pack header's marker replaced alone, the l_info's left, vouches for nothing: the image is hashed
-        // as it is.
         let directory = try self.directory("marker")
         let marker = Data("UPX!".utf8)
         let other = Data("VQY\"".utf8)
@@ -799,9 +809,11 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(reporter.errorCount, 2)
     }
 
+    /**
+     unpack meets every Mach-O. One of three segments, `__DATA`, `__TEXT` and a `__LINKEDIT` too short for a block
+     header, is where UPX gives up ("bad offLINK") though it never packed it: hashed as it is, nothing to write.
+     */
     func testImagesUPXDidNotPackAreLeftAlone() throws {
-        // --unpack meets every Mach-O. One of three segments, __DATA, __TEXT and a __LINKEDIT too short for a block
-        // header, is where UPX gives up ("bad offLINK") though it never packed it: hashed as it is, nothing to write.
         let directory = try self.directory("not-packed")
         let image = makeBigEndianMachO(is64: false, textOffset: 0x1000, linkeditSize: 8, infoPlist: Data("<plist/>".utf8))
         let file = directory / "ppc"

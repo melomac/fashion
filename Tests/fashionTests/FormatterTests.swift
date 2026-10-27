@@ -47,8 +47,10 @@ final class FormatterTests: XCTestCase {
         XCTAssertEqual(OutputFormatter.formatPath("/tmp/file.txt"), "/tmp/file.txt")
     }
 
+    /**
+     For non-fuzzy algorithms, score string should be empty
+     */
     func testFormatLineExactAlgorithmNoScore() {
-        // For non-fuzzy algorithms, score string should be empty
         let line = OutputFormatter.formatLine(digest: "abc123", score: 0, path: "/tmp/file.txt", algorithm: .sha256)
         XCTAssertTrue(line.hasPrefix("abc123"))
         XCTAssertTrue(line.hasSuffix("/tmp/file.txt"))
@@ -56,15 +58,19 @@ final class FormatterTests: XCTestCase {
 
     // MARK: - Path escaping
 
+    /**
+     A crafted filename with a newline must not forge a second output line.
+     */
     func testFormatLineEscapesNewlineInPath() {
-        // A crafted filename with a newline must not forge a second output line.
         let line = OutputFormatter.formatLine(digest: "abc123", path: "/tmp/a\nb", algorithm: .sha256)
         XCTAssertFalse(line.contains("\n"), "Newline must be escaped, not emitted literally")
         XCTAssertEqual(line, "\\abc123  /tmp/a\\nb")
     }
 
+    /**
+     "\r\n" is a single Character, which contains neither "\r" nor "\n": the line break must still be escaped.
+     */
     func testFormatLineEscapesCarriageReturnLineFeedInPath() {
-        // "\r\n" is a single Character, which contains neither "\r" nor "\n": the line break must still be escaped.
         for line in [
             OutputFormatter.formatLine(digest: "abc123", path: "/tmp/a\r\nfake", algorithm: .sha256),
             OutputFormatter.formatPath("/tmp/a\r\nfake"),

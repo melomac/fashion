@@ -18,10 +18,12 @@ final class UnsignerTests: XCTestCase {
         try Digester(Hasher.parse([path, "--quiet"] + arguments)).lines(for: path, reporter: Reporter(console: Console())).map(\.text)
     }
 
+    /**
+     `/bin/ls` unsigned whole is what hash mode's --unsign hashes, and the universal file `lipo` makes of the slices
+     thin --unsign writes, byte for byte: `codesign` moved every architecture to 16 KiB, `lipo` aligns `x86_64` to 4 KiB.
+     The artifact itself has nothing to unsign.
+     */
     func testUniversalFileIsWrittenWholeAsLipoLaysItOut() throws {
-        // /bin/ls unsigned whole is what hash mode's --unsign hashes, and the universal file lipo makes of the slices
-        // thin --unsign writes, byte for byte: codesign moved every architecture to 16 KiB, lipo aligns x86_64 to 4 KiB.
-        // The artifact itself has nothing to unsign.
         let directory = try self.directory("universal")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -51,9 +53,11 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
+    /**
+     An `x86_64` image as the linker leaves it, signed by `codesign`: unsign gives it back, named as thin --unsign names
+     it, through the root command too; the original, and a file that is not Mach-O, get nothing.
+     */
     func testThinFileIsWrittenAsThinWritesIt() throws {
-        // An x86_64 image as the linker leaves it, signed by codesign: unsign gives it back, named as thin --unsign names
-        // it, through the root command too; the original, and a file that is not Mach-O, get nothing.
         let directory = try self.directory("thin")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -148,9 +152,11 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
+    /**
+     Eight bytes after the signature would be cut off with it: reported and nothing written, as `codesign` fails
+     too, unless --exact cuts them off first, which names the artifact for it.
+     */
     func testExactCutsAppendedBytesBeforeTheSignatureComesOff() throws {
-        // Eight bytes after the signature would be cut off with it: reported and nothing written, as codesign fails
-        // too, unless --exact cuts them off first, which names the artifact for it.
         let directory = try self.directory("exact")
         defer {
             try? FileManager.default.removeItem(at: directory)

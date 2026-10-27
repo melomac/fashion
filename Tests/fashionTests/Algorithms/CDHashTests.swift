@@ -5,8 +5,10 @@ import XCTest
 final class CDHashTests: XCTestCase {
     // MARK: - Thin binary (system binary)
 
+    /**
+     `/bin/ls` is a signed Mach-O on macOS
+     */
     func testHashThinBinaryNonNil() throws {
-        // /bin/ls is a signed Mach-O on macOS
         let results = try CDHash.hash(path: "/bin/ls")
         XCTAssertFalse(results.isEmpty, "Expected CDHash for /bin/ls")
 
@@ -42,8 +44,10 @@ final class CDHashTests: XCTestCase {
 
     // MARK: - Fat binary
 
+    /**
+     `/usr/bin/file` is often a universal binary
+     */
     func testHashFatBinaryMultipleSlices() throws {
-        // /usr/bin/file is often a universal binary
         let candidates = [
             "/usr/bin/file",
             "/usr/bin/lipo",
@@ -76,8 +80,10 @@ final class CDHashTests: XCTestCase {
         throw XCTSkip("No fat binary found — skip gracefully")
     }
 
+    /**
+     `/bin/ls` is signed, so every slice must use its embedded cdhash — never the ad-hoc fall-back.
+     */
     func testSignedSliceIsNotAdhoc() throws {
-        // /bin/ls is signed, so every slice must use its embedded cdhash — never the ad-hoc fall-back.
         let results = try CDHash.hash(path: "/bin/ls")
         XCTAssertFalse(results.isEmpty)
         for result in results {
@@ -116,10 +122,12 @@ final class CDHashTests: XCTestCase {
 
     // MARK: - Verification
 
+    /**
+     A byte of code flipped after signing leaves the signature, and so the cdhash, as it was, but the code no longer
+     hashes to its directory: `codesign --verify` reports "code or signature have been modified" for that slice only,
+     and fashion names it on stderr, even into a pipe, without failing the run.
+     */
     func testModifiedCodeIsFlagged() throws {
-        // A byte of code flipped after signing leaves the signature, and so the cdhash, as it was, but the code no longer
-        // hashes to its directory: codesign --verify reports "code or signature have been modified" for that slice only,
-        // and fashion names it on stderr, even into a pipe, without failing the run.
         var data = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
         let slice: (offset: Int, length: Int, arch: String?) = switch try Universal.open(data: data) {
         case let .fat(archs): try XCTUnwrap(archs.last.map { ($0.offset, $0.length, $0.name) })
@@ -183,10 +191,12 @@ final class CDHashTests: XCTestCase {
         XCTAssertNotNil(match, "Truncated CDHash should match full CDHash")
     }
 
+    /**
+     A truncated target is matched as a prefix of the full computed digest, but not the reverse:
+     a full-length target must not match a shorter digest, or a full SHA-256 target could spuriously
+     match a 40-hex SHA-1 CodeDirectory line on a dual-signed binary.
+     */
     func testFullTargetDoesNotMatchTruncatedDigest() throws {
-        // A truncated target is matched as a prefix of the full computed digest, but not the reverse:
-        // a full-length target must not match a shorter digest, or a full sha256 target could spuriously
-        // match a 40-hex sha1 CodeDirectory line on a dual-signed binary.
         let results = try CDHash.hash(path: "/bin/ls")
         let first = try XCTUnwrap(results.first)
 
@@ -206,8 +216,10 @@ final class CDHashTests: XCTestCase {
 
     // MARK: - codesign cross-check (self-contained, OS-version independent)
 
+    /**
+     Every signed slice's embedded cdhash (truncated to 20 bytes) must equal codesign's CDHash.
+     */
     func testEmbeddedCDHashMatchesCodesign() throws {
-        // Every signed slice's embedded cdhash (truncated to 20 bytes) must equal codesign's CDHash.
         let path = "/bin/ls"
         let results = try CDHash.hash(path: path)
         try XCTSkipIf(results.isEmpty, "no cdhash for \(path)")
@@ -225,10 +237,12 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    /**
+     Strip a real system binary → unsigned, then each slice's synthesized ad-hoc cdhashes (SHA-256 and
+     SHA-1) must equal `codesign --detached`'s CandidateCDHashFull for the matching algorithm. This also
+     exercises the multi-code-slot synthesis branch, which the synthetic fixtures do not.
+     */
     func testAdhocMatchesCodesignDetached() throws {
-        // Strip a real system binary → unsigned, then each slice's synthesized ad-hoc cdhashes (SHA-256 and
-        // SHA-1) must equal codesign --detached's CandidateCDHashFull for the matching algorithm. This also
-        // exercises the multi-code-slot synthesis branch, which the synthetic fixtures do not.
         let bin = try self.temporaryDirectory() / "ls"
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: bin)
         _ = try codesign(["--remove-signature", bin.path()])
@@ -236,9 +250,11 @@ final class CDHashTests: XCTestCase {
         try self.assertAdhocMatchesCodesignDetached(bin)
     }
 
+    /**
+     `arm64_32` (watchOS) has its own CPU type and macOS ships no such binary, so build one with the watchOS SDK.
+     It follows arm64's page-size rule, so a watchOS 8 rewrite gets 4 KiB pages.
+     */
     func testAdhocArm64_32MatchesCodesignDetached() throws {
-        // arm64_32 (watchOS) has its own CPU type and macOS ships no such binary, so build one with the watchOS SDK.
-        // It follows arm64's page-size rule, so a watchOS 8 rewrite gets 4 KiB pages.
         let dir = try self.temporaryDirectory()
         let universal = try compile("universal", in: dir, sdk: "watchos", ["-arch", "arm64_32", "-arch", "arm64"])
         XCTAssertEqual(try Set(CDHash.hash(path: universal.path()).compactMap(\.arch)), ["arm64_32", "arm64"])
@@ -250,10 +266,12 @@ final class CDHashTests: XCTestCase {
         XCTAssertEqual(try Self.field(self.assertAdhocMatchesCodesignDetached(watchOS8), prefix: "Page size="), "4096")
     }
 
+    /**
+     A built `x86_64` binary covers 4 KiB pages. Without a platform (`LC_BUILD_VERSION` naming platform 0) or a
+     non-empty `__TEXT` segment (renamed `__TEXX`, or its filesize zeroed), `codesign` writes the v0x20100
+     CodeDirectory, which has no execSeg fields.
+     */
     func testAdhocX86_64MatchesCodesignDetached() throws {
-        // A built x86_64 binary covers 4 KiB pages. Without a platform (LC_BUILD_VERSION naming platform 0) or a
-        // non-empty `__TEXT` segment (renamed `__TEXX`, or its filesize zeroed), codesign writes the v0x20100
-        // CodeDirectory, which has no execSeg fields.
         let dir = try self.temporaryDirectory()
         let intel = try Data(contentsOf: compile("intel", in: dir, ["-arch", "x86_64"]))
         let text = try XCTUnwrap(MachO.loadCommands(data: intel).first { $0.cmd == UInt32(LC_SEGMENT_64) && $0.data.dropFirst(8).prefix(6) == Data("__TEXT".utf8) }).data.startIndex
@@ -276,17 +294,21 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    /**
+     `codesign` signs a relocatable object as a generic file (`Format=generic`), not as Mach-O code, so an
+     unsigned `.o` has no ad-hoc cdhash: CDHash must report nothing rather than a hash matching nothing.
+     */
     func testAdhocSkipsGenericObject() throws {
-        // codesign signs a relocatable object as a generic file (`Format=generic`), not as Mach-O code, so an
-        // unsigned `.o` has no ad-hoc cdhash: CDHash must report nothing rather than a hash matching nothing.
         let object = try compile("object.o", in: self.temporaryDirectory(), ["-c"])
         XCTAssertEqual(try Self.field(Self.codesignDetached(object), prefix: "Format="), "generic")
         XCTAssertTrue(try CDHash.hash(path: object.path()).isEmpty)
     }
 
+    /**
+     A universal file with 64-bit offsets (`lipo -fat64`) is only a container: codesign signs it as a generic
+     file, yet each slice is ordinary code once extracted, so its cdhashes are those codesign gives `lipo -thin`'s.
+     */
     func testFat64SlicesMatchCodesignOnExtractedSlices() throws {
-        // A universal file with 64-bit offsets (`lipo -fat64`) is only a container: codesign signs it as a generic
-        // file, yet each slice is ordinary code once extracted, so its cdhashes are those codesign gives `lipo -thin`'s.
         let dir = try self.temporaryDirectory()
         let fat = dir / "fat64"
         let slices = try [compile("intel", in: dir, ["-arch", "x86_64"]), compile("arm", in: dir, ["-arch", "arm64"])]
@@ -305,9 +327,11 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    /**
+     `codesign` signs the arm64 family with 4 KiB pages on tvOS, iOS before 16 and watchOS before 9, and with
+     16 KiB pages elsewhere: rewrite a built binary's `LC_BUILD_VERSION` to land on each side of each rule.
+     */
     func testAdhocPageSizeFollowsPlatformLikeCodesign() throws {
-        // codesign signs the arm64 family with 4 KiB pages on tvOS, iOS before 16 and watchOS before 9, and with
-        // 16 KiB pages elsewhere: rewrite a built binary's LC_BUILD_VERSION to land on each side of each rule.
         let dir = try self.temporaryDirectory()
         let arm = try Data(contentsOf: compile("arm", in: dir, ["-arch", "arm64"]))
         let variants: [(name: String, platform: Int32, minOS: UInt32, pageSize: String)] = [
@@ -326,9 +350,11 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    /**
+     `codesign` records a big-endian slice's `__TEXT` range without byte-swapping it, and the ad-hoc identity the
+     system computes carries the same quirk (walker reports codesign's cdhash): a 0x1000 range reads back reversed.
+     */
     func testAdhocBigEndianExecSegmentMatchesCodesignDetached() throws {
-        // codesign records a big-endian slice's `__TEXT` range without byte-swapping it, and the ad-hoc identity the
-        // system computes carries the same quirk (walker reports codesign's cdhash): a 0x1000 range reads back reversed.
         let dir = try self.temporaryDirectory()
         let reversed32 = UInt64(UInt32(0x1000).byteSwapped) // 0x100000
         let reversed64 = UInt64(0x1000).byteSwapped // 0x10_0000_0000_0000
@@ -347,9 +373,11 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    /**
+     `codesign` hashes a `__TEXT,__info_plist` section into the `Info.plist` special slot (-1), whatever it holds and
+     even empty; it ignores one in another segment, and finds none on a big-endian slice.
+     */
     func testAdhocBindsEmbeddedInfoPlistLikeCodesign() throws {
-        // codesign hashes a `__TEXT,__info_plist` section into the Info.plist special slot (-1), whatever it holds and
-        // even empty; it ignores one in another segment, and finds none on a big-endian slice.
         let dir = try self.temporaryDirectory()
         let inputs = dir / "inputs" // away from the binaries: codesign signs a folder holding an Info.plist as a bundle
         try FileManager.default.createDirectory(at: inputs, withIntermediateDirectories: true)
@@ -379,10 +407,12 @@ final class CDHashTests: XCTestCase {
         try self.assertAdhocMatchesCodesignDetached(ppc)
     }
 
+    /**
+     `MachORep::infoPlist` catches a failed read, so a section larger than the 2 GiB a single `read(2)` takes is no
+     `Info.plist` to codesign, like one past the end of the file. The large file is sparse, and --exact keeps the
+     code it hashes to the image, the same bytes as in the short file.
+     */
     func testAdhocTreatsAnInfoPlistThatCannotBeReadAsNone() throws {
-        // MachORep::infoPlist catches a failed read, so a section larger than the 2 GiB a single read(2) takes is no
-        // Info.plist to codesign, like one past the end of the file. The large file is sparse, and --exact keeps the
-        // code it hashes to the image, the same bytes as in the short file.
         let dir = try self.temporaryDirectory()
         let size: UInt64 = 0x9000_0000
         let (data, offset) = try self.compileWithInfoPlist(in: dir, declaredSize: size)
@@ -397,10 +427,12 @@ final class CDHashTests: XCTestCase {
         try self.assertAdhocMatchesCodesignDetached(short)
     }
 
+    /**
+     A read `codesign` cannot do is no `Info.plist`, but a file that shrank since it was opened is reported, as
+     everywhere: the section is declared 1 MiB, the file holds it when opened and loses it before it is read,
+     while the code up to the --exact end is still there.
+     */
     func testAdhocReportsAnInfoPlistTheFileNoLongerHolds() throws {
-        // A read codesign cannot do is no Info.plist, but a file that shrank since it was opened is reported, as
-        // everywhere: the section is declared 1 MiB, the file holds it when opened and loses it before it is read,
-        // while the code up to the --exact end is still there.
         let dir = try self.temporaryDirectory()
         let (data, _) = try self.compileWithInfoPlist(in: dir, declaredSize: 1 << 20)
 
@@ -415,9 +447,11 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    /**
+     Security's MachO ends the image at `__LINKEDIT`, and codesign's strict validation rejects any byte past it:
+     the bytes appended to a built binary are exactly the ones logicalEnd trims.
+     */
     func testLogicalEndMatchesCodesignStrictValidation() throws {
-        // Security's MachO ends the image at __LINKEDIT, and codesign's strict validation rejects any byte past it:
-        // the bytes appended to a built binary are exactly the ones logicalEnd trims.
         let dir = try self.temporaryDirectory()
         let original = try compile("original", in: dir, ["-arch", "arm64"])
         var padded = try Data(contentsOf: original)
@@ -466,7 +500,7 @@ final class CDHashTests: XCTestCase {
         return (data, Int(offset))
     }
 
-    /// `data` with its first LC_BUILD_VERSION declaring `platform` and `minOS` instead.
+    /// `data` with its first `LC_BUILD_VERSION` declaring `platform` and `minOS` instead.
     private static func settingBuildVersion(_ data: Data, platform: Int32, minOS: UInt32) throws -> Data {
         let command = try XCTUnwrap(MachO.loadCommands(data: data).first { $0.cmd == UInt32(LC_BUILD_VERSION) }, "no LC_BUILD_VERSION")
         var fields = Data()

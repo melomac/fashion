@@ -61,8 +61,10 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 1 + slices.count)
     }
 
+    /**
+     A second run finds every artifact in place, byte for byte: the same lines, nothing rewritten, nothing said.
+     */
     func testIdenticalArtifactsAreLeftInPlace() throws {
-        // A second run finds every artifact in place, byte for byte: the same lines, nothing rewritten, nothing said.
         let directory = try self.directory("twice")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -94,9 +96,11 @@ final class ThinnerTests: XCTestCase {
         return (directory, ls, data, slices, other)
     }
 
+    /**
+     Without --overwrite, a different file under an artifact's name stays as it is, executable bit included, and
+     standard error names it with its size and SHA-256 and the slice's; the run fails.
+     */
     func testDifferentFilesInTheWayAreReportedAndLeftAlone() throws {
-        // Without --overwrite, a different file under an artifact's name stays as it is, executable bit included, and
-        // standard error names it with its size and SHA-256 and the slice's; the run fails.
         let (directory, ls, data, slices, other) = try self.lsWithFilesInTheWay("differs")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -118,9 +122,11 @@ final class ThinnerTests: XCTestCase {
         XCTAssertTrue(lines.allSatisfy { $0.diagnostic && $0.tint == .error })
     }
 
+    /**
+     With --overwrite, a different file under an artifact's name is replaced by the slice, without the execute
+     bit it had, and nothing is said on standard error: the unified log alone records the replacement.
+     */
     func testOverwriteReplacesDifferentFilesQuietly() throws {
-        // With --overwrite, a different file under an artifact's name is replaced by the slice, without the execute
-        // bit it had, and nothing is said on standard error: the unified log alone records the replacement.
         let (directory, ls, data, slices, _) = try self.lsWithFilesInTheWay("overwrite")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -141,9 +147,11 @@ final class ThinnerTests: XCTestCase {
         XCTAssertTrue(lines.allSatisfy { !$0.diagnostic })
     }
 
+    /**
+     A hard link under an artifact's name, to a file elsewhere: --overwrite renames a new file over the name, as
+     `lipo` writes its output, rather than writing into the file the name links to, which keeps its bytes and mode.
+     */
     func testOverwriteLeavesAFileLinkedUnderAnArtifactsNameAlone() throws {
-        // A hard link under an artifact's name, to a file elsewhere: --overwrite renames a new file over the name, as
-        // lipo writes its output, rather than writing into the file the name links to, which keeps its bytes and mode.
         let directory = try self.directory("hardlink")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -168,9 +176,11 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), (["elsewhere", "ls"] + slices.map { "ls_\($0.name)" }).sorted())
     }
 
+    /**
+     A symbolic link under an artifact's name is neither followed nor replaced, --overwrite or not: reported,
+     counted, its target untouched.
+     */
     func testSymlinkInTheWayIsLeftAlone() throws {
-        // A symbolic link under an artifact's name is neither followed nor replaced, --overwrite or not: reported,
-        // counted, its target untouched.
         let directory = try self.directory("symlink")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -192,8 +202,10 @@ final class ThinnerTests: XCTestCase {
         }
     }
 
+    /**
+     A thin Mach-O has nothing to extract, nor has any other file: no artifact, no line, exit 0.
+     */
     func testThinAndOtherFilesAreLeftAlone() throws {
-        // A thin Mach-O has nothing to extract, nor has any other file: no artifact, no line, exit 0.
         let directory = try self.directory("thin")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -212,8 +224,10 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 2)
     }
 
+    /**
+     A fat table pointing past the end of the file is a malformed Mach-O: red, counted, nothing written.
+     */
     func testMalformedFatIsReported() throws {
-        // A fat table pointing past the end of the file is a malformed Mach-O: red, counted, nothing written.
         let directory = try self.directory("malformed")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -269,7 +283,7 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["fat"])
     }
 
-    /// The x86_64 slice of `/bin/ls`; skips when the OS's `ls` has no such slice.
+    /// The `x86_64` slice of `/bin/ls`; skips when the OS's `ls` has no such slice.
     private func lsX86() throws -> Data {
         let data = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
         guard case let .fat(slices) = try Universal.open(data: data), let x86 = slices.first(where: { $0.name == "x86_64" }) else {
@@ -279,7 +293,7 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
-     A one-architecture universal binary wrapping `slice`, the x86_64 slice of `/bin/ls` by default, with `appended`
+     A one-architecture universal binary wrapping `slice`, the `x86_64` slice of `/bin/ls` by default, with `appended`
      bytes after its image, at offset 4096.
      */
     private func fatX86(_ image: Data? = nil, appended: Data) throws -> (fat: Data, slice: Data) {
@@ -297,10 +311,12 @@ final class ThinnerTests: XCTestCase {
         return (fat, slice)
     }
 
+    /**
+     Without --exact a slice is written as the fat table places it, appended bytes included; with it, the slice
+     ends where its Mach-O image ends, as hash mode's --exact hashes it, named for the cut and written beside the
+     plain one, which is written too.
+     */
     func testExactCutsAppendedBytesOffSlices() throws {
-        // Without --exact a slice is written as the fat table places it, appended bytes included; with it, the slice
-        // ends where its Mach-O image ends, as hash mode's --exact hashes it, named for the cut and written beside the
-        // plain one, which is written too.
         let directory = try self.directory("exact-fat")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -322,9 +338,11 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try codesignArchs(exact.path), ["x86_64"])
     }
 
+    /**
+     A thin Mach-O that appended bytes follow has an artifact with --exact alone: the image, named for the cut,
+     which a thin file needs no architecture beside. One that ends where its image ends has nothing to write.
+     */
     func testExactWritesAThinImageWithoutItsAppendedBytes() throws {
-        // A thin Mach-O that appended bytes follow has an artifact with --exact alone: the image, named for the cut,
-        // which a thin file needs no architecture beside. One that ends where its image ends has nothing to write.
         let directory = try self.directory("exact-thin")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -348,12 +366,14 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["padded", "padded_exact", "plain"])
     }
 
+    /**
+     A universal file whose slice appended bytes follow, and that slice as a thin file beside it, yield one
+     artifact under --exact, the cut slice; the universal file finds the thin file in place as its plain slice.
+     Handed to two threads at once, again and again, the second to reach it waits for the
+     first and finds it in place, rather than half written and reported as a different file. The image is grown
+     by 8 MiB, its `__LINKEDIT` filesize with it, so writing it takes long enough for the second thread to arrive.
+     */
     func testFilesThatYieldOneArtifactWriteItInTurn() throws {
-        // A universal file whose slice appended bytes follow, and that slice as a thin file beside it, yield one
-        // artifact under --exact, the cut slice; the universal file finds the thin file in place as its plain slice.
-        // Handed to two threads at once, again and again, the second to reach it waits for the
-        // first and finds it in place, rather than half written and reported as a different file. The image is grown
-        // by 8 MiB, its __LINKEDIT filesize with it, so writing it takes long enough for the second thread to arrive.
         let directory = try self.directory("in-turn")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -407,12 +427,14 @@ final class ThinnerTests: XCTestCase {
         try Digester(Hasher.parse([path, "--quiet"] + arguments)).lines(for: path, reporter: Reporter(console: Console())).map(\.text)
     }
 
+    /**
+     An `x86_64` and an `arm64` image as the linker leaves them unsigned, and the universal file lipo makes of them,
+     all signed by `codesign`: `unsign` gives each back byte for byte, with the `__LINKEDIT` vmsize the linker rounded to
+     its page where codesign rounds it to 16 KiB, and the universal file laid out as `lipo` laid it out, where `codesign`
+     moves every architecture to 16 KiB, its signed slices written beside the unsigned ones. An unsigned file is left
+     as it is.
+     */
     func testUnsignRestoresTheUnsignedOriginals() throws {
-        // An x86_64 and an arm64 image as the linker leaves them unsigned, and the universal file lipo makes of them,
-        // all signed by codesign: --unsign gives each back byte for byte, with the __LINKEDIT vmsize the linker rounded to
-        // its page where codesign rounds it to 16 KiB, and the universal file laid out as lipo laid it out, where codesign
-        // moves every architecture to 16 KiB, its signed slices written beside the unsigned ones. An unsigned file is left
-        // as it is.
         let directory = try self.directory("unsign-originals")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -451,10 +473,12 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
+    /**
+     One run with --unsign leaves the signed slices beside the unsigned ones. A later run with other flags edits
+     the artifacts of an earlier one too, thin files all: what it makes of `ls_x86_64` is named and made as one run
+     makes it of `ls`, `ls_x86_64_unsigned`, so it is found in place. Running either again makes nothing more.
+     */
     func testRunsWithOtherFlagsConvergeOnTheSameArtifacts() throws {
-        // One run with --unsign leaves the signed slices beside the unsigned ones. A later run with other flags edits
-        // the artifacts of an earlier one too, thin files all: what it makes of ls_x86_64 is named and made as one run
-        // makes it of ls, ls_x86_64_unsigned, so it is found in place. Running either again makes nothing more.
         let directory = try self.directory("converge")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -480,9 +504,11 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), expected)
     }
 
+    /**
+     `/bin/ls` as Apple signed it, and signed again ad hoc: `unsign` gives both the same artifacts and digests, a
+     cdhash included, though their signatures and the `__LINKEDIT` vmsize the signatures needed differ.
+     */
     func testUnsignGivesCopiesSignedByDifferentIdentitiesTheSameBytes() throws {
-        // /bin/ls as Apple signed it, and signed again ad hoc: --unsign gives both the same artifacts and digests, a
-        // cdhash included, though their signatures and the __LINKEDIT vmsize the signatures needed differ.
         let directory = try self.directory("unsign-identities")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -507,10 +533,12 @@ final class ThinnerTests: XCTestCase {
         }
     }
 
+    /**
+     Up to 7 bytes after the signature go with it, as `codesign` lets them go. Any more would be cut off with it, so
+     the file is reported in Security's words and nothing is written, as codesign fails too, unless --exact cuts
+     them off first.
+     */
     func testUnsignLeavesAppendedBytesToExact() throws {
-        // Up to 7 bytes after the signature go with it, as codesign lets them go. Any more would be cut off with it, so
-        // the file is reported in Security's words and nothing is written, as codesign fails too, unless --exact cuts
-        // them off first.
         let directory = try self.directory("unsign-appended")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -554,10 +582,12 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try self.hashLines(file.path, ["--unsign", "--exact", "--slices"]), try self.hashLines((directory / "plain").path, ["--unsign", "--slices"]))
     }
 
+    /**
+     Wherever `LC_CODE_SIGNATURE` sits among the load commands, the others close up behind it and `__LINKEDIT`, moved
+     with them, is restored: the image is the one where the command comes last, unsigned. codesign itself writes the
+     new `__LINKEDIT` size 16 bytes past the command that moved, over its nsects and flags.
+     */
     func testUnsignClosesUpTheCommandsAfterTheSignature() throws {
-        // Wherever LC_CODE_SIGNATURE sits among the load commands, the others close up behind it and __LINKEDIT, moved
-        // with them, is restored: the image is the one where the command comes last, unsigned. codesign itself writes the
-        // new __LINKEDIT size 16 bytes past the command that moved, over its nsects and flags.
         let directory = try self.directory("unsign-moved")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -578,10 +608,12 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: directory / "first_unsigned"), try Data(contentsOf: directory / "last_unsigned"))
     }
 
+    /**
+     A big-endian image, 32-bit and 64-bit, signed by codesign, given back byte for byte: its `__LINKEDIT` ends on
+     the 16-byte boundary where codesign puts the signature, so no padding is left to tell, and zeros follow its
+     load commands, as a linker leaves room there, for the `LC_CODE_SIGNATURE` codesign adds.
+     */
     func testUnsignRestoresBigEndianImages() throws {
-        // A big-endian image, 32-bit and 64-bit, signed by codesign, given back byte for byte: its __LINKEDIT ends on
-        // the 16-byte boundary where codesign puts the signature, so no padding is left to tell, and zeros follow its
-        // load commands, as a linker leaves room there, for the LC_CODE_SIGNATURE codesign adds.
         let directory = try self.directory("unsign-ppc")
         defer {
             try? FileManager.default.removeItem(at: directory)

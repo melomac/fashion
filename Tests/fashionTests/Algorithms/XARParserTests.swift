@@ -63,8 +63,10 @@ final class XARParserTests: XCTestCase {
         XCTAssertNil(try XARParser.hashToc(file, algorithm: .sha256, decompress: false))
     }
 
+    /**
+     The magic makes it a XAR archive: a header cut short is an error, not a file to skip.
+     */
     func testHashTocShortArchiveThrows() throws {
-        // The magic makes it a XAR archive: a header cut short is an error, not a file to skip.
         let file = try File(data: Data("xar!\u{0}\u{1c}".utf8))
 
         XCTAssertThrowsError(try XARParser.hashToc(file, algorithm: .sha256, decompress: false)) { error in
@@ -72,8 +74,10 @@ final class XARParserTests: XCTestCase {
         }
     }
 
+    /**
+     Valid header but TOC extends past end of data
+     */
     func testHashTocCompressedTocTruncatedThrows() throws {
-        // Valid header but TOC extends past end of data
         var data = Data()
         data.append(contentsOf: [0x78, 0x61, 0x72, 0x21]) // magic
         data.append(contentsOf: [0x00, 0x1c]) // header size: 28
@@ -87,8 +91,10 @@ final class XARParserTests: XCTestCase {
         }
     }
 
+    /**
+     The table is hashed as stored, whatever uncompressed size the header declares.
+     */
     func testHashTocUncompressedMode() throws {
-        // The table is hashed as stored, whatever uncompressed size the header declares.
         let toc = Data("fake-toc-data".utf8)
         let file = try File(data: xarArchive(toc: toc, size: 0))
 
@@ -107,8 +113,10 @@ final class XARParserTests: XCTestCase {
         XCTAssertThrowsError(try XARParser.parseHeader(data: data))
     }
 
+    /**
+     compressedTocLength = UInt64.max would trap on Int(...) before the range check; must throw instead.
+     */
     func testHashTocHugeCompressedLengthThrows() throws {
-        // compressedTocLength = UInt64.max would trap on Int(...) before the range check; must throw instead.
         var data = Data()
         data.append(contentsOf: [0x78, 0x61, 0x72, 0x21]) // magic
         data.append(contentsOf: [0x00, 0x1c]) // header size: 28
@@ -122,8 +130,10 @@ final class XARParserTests: XCTestCase {
         }
     }
 
+    /**
+     A tiny compressed TOC claiming a huge uncompressed size must be rejected before allocation.
+     */
     func testHashTocDecompressionBombThrows() throws {
-        // A tiny compressed TOC claiming a huge uncompressed size must be rejected before allocation.
         let toc = Data("<xar><toc></toc></xar>".utf8)
         let file = try File(data: xarArchive(toc: deflate(toc), size: XARParser.maxUncompressedTocSize + 1)) // one past the cap
 
@@ -151,8 +161,10 @@ final class XARParserTests: XCTestCase {
         XCTAssertEqual(try XARParser.hashToc(trailing, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc))
     }
 
+    /**
+     The header declares more than the table inflates to.
+     */
     func testHashTocDecompressSizeMismatchThrows() throws {
-        // The header declares more than the table inflates to.
         let toc = Data("<xar><toc></toc></xar>".utf8)
         let file = try File(data: xarArchive(toc: deflate(toc), size: toc.count + 999))
 
@@ -163,17 +175,21 @@ final class XARParserTests: XCTestCase {
 
     // MARK: - Streaming inflate
 
+    /**
+     Stored blocks keep the table as large compressed as it is inflated, several reads long.
+     */
     func testDecompressStreamsAcrossChunks() throws {
-        // Stored blocks keep the table as large compressed as it is inflated, several reads long.
         let toc = Data((0 ..< File.chunkSize * 3 + 123).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 9) })
         let file = try File(data: xarArchive(toc: deflate(toc, level: 0), size: toc.count))
 
         XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc))
     }
 
+    /**
+     The declared range runs two chunks past the stream, which ends in the first: the rest is not read, so the
+     table still decompresses once the file no longer holds it.
+     */
     func testDecompressStopsReadingAtTheEndOfTheStream() throws {
-        // The declared range runs two chunks past the stream, which ends in the first: the rest is not read, so the
-        // table still decompresses once the file no longer holds it.
         let toc = Data("<xar><toc></toc></xar>".utf8)
         let url = FileManager.default.temporaryDirectory / "fashion-xar-stream-end-\(UUID())"
         try xarArchive(toc: deflate(toc) + Data(count: File.chunkSize * 2), size: toc.count).write(to: url)
@@ -186,9 +202,11 @@ final class XARParserTests: XCTestCase {
         XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc))
     }
 
+    /**
+     uncompress gives an empty output a 1-byte buffer and reports nothing of it: a stream of up to one byte
+     inflates to an empty table, a longer one does not decompress.
+     */
     func testDecompressToNothingAsUncompressDoes() throws {
-        // uncompress gives an empty output a 1-byte buffer and reports nothing of it: a stream of up to one byte
-        // inflates to an empty table, a longer one does not decompress.
         for (content, decompresses) in [(Data(), true), (Data("x".utf8), true), (Data("xy".utf8), false)] {
             let file = try File(data: xarArchive(toc: deflate(content), size: 0))
             if decompresses {

@@ -14,8 +14,10 @@ final class HasherTests: XCTestCase {
         XCTAssertNil(usageError(["x", "-n", "-m", "d41d8cd98f00b204e9800998ecf8427e"]))
     }
 
+    /**
+     A signature changes neither the symbols nor a XAR table of contents, so --unsign would be silently ignored.
+     */
     func testUnsignDoesNotApplyToSymbolsOrXarToc() {
-        // A signature changes neither the symbols nor a XAR table of contents, so --unsign would be silently ignored.
         let refused = "--unsign does not apply to --symhash or --xar-toc."
         XCTAssertEqual(usageError(["x", "--unsign", "--symhash"]), refused)
         XCTAssertEqual(usageError(["x", "--unsign", "--xar-toc"]), refused)
@@ -23,8 +25,10 @@ final class HasherTests: XCTestCase {
         XCTAssertNil(usageError(["x", "--unsign", "--algo", "cdhash"]))
     }
 
+    /**
+     A XAR archive is no Mach-O for UPX to have packed; the symbols of one it packed are those of its original.
+     */
     func testUnpackDoesNotApplyToXarToc() {
-        // A XAR archive is no Mach-O for UPX to have packed; the symbols of one it packed are those of its original.
         XCTAssertEqual(usageError(["x", "--unpack", "--xar-toc"]), "--unpack does not apply to --xar-toc.")
         XCTAssertNil(usageError(["x", "--unpack", "--symhash"]))
         XCTAssertNil(usageError(["x", "--unpack", "--unsign", "--slices", "--exact"]))
@@ -35,9 +39,11 @@ final class HasherTests: XCTestCase {
     private let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
     private let tlsh = "T13D338D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
 
+    /**
+     --xlen only changes how TLSH digests are compared: anywhere else it would be silently ignored. A TLSH target
+     among others is enough, with --algo tlsh or typed by its shape.
+     */
     func testXlenNeedsTLSHTarget() {
-        // --xlen only changes how TLSH digests are compared: anywhere else it would be silently ignored. A TLSH target
-        // among others is enough, with --algo tlsh or typed by its shape.
         let refused = "--xlen requires a TLSH digest to --match."
         XCTAssertEqual(usageError(["x", "--xlen"]), refused)
         XCTAssertEqual(usageError(["x", "--algo", "tlsh", "--xlen"]), refused)
@@ -48,9 +54,11 @@ final class HasherTests: XCTestCase {
         XCTAssertNil(usageError(["x", "--match", self.md5, "--match", self.tlsh, "--xlen"]))
     }
 
+    /**
+     With --algo, every target must be shaped like that algorithm's digests: one shaped otherwise would scan
+     everything and match nothing.
+     */
     func testTargetsMustBeShapedLikeAlgorithm() throws {
-        // With --algo, every target must be shaped like that algorithm's digests: one shaped otherwise would scan
-        // everything and match nothing.
         XCTAssertEqual(usageError(["x", "--algo", "md5", "--match", self.sha256]), "--match '\(self.sha256)' is not shaped like md5 digests.")
         XCTAssertEqual(usageError(["x", "--algo", "tlsh", "--match", "T1"]), "--match 'T1' is not shaped like tlsh digests.")
         XCTAssertEqual(usageError(["x", "--algo", "ssdeep", "--match", self.md5]), "--match '\(self.md5)' is not shaped like ssdeep digests.")
@@ -74,9 +82,11 @@ final class HasherTests: XCTestCase {
         XCTAssertEqual(errors.first, "Error: --match '\(self.sha256)' is not shaped like md5 digests.")
     }
 
+    /**
+     Without --algo the shape of a target picks its algorithm, so one shaped like no digest would scan everything
+     and match nothing. A SHA-1 or SHA-256 shape is a file's digest, never a git blob's or a cdhash: those take --algo.
+     */
     func testTargetsOfNoShapeAreRefused() throws {
-        // Without --algo the shape of a target picks its algorithm, so one shaped like no digest would scan everything
-        // and match nothing. A SHA-1 or SHA-256 shape is a file's digest, never a git blob's or a cdhash: those take --algo.
         let noShape = { (target: String) in "--match '\(target)' is not shaped like MD5, SHA-1, SHA-2, ssdeep or TLSH digests; git, git256 and cdhash take --algo." }
         XCTAssertEqual(usageError(["x", "--match", "zzz"]), noShape("zzz"))
         XCTAssertEqual(usageError(["x", "--match", ""]), noShape(""))

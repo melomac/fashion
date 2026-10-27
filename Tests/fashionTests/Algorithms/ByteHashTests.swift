@@ -42,18 +42,24 @@ final class ByteHashTests: XCTestCase {
         XCTAssertEqual(try ByteHash.sha512.digest(Data()), "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e")
     }
 
+    /**
+     git hash-object of an empty file: the hash of "blob 0\0".
+     */
     func testGitBlobSHA1Empty() throws {
-        // git hash-object of an empty file: the hash of "blob 0\0".
         XCTAssertEqual(try ByteHash.git.digest(Data()), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
     }
 
+    /**
+     "blob 5\0hello"
+     */
     func testGitBlobSHA1Hello() throws {
-        // "blob 5\0hello"
         XCTAssertEqual(try ByteHash.git.digest(Data("hello".utf8)), "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0")
     }
 
+    /**
+     `git hash-object --object-format=sha256` of an empty file.
+     */
     func testGitBlobSHA256Empty() throws {
-        // git hash-object --object-format=sha256 of an empty file.
         XCTAssertEqual(try ByteHash.git256.digest(Data()), "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813")
     }
 
@@ -95,8 +101,10 @@ final class ByteHashTests: XCTestCase {
         }
     }
 
+    /**
+     A file that no longer holds the range by the time it is read fails closed, whatever the hash.
+     */
     func testShrunkFileThrows() throws {
-        // A file that no longer holds the range by the time it is read fails closed, whatever the hash.
         let url = FileManager.default.temporaryDirectory / "fashion-shrinking-\(UUID())"
         defer {
             try? FileManager.default.removeItem(at: url)
@@ -117,8 +125,10 @@ final class ByteHashTests: XCTestCase {
     /// Every byte hash.
     private let hashes: [ByteHash] = [.md5, .sha1, .sha256, .sha384, .sha512, .git, .git256, .ssdeep, .tlsh]
 
+    /**
+     One read feeds every hasher: each digest is the one its hash makes alone, in the order asked, across chunks.
+     */
     func testFanOutMatchesEachHasher() throws {
-        // One read feeds every hasher: each digest is the one its hash makes alone, in the order asked, across chunks.
         let data = Data((0 ..< File.chunkSize * 2 + 1024).map { UInt8($0 & 0xff) })
         let file = try File(data: data)
 
@@ -142,8 +152,10 @@ final class ByteHashTests: XCTestCase {
         }
     }
 
+    /**
+     A hash that makes no digest is left out, and the caveat says why; the others are unaffected.
+     */
     func testFanOutLeavesOutWhatTLSHCannotHash() throws {
-        // A hash that makes no digest is left out, and the caveat says why; the others are unaffected.
         var caveats: [String] = []
         let digests = try ByteHash.digests([.md5, .tlsh, .sha256], File(data: Data("hello".utf8))) { caveats.append($0) }
         XCTAssertEqual(digests.map(\.hash), [.md5, .sha256])
@@ -151,9 +163,11 @@ final class ByteHashTests: XCTestCase {
         XCTAssertEqual(caveats, ["TLSH cannot hash: input too small (5 bytes, minimum 50)"])
     }
 
+    /**
+     TLSH takes the first maximumLength bytes of a longer file while the others go on, too many to feed a test:
+     the fan-out is given the lengths, here 1000 of 3000 bytes for TLSH, which end in the middle of a chunk.
+     */
     func testFanOutStopsEachHasherAtItsLength() throws {
-        // TLSH takes the first maximumLength bytes of a longer file while the others go on, too many to feed a test:
-        // the fan-out is given the lengths, here 1000 of 3000 bytes for TLSH, which end in the middle of a chunk.
         let data = Data((0 ..< 3000).map { UInt8($0 % 251) })
         var fanOut = try FanOutHasher([(.md5, data.count), (.tlsh, 1000), (.sha256, data.count)])
         XCTAssertEqual(fanOut.length, 3000)

@@ -169,8 +169,10 @@ final class AdhocCDHashTests: XCTestCase {
         }
     }
 
+    /**
+     codesign reads the first `LC_BUILD_VERSION`, even one naming platform 0, ahead of any `LC_VERSION_MIN_*`.
+     */
     func testPlatformPrecedenceFollowsCodesign() throws {
-        // codesign reads the first LC_BUILD_VERSION, even one naming platform 0, ahead of any LC_VERSION_MIN_*.
         let buildFirst = try XCTUnwrap(MachO(self.makeMachO(commands: [self.buildVersion(platform: PLATFORM_IOS), self.buildVersion(platform: PLATFORM_MACOS)])))
         XCTAssertEqual(try buildFirst.version()?.platform, PLATFORM_IOS)
 
@@ -181,9 +183,11 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertEqual(try platformZero.version()?.platform, 0)
     }
 
+    /**
+     MachOBase::version refuses an `LC_BUILD_VERSION` under 24 bytes and an `LC_VERSION_MIN_*` under 16, so codesign
+     cannot sign the slice: neither can fashion synthesize its ad-hoc identity.
+     */
     func testShortVersionCommandsThrowLikeSecurity() throws {
-        // MachOBase::version refuses an LC_BUILD_VERSION under 24 bytes and an LC_VERSION_MIN_* under 16, so codesign
-        // cannot sign the slice: neither can fashion synthesize its ad-hoc identity.
         var shortBuild = Data()
         [UInt32(LC_BUILD_VERSION), 16, UInt32(PLATFORM_MACOS), 0x000f_0000].forEach { shortBuild.appendUInt32($0) }
         var shortMin = Data()
@@ -303,8 +307,10 @@ final class AdhocCDHashTests: XCTestCase {
         }
     }
 
+    /**
+     Primary slot: SHA-1. Alternates 0x1000 and 0x1001: SHA-256 and SHA-384, which xnu prefers in that order.
+     */
     func testMultipleCodeDirectoriesRankStrongestFirst() throws {
-        // Primary slot: SHA-1. Alternates 0x1000 and 0x1001: SHA-256 and SHA-384, which xnu prefers in that order.
         let sha1 = self.codeDirectory(hashType: 1)
         let sha256 = self.codeDirectory(hashType: 2)
         let sha384 = self.codeDirectory(hashType: 4)
@@ -320,9 +326,11 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertEqual(try CDHash.hash(fixture: data).map(\.type), ["sha384", "sha256", "sha1"])
     }
 
+    /**
+     `SecStaticCode::loadCodeDirectories` reads the primary slot, then alternates from 0x1000 up to the first one
+     missing, and the magic is never checked. SHA-512, which xnu does not know, ranks last.
+     */
     func testCodeDirectoriesLoadLikeSecurity() throws {
-        // SecStaticCode::loadCodeDirectories reads the primary slot, then alternates from 0x1000 up to the first one
-        // missing, and the magic is never checked. SHA-512, which xnu does not know, ranks last.
         let sha1 = self.codeDirectory(hashType: 1)
         let sha256 = self.codeDirectory(hashType: 2)
         var badMagic = self.codeDirectory(hashType: 2)
@@ -339,9 +347,11 @@ final class AdhocCDHashTests: XCTestCase {
         }
     }
 
+    /**
+     Security calls a slice whose code directories it cannot load "not signed at all", and codesign signs it ad
+     hoc up to where the signature starts (`MachORep::signingLimit`).
+     */
     func testRejectedCodeDirectoriesMakeTheSliceUnsigned() throws {
-        // Security calls a slice whose code directories it cannot load "not signed at all", and codesign signs it ad
-        // hoc up to where the signature starts (MachORep::signingLimit).
         func field(_ directory: Data, at offset: Int, _ value: UInt32) -> Data {
             var directory = directory
             var bigEndian = value.bigEndian
@@ -381,8 +391,10 @@ final class AdhocCDHashTests: XCTestCase {
         }
     }
 
+    /**
+     Named on stderr even into a pipe, as Security's rejection reads no code, without failing the run.
+     */
     func testRejectedSignatureIsWarnedAbout() throws {
-        // Named on stderr even into a pipe, as Security's rejection reads no code, without failing the run.
         let url = FileManager.default.temporaryDirectory / "fashion-rejected-\(UUID())"
         try self.makeSignedMachO(signature: self.superblob(slots: [])).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -431,9 +443,11 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertNotEqual(dirtyWhole, cleanHashes, "Whole-slice adhoc must include garbage")
     }
 
+    /**
+     codesign signs only these filetypes as Mach-O code. Any other one, an unknown 0x1d included, is a generic
+     file to it, so an unsigned slice of that filetype has no ad-hoc cdhash.
+     */
     func testOnlyCodeFiletypesSynthesizeAdhoc() throws {
-        // codesign signs only these filetypes as Mach-O code. Any other one, an unknown 0x1d included, is a generic
-        // file to it, so an unsigned slice of that filetype has no ad-hoc cdhash.
         let code: [Int32] = [MH_EXECUTE, MH_PRELOAD, MH_DYLIB, MH_DYLINKER, MH_BUNDLE, MH_KEXT_BUNDLE]
         for filetype in code + [MH_OBJECT, MH_FVMLIB, MH_CORE, MH_DYLIB_STUB, MH_DSYM, MH_FILESET, MH_GPU_EXECUTE, MH_GPU_DYLIB, 0x1d] {
             let slice = try XCTUnwrap(MachO(self.makeMachO(filetype: UInt32(filetype))))
@@ -443,9 +457,11 @@ final class AdhocCDHashTests: XCTestCase {
         }
     }
 
+    /**
+     `MachORep::candidate` takes any other filetype for a generic file, so `codesign -d` calls it "not signed at all"
+     whatever its `LC_CODE_SIGNATURE` holds: no cdhash, embedded or synthesized.
+     */
     func testOnlyCodeFiletypesReportTheirSignature() throws {
-        // MachORep::candidate takes any other filetype for a generic file, so codesign -d calls it "not signed at all"
-        // whatever its LC_CODE_SIGNATURE holds: no cdhash, embedded or synthesized.
         let signature = self.superblob(slots: [(0, self.codeDirectory(hashType: 2))])
         for (filetype, isCode) in [(MH_EXECUTE, true), (MH_DYLIB, true), (MH_OBJECT, false), (MH_DSYM, false), (MH_FILESET, false)] {
             let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: signature, filetype: UInt32(filetype))))
@@ -475,8 +491,10 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertEqual(results.map(\.hash), try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
     }
 
+    /**
+     codesign calls a slice whose superblob holds no code directory unsigned, and signs it up to the signature.
+     */
     func testSignatureWithoutCodeDirectoryIsAdhocUpToTheSignature() throws {
-        // codesign calls a slice whose superblob holds no code directory unsigned, and signs it up to the signature.
         let data = self.makeSignedEmptySuperblob()
         let slice = try XCTUnwrap(MachO(data))
         let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)

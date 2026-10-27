@@ -13,9 +13,11 @@ final class FileTests: XCTestCase {
         }
     }
 
+    /**
+     A FIFO put in place of a walked file would block `open(2)` until a writer came: it is refused at once instead,
+     like a directory or a device.
+     */
     func testOpenRefusesWhatIsNotARegularFile() throws {
-        // A FIFO put in place of a walked file would block open(2) until a writer came: it is refused at once instead,
-        // like a directory or a device.
         let fifo = FileManager.default.temporaryDirectory / "fashion-fifo-\(UUID())"
         XCTAssertEqual(mkfifo(fifo.path(), 0o600), 0)
         defer {
@@ -36,8 +38,10 @@ final class FileTests: XCTestCase {
         XCTAssertEqual(try file.read(at: 1000, count: 0), Data())
     }
 
+    /**
+     The bytes checked against the size at open are no longer there: the sizes then and now say so.
+     */
     func testReadReportsAFileThatShrank() throws {
-        // The bytes checked against the size at open are no longer there: the sizes then and now say so.
         let url = FileManager.default.temporaryDirectory / "fashion-shrinking-\(UUID())"
         try Data(repeating: 0xab, count: 1000).write(to: url)
         defer {
@@ -51,8 +55,10 @@ final class FileTests: XCTestCase {
         }
     }
 
+    /**
+     The one opened was cut short, and the path names another file by the time the read comes up short.
+     */
     func testReadReportsAFileReplaced() throws {
-        // The one opened was cut short, and the path names another file by the time the read comes up short.
         let url = FileManager.default.temporaryDirectory / "fashion-replaced-\(UUID())"
         try Data(repeating: 0xab, count: 1000).write(to: url)
         defer {
@@ -98,8 +104,10 @@ final class FileTests: XCTestCase {
         }
     }
 
+    /**
+     An I/O error reads as strerror says it, not as Errno's localizedDescription does.
+     */
     func testMessagesLeaveOutFoundationsPrefix() {
-        // An I/O error reads as strerror says it, not as Errno's localizedDescription does.
         XCTAssertEqual(File.message(for: Errno.permissionDenied), "Permission denied")
         XCTAssertNotEqual(Errno.permissionDenied.localizedDescription, "Permission denied")
         XCTAssertEqual(File.message(for: FileError.sizeChanged(opened: 2, now: 1)), "File changed size while hashing (2 bytes when opened, 1 now)")

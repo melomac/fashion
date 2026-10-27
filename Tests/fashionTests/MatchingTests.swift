@@ -30,8 +30,10 @@ final class MatchingTests: XCTestCase {
         XCTAssertEqual(Targets.shape(of: "3:abc:def"), .ssdeep)
     }
 
+    /**
+     `git`, `git256` and `cdhash` digests have the SHA-1 and SHA-256 shapes: --algo tells them apart.
+     */
     func testShapeOfNothingElse() {
-        // git, git256 and cdhash digests have the SHA-1 and SHA-256 shapes: --algo tells them apart.
         for target in [
             "",
             "zzz",
@@ -53,8 +55,10 @@ final class MatchingTests: XCTestCase {
         }
     }
 
+    /**
+     Without --algo, any shape; with it, that algorithm's.
+     */
     func testFitsAlgorithm() {
-        // Without --algo, any shape; with it, that algorithm's.
         XCTAssertTrue(Targets.fits(self.md5, nil))
         XCTAssertFalse(Targets.fits("zzz", nil))
         XCTAssertTrue(Targets.fits(self.md5, .md5))
@@ -96,8 +100,10 @@ final class MatchingTests: XCTestCase {
         XCTAssertNil(targets.match(self.sha256, algorithm: .git256, threshold: 0))
     }
 
+    /**
+     --algo types every target, whatever its shape says: a SHA-1 shape is a git blob's, a SHA-256 shape a cdhash's.
+     */
     func testTargetsTypedByAlgorithm() {
-        // --algo types every target, whatever its shape says: a SHA-1 shape is a git blob's, a SHA-256 shape a cdhash's.
         XCTAssertEqual(Targets([self.sha1], algorithm: .git).algorithms, [.git])
         XCTAssertNotNil(Targets([self.sha1], algorithm: .git).match(self.sha1, algorithm: .git, threshold: 0))
         XCTAssertNil(Targets([self.sha1], algorithm: .git).match(self.sha1, algorithm: .sha1, threshold: 0))
@@ -105,8 +111,10 @@ final class MatchingTests: XCTestCase {
         XCTAssertNotNil(Targets([self.sha256], algorithm: .cdhash).match(self.sha256, algorithm: .cdhash, threshold: 0))
     }
 
+    /**
+     `validate()` refuses the run over them first; typed anyway, they match nothing rather than everything.
+     */
     func testTargetsOfNoShapeAreLeftOut() {
-        // validate() refuses the run over them first; typed anyway, they match nothing rather than everything.
         let targets = Targets(["zzz", self.sha256], algorithm: .md5)
         XCTAssertEqual(targets.count, 2)
         XCTAssertEqual(targets.algorithms, [])
@@ -119,8 +127,10 @@ final class MatchingTests: XCTestCase {
 
     // MARK: - Exact matching
 
+    /**
+     Targets are lowercased once, digests compared lowercased.
+     */
     func testExactMatchCaseInsensitive() {
-        // Targets are lowercased once, digests compared lowercased.
         XCTAssertNotNil(Targets([self.md5.uppercased()]).match(self.md5, algorithm: .md5, threshold: 0))
         XCTAssertNotNil(Targets([self.md5]).match(self.md5.uppercased(), algorithm: .md5, threshold: 0))
         XCTAssertNil(Targets([self.md5]).match(self.md5, algorithm: .md5, threshold: 0)?.score)
@@ -139,21 +149,27 @@ final class MatchingTests: XCTestCase {
 
     // MARK: - SSDeep fuzzy matching
 
+    /**
+     Identical ssdeep signatures score 100.
+     */
     func testSSDeepMatchRouting() {
-        // Identical ssdeep signatures score 100.
         let result = Targets([self.ssdeep]).match(self.ssdeep, algorithm: .ssdeep, threshold: 0)
         XCTAssertEqual(result?.score, 100)
     }
 
+    /**
+     Completely different signatures: score 0, below any threshold above it.
+     */
     func testSSDeepNoMatchBelowThreshold() {
-        // Completely different signatures: score 0, below any threshold above it.
         XCTAssertNil(Targets(["96:zzzzzzzzzzzzzzzzz:yyyy"]).match("3:abc:def", algorithm: .ssdeep, threshold: 100))
     }
 
     // MARK: - TLSH fuzzy matching
 
+    /**
+     Compute a real TLSH hash from data, then verify matching routes through TLSH logic
+     */
     func testTLSHMatchRouting() throws {
-        // Compute a real TLSH hash from data, then verify matching routes through TLSH logic
         let data = Data((0 ..< 1024).map { UInt8($0 % 256) })
         let hash = try XCTUnwrap(ByteHash.tlsh.digest(data))
 
@@ -161,8 +177,10 @@ final class MatchingTests: XCTestCase {
         XCTAssertEqual(result?.score, 0) // identical = distance 0
     }
 
+    /**
+     Use real TLSH hashes from different data
+     */
     func testTLSHNoMatchAboveThreshold() throws {
-        // Use real TLSH hashes from different data
         let data1 = Data((0 ..< 1024).map { UInt8($0 % 256) })
         let data2 = Data((0 ..< 1024).map { UInt8(($0 * 7 + 13) % 256) })
         let h1 = try XCTUnwrap(ByteHash.tlsh.digest(data1))
@@ -198,9 +216,11 @@ final class MatchingTests: XCTestCase {
         XCTAssertNil(self.cdhashMatch(""), "An empty target must not prefix-match every digest")
     }
 
+    /**
+     Shorter than the 20-byte CDHash: a prefix of a digest is no target, however long, and one hex digit would
+     match a sixteenth of all digests.
+     */
     func testCDHashShortTargetDoesNotMatch() {
-        // Shorter than the 20-byte CDHash: a prefix of a digest is no target, however long, and one hex digit would
-        // match a sixteenth of all digests.
         for count in [1, 4, 8, 39] {
             XCTAssertNil(self.cdhashMatch(String(self.cdhash.prefix(count))), "\(count)")
         }
@@ -210,8 +230,10 @@ final class MatchingTests: XCTestCase {
         XCTAssertNil(self.cdhashMatch("nothexvalue!!!"))
     }
 
+    /**
+     A target longer than the computed digest must not match via the (removed) reverse-prefix arm.
+     */
     func testCDHashLongerTargetDoesNotMatch() {
-        // A target longer than the computed digest must not match via the (removed) reverse-prefix arm.
         XCTAssertNil(self.cdhashMatch(self.cdhash, digest: String(self.cdhash.prefix(40))))
     }
 

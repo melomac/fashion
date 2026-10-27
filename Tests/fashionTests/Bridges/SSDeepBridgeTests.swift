@@ -3,8 +3,10 @@ import System
 import XCTest
 
 final class SSDeepBridgeTests: XCTestCase {
+    /**
+     ssdeep needs reasonable data to produce a hash
+     */
     func testHashData() throws {
-        // ssdeep needs reasonable data to produce a hash
         let data = Data(repeating: 0x41, count: 4096)
         let result = try ByteHash.ssdeep.digest(data)
 
@@ -19,15 +21,19 @@ final class SSDeepBridgeTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(result).isEmpty)
     }
 
+    /**
+     The streaming buffer path must produce the same digest as hashing the file directly.
+     */
     func testHashDataMatchesHashFile() throws {
-        // The streaming buffer path must produce the same digest as hashing the file directly.
         let data = Data((0 ..< 8192).map { UInt8($0 & 0xff) })
 
         XCTAssertEqual(try ByteHash.ssdeep.digest(data), try ByteHash.ssdeep.digest(File(data: data)))
     }
 
+    /**
+     Empty input has no base address; the bridge must not crash and should return the degenerate signature.
+     */
     func testHashEmptyData() throws {
-        // Empty input has no base address; the bridge must not crash and should return the degenerate signature.
         XCTAssertEqual(try ByteHash.ssdeep.digest(Data()), "3::")
     }
 

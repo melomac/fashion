@@ -10,8 +10,10 @@ final class FileEnumeratorTests: XCTestCase {
         Array(FileWalker(paths: paths, follow: false, sorted: true))
     }
 
+    /**
+     A directly-named FIFO is not a file to hash: the walk skips it.
+     */
     func testSortedWalkSkipsFifo() throws {
-        // A directly-named FIFO is not a file to hash: the walk skips it.
         let url = FileManager.default.temporaryDirectory / "fashion-fifo-\(UUID())"
         defer {
             try? FileManager.default.removeItem(at: url)
@@ -35,8 +37,10 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertEqual(paths, [url.path])
     }
 
+    /**
+     A root named on the command line is followed even without -L, like `find -H`; inner symlinks are not.
+     */
     func testRootSymlinkToDirectoryIsWalked() throws {
-        // A root named on the command line is followed even without -L, like `find -H`; inner symlinks are not.
         let dir = FileManager.default.temporaryDirectory / "fashion-rootlink-\(UUID())"
         try FileManager.default.createDirectory(at: dir / "sub", withIntermediateDirectories: true)
         try Data("hi".utf8).write(to: dir / "sub" / "f")
@@ -54,8 +58,10 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertTrue(paths.isEmpty)
     }
 
+    /**
+     The pull-based streaming walk must enumerate the same files as the sorted collector.
+     */
     func testStreamingWalkMatchesSortedWalk() throws {
-        // The pull-based streaming walk must enumerate the same files as the sorted collector.
         let dir = FileManager.default.temporaryDirectory / "fashion-walk-\(UUID())"
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer {
@@ -91,8 +97,10 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertEqual(streamed.map { ($0 as NSString).lastPathComponent }, ["real.txt"])
     }
 
+    /**
+     libc's fts appends "/" to the root as given, so `dir/` used to enumerate as `dir//file`.
+     */
     func testDirectoryRootTrailingSlashesDoNotDoubleUp() throws {
-        // libc's fts appends "/" to the root as given, so `dir/` used to enumerate as `dir//file`.
         let dir = FileManager.default.temporaryDirectory / "fashion-slash-\(UUID())"
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try Data("x".utf8).write(to: dir / "f")
@@ -186,9 +194,11 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertEqual(self.sortedWalk(roots), Array(sorted[..<6]))
     }
 
+    /**
+     Each root that cannot be walked is reported with what fts met there: a path in an unreadable directory is
+     not missing, a file named as a directory is not one, and a root symlink to nothing does not exist.
+     */
     func testRootsReportTheirOwnErrors() throws {
-        // Each root that cannot be walked is reported with what fts met there: a path in an unreadable directory is
-        // not missing, a file named as a directory is not one, and a root symlink to nothing does not exist.
         try XCTSkipIf(getuid() == 0, "root reads an unreadable directory")
         let dir = FileManager.default.temporaryDirectory / "fashion-roots-\(UUID())"
         try FileManager.default.createDirectory(at: dir / "locked", withIntermediateDirectories: true)
@@ -214,10 +224,12 @@ final class FileEnumeratorTests: XCTestCase {
         ])
     }
 
+    /**
+     fts reports a root the kernel cannot look up in order with the others, but refuses every root when one is
+     longer than its own buffer (about 64 KiB): the roots too long for the kernel are then reported first, and
+     the others are still walked.
+     */
     func testRootTooLongToLookUpIsReportedAlone() throws {
-        // fts reports a root the kernel cannot look up in order with the others, but refuses every root when one is
-        // longer than its own buffer (about 64 KiB): the roots too long for the kernel are then reported first, and
-        // the others are still walked.
         let file = FileManager.default.temporaryDirectory / "fashion-long-root-\(UUID())"
         try Data("x".utf8).write(to: file)
         defer {
@@ -240,8 +252,10 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertEqual(errors, ["fashion: \(long): File name too long", "fashion: \(tooLong): File name too long"])
     }
 
+    /**
+     Opening the file fails where the walk did not: the message is the same strerror text a walk error has.
+     */
     func testUnreadableFileIsReportedLikeAWalkError() throws {
-        // Opening the file fails where the walk did not: the message is the same strerror text a walk error has.
         try XCTSkipIf(getuid() == 0, "root reads an unreadable file")
         let url = FileManager.default.temporaryDirectory / "fashion-unreadable-\(UUID())"
         try Data("x".utf8).write(to: url)

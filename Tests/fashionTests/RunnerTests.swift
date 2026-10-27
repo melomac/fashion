@@ -60,8 +60,10 @@ final class RunnerTests: XCTestCase {
         return url
     }
 
+    /**
+     Hash threads finish out of order, the large files last: --sort must still print in path order.
+     */
     func testSortedOutputDoesNotDependOnJobs() throws {
-        // Hash threads finish out of order, the large files last: --sort must still print in path order.
         let binary = try fashionExecutable()
         let directory = FileManager.default.temporaryDirectory / "fashion-runner-sort-\(UUID())"
         try FileManager.default.createDirectory(at: directory / "sub", withIntermediateDirectories: true)
@@ -116,8 +118,10 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(raw, 0)
     }
 
+    /**
+     --slices is a Mach-O-aware mode: a broken slice is reported whether or not --exact is set.
+     */
     func testSlicesRejectsMalformedSliceInsideFat() throws {
-        // --slices is a Mach-O-aware mode: a broken slice is reported whether or not --exact is set.
         let bad = try self.write(self.fat(wrapping: self.machO(padding: 8)), name: "fat-bad")
         let good = try self.write(self.fat(wrapping: self.machO()), name: "fat-ok")
         defer {
@@ -131,9 +135,11 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(accepted, 0)
     }
 
+    /**
+     --exact ends a slice where it lies in the universal file: with 100 bytes appended inside the slice, the file
+     still hashes whole, and the slice without them.
+     */
     func testExactTrimsEachSliceInPlace() throws {
-        // --exact ends a slice where it lies in the universal file: with 100 bytes appended inside the slice, the file
-        // still hashes whole, and the slice without them.
         let slice = self.machO()
         let fat = self.fat(wrapping: slice + Data(repeating: 0x41, count: 100))
         let url = try self.write(fat, name: "fat-padded")
@@ -146,8 +152,10 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(lines, try [ByteHash.sha256.digest(fat), ByteHash.sha256.digest(slice)])
     }
 
+    /**
+     Greens by quarters of the way to --score: with 40, a TLSH distance of 0 is full green, then darker each 10.
+     */
     func testFuzzyMatchTint() throws {
-        // Greens by quarters of the way to --score: with 40, a TLSH distance of 0 is full green, then darker each 10.
         func sgr(_ arguments: [String], _ scores: [Int]) throws -> [String?] {
             let digester = try Digester(Hasher.parse(["x"] + arguments))
             return scores.map { digester.matchTint($0, algorithm: digester.algorithms[0]).sgr() }
@@ -169,10 +177,12 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try Digester(Hasher.parse(["x", "--algo", "cdhash"])).matchTint(nil, algorithm: .cdhash).sgr(), "38;5;46")
     }
 
+    /**
+     Targets of several algorithms in one run, each typed by its shape: every file is read once and hashed with
+     each of their algorithms, and a match line shows the digest that matched, scored when fuzzy. A file that
+     matches two targets prints both lines, and is named once with --quiet.
+     */
     func testMixedTargetsMatchByEachShape() throws {
-        // Targets of several algorithms in one run, each typed by its shape: every file is read once and hashed with
-        // each of their algorithms, and a match line shows the digest that matched, scored when fuzzy. A file that
-        // matches two targets prints both lines, and is named once with --quiet.
         let directory = FileManager.default.temporaryDirectory / "fashion-runner-mixed-\(UUID())"
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer {
@@ -265,9 +275,11 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try Hasher.parse([directory.path, "--quiet", "--negate"] + targets + ["--match", digest(.md5, "none")]).scan(), 1)
     }
 
+    /**
+     A digest searched for is full green when found, whatever the algorithm, an ad-hoc cdhash included, which is
+     dimmed otherwise. Without --match, lines keep their own tint.
+     */
     func testExactMatchIsGreen() throws {
-        // A digest searched for is full green when found, whatever the algorithm, an ad-hoc cdhash included, which is
-        // dimmed otherwise. Without --match, lines keep their own tint.
         let slice = self.machO()
         let url = try self.write(slice, name: "match")
         defer {
@@ -288,10 +300,12 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try lines(["--algo", "cdhash", "--match", String(cdhash.prefix(40))]).map(\.tint), [.match(distance: 0)])
     }
 
+    /**
+     The mode flags pick the input and the shape the function: under --symhash a SHA-1 target is the SHA-1 of the
+     symbol list, an ssdeep or TLSH target its ssdeep or TLSH, and the file's own SHA-1 is not looked for. One
+     line per file, as a symhash search prints.
+     */
     func testMixedTargetsUnderSymhash() throws {
-        // The mode flags pick the input and the shape the function: under --symhash a SHA-1 target is the SHA-1 of the
-        // symbol list, an ssdeep or TLSH target its ssdeep or TLSH, and the file's own SHA-1 is not looked for. One
-        // line per file, as a symhash search prints.
         let path = "/bin/ls"
         let digests = try SymHash.compute(File(path: path), algorithms: [.sha1, .ssdeep, .tlsh], separator: ",", sortSymbols: true)
         let sha1 = try XCTUnwrap(digests.first { $0.algorithm == .sha1 }).digest
@@ -309,9 +323,11 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try lines([XCTUnwrap(ByteHash.sha1.digest(File(path: path)))]), [])
     }
 
+    /**
+     Under --xar-toc a target is a digest of the table of contents, as stored or inflated with --decompress, and
+     the file's own SHA-256 is not looked for.
+     */
     func testMixedTargetsUnderXarToc() throws {
-        // Under --xar-toc a target is a digest of the table of contents, as stored or inflated with --decompress, and
-        // the file's own SHA-256 is not looked for.
         var seed: UInt32 = 1
         let toc = Data((0 ..< 1024).map { _ -> UInt8 in
             seed = seed &* 1_103_515_245 &+ 12345
@@ -334,9 +350,11 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try lines(["--match", XCTUnwrap(ByteHash.sha256.digest(File(path: url.path)))]), [])
     }
 
+    /**
+     A Mach-O whose load commands run past its end does not parse: red. A file that cannot be read, or changed, is
+     yellow.
+     */
     func testMalformedFileIsRed() {
-        // A Mach-O whose load commands run past its end does not parse: red. A file that cannot be read, or changed, is
-        // yellow.
         var data = Data()
         [MH_MAGIC_64, UInt32(bitPattern: CPU_TYPE_ARM64), 0, UInt32(MH_EXECUTE), 1, 0x1000, 0, 0].forEach { data.appendUInt32($0) }
         XCTAssertThrowsError(try Universal.open(data: data)) { error in
@@ -346,9 +364,11 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(Digester.tint(for: FileError.replaced).sgr(), "33")
     }
 
+    /**
+     A file or slice TLSH makes no digest of is named on stderr, after the slice it is, and the run still succeeds:
+     the universal file has a digest, its mostly zero slice none.
+     */
     func testTLSHCaveatsDoNotFail() throws {
-        // A file or slice TLSH makes no digest of is named on stderr, after the slice it is, and the run still succeeds:
-        // the universal file has a digest, its mostly zero slice none.
         let tiny = try self.write(Data("tiny file\n".utf8), name: "tlsh-tiny")
         let fat = try self.write(self.fat(wrapping: self.machO()), name: "tlsh-fat")
         defer {
@@ -366,9 +386,11 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try runFashion(["--algo", "tlsh", "--slices", "-j", "1", "-q", tiny.path, fat.path]).errors, [])
     }
 
+    /**
+     A slice is read from the file at its offset, never copied: a copy made every slice a hash thread held
+     resident at once, gigabytes over /Applications. One larger than any earlier peak of the process shows it.
+     */
     func testSlicesHashInPlace() throws {
-        // A slice is read from the file at its offset, never copied: a copy made every slice a hash thread held
-        // resident at once, gigabytes over /Applications. One larger than any earlier peak of the process shows it.
         let before = try XCTUnwrap(Reporter.peakFootprint())
         let size = Int(before) + 64 << 20
         let url = try self.write(self.fat(wrapping: self.machO(), size: size), name: "fat-big")
@@ -524,10 +546,12 @@ final class RunnerConcurrencyTests: XCTestCase {
 
     // MARK: - Output
 
+    /**
+     Hash threads finish files in any order: with --sort a file's lines wait for every earlier file and come out in
+     index order, a file's lines together, whichever thread ends up printing them. A file that prints nothing still
+     lets the next one through.
+     */
     func testSortedOutputPrintsEachFileWholeInIndexOrder() throws {
-        // Hash threads finish files in any order: with --sort a file's lines wait for every earlier file and come out in
-        // index order, a file's lines together, whichever thread ends up printing them. A file that prints nothing still
-        // lets the next one through.
         let files = 2000
         let hashers = 8
         let lines = try self.piped(STDOUT_FILENO) {
@@ -553,8 +577,10 @@ final class RunnerConcurrencyTests: XCTestCase {
         XCTAssertEqual(lines, (0 ..< files).flatMap { Self.lines(of: $0).map(\.text) })
     }
 
+    /**
+     Without --sort a finished file prints at once, its lines still together.
+     */
     func testUnsortedOutputPrintsEachFileWholeAsFinished() throws {
-        // Without --sort a finished file prints at once, its lines still together.
         let files = 2000
         let hashers = 8
         let lines = try self.piped(STDOUT_FILENO) {
@@ -577,12 +603,14 @@ final class RunnerConcurrencyTests: XCTestCase {
         }
     }
 
+    /**
+     A hash thread prints a file's lines through Output and its diagnostics through Reporter while the others do
+     the same: Output's one printer at a time and Reporter's lock keep each stream's lines whole, well past the
+     `PIPE_BUF` (512 bytes) a pipe keeps a single write whole up to. The stdout lines go far past it; the stderr
+     lines stay under it, where a line the unified log copies to stderr under Xcode (`OS_ACTIVITY_DT_MODE`) cannot
+     cut one.
+     */
     func testCallersLocksKeepLongLinesWhole() throws {
-        // A hash thread prints a file's lines through Output and its diagnostics through Reporter while the others do
-        // the same: Output's one printer at a time and Reporter's lock keep each stream's lines whole, well past the
-        // PIPE_BUF (512 bytes) a pipe keeps a single write whole up to. The stdout lines go far past it; the stderr
-        // lines stay under it, where a line the unified log copies to stderr under Xcode (OS_ACTIVITY_DT_MODE) cannot
-        // cut one.
         let hashers = 8
         let files = 100
         let long = String(repeating: "x", count: 4000)
@@ -614,10 +642,12 @@ final class RunnerConcurrencyTests: XCTestCase {
         XCTAssertEqual(Set(diagnostics), Set(paths.map { "fashion: \($0): warned" }))
     }
 
+    /**
+     A file's yellow or red line is queued with its own lines, so on a terminal, where stdout and stderr meet, it
+     comes out right before them, in index order with --sort, however the hash threads interleave. Every third file
+     has one; every tenth prints nothing else, like a file TLSH makes no digest of.
+     */
     func testDiagnosticsPrintWithTheirFileOnATerminal() throws {
-        // A file's yellow or red line is queued with its own lines, so on a terminal, where stdout and stderr meet, it
-        // comes out right before them, in index order with --sort, however the hash threads interleave. Every third file
-        // has one; every tenth prints nothing else, like a file TLSH makes no digest of.
         let files = 500
         let hashers = 8
         let lines = try self.terminal([STDOUT_FILENO, STDERR_FILENO]) {
@@ -648,9 +678,11 @@ final class RunnerConcurrencyTests: XCTestCase {
         XCTAssertEqual(lines.map(Self.plain).filter(own.contains), expected)
     }
 
+    /**
+     In match mode, files that only have diagnostics have not matched: the run exits 1 like one that printed
+     nothing. Off a terminal the diagnostic goes out at once, as it comes, through Reporter.
+     */
     func testDiagnosticsAloneLeaveNothingPrinted() throws {
-        // In match mode, files that only have diagnostics have not matched: the run exits 1 like one that printed
-        // nothing. Off a terminal the diagnostic goes out at once, as it comes, through Reporter.
         let lines = try self.piped(STDERR_FILENO) {
             let console = Console()
             let reporter = Reporter(console: console)
@@ -662,13 +694,15 @@ final class RunnerConcurrencyTests: XCTestCase {
         XCTAssertEqual(lines.filter { $0.hasPrefix("fashion: /") }, ["fashion: /0: informed"])
     }
 
+    /**
+     Eight hashers, 25 µs of work and two lines per file, print to a pty whose reader stops for 8 ms after every
+     16 ms of reading, a third of the time, as an emulator does while it draws a frame. With the output lock held
+     across the write, every hasher waited out each pause within a few lines: 3.5 s. With the lines queued they
+     run on: 1 s, most of it the pty's 1 KiB round trips. Measured, so a change to Output or Console shows what
+     it costs here. The round trips jitter by some 13% run to run, more than the 10% a baseline allows by default:
+     one recorded in Xcode needs its maximum deviation raised to hold.
+     */
     func testHashersRunOnWhileTheTerminalDraws() {
-        // Eight hashers, 25 µs of work and two lines per file, print to a pty whose reader stops for 8 ms after every
-        // 16 ms of reading, a third of the time, as an emulator does while it draws a frame. With the output lock held
-        // across the write, every hasher waited out each pause within a few lines: 3.5 s. With the lines queued they
-        // run on: 1 s, most of it the pty's 1 KiB round trips. Measured, so a change to Output or Console shows what
-        // it costs here. The round trips jitter by some 13% run to run, more than the 10% a baseline allows by default:
-        // one recorded in Xcode needs its maximum deviation raised to hold.
         let files = 100_000
         let hashers = 8
         let expected = (0 ..< files).reduce(0) { $0 + Self.lines(of: $1).count }
@@ -694,10 +728,12 @@ final class RunnerConcurrencyTests: XCTestCase {
 
     // MARK: - Reporter
 
+    /**
+     Hash threads count files and report, warn and inform at once, while the status line reads the counts and ⌃T
+     asks for progress: every count adds up, and every line reaches stderr whole, once. The end of the run is
+     reached twice, as on a signal that arrives as the walk ends.
+     */
     func testReporterCountsAndDiagnosticsFromConcurrentThreads() throws {
-        // Hash threads count files and report, warn and inform at once, while the status line reads the counts and ⌃T
-        // asks for progress: every count adds up, and every line reaches stderr whole, once. The end of the run is
-        // reached twice, as on a signal that arrives as the walk ends.
         let hashers = 8
         let files = 100
         var counts = (files: 0, errors: 0)
@@ -753,9 +789,11 @@ final class RunnerConcurrencyTests: XCTestCase {
 
     // MARK: - Handoff
 
+    /**
+     The walker fills the queue, then waits: with nobody taking yet, it gets exactly `capacity` paths ahead. Once
+     the hashers take, slowly, every path reaches one of them, once, in walk order for each.
+     */
     func testHandoffHoldsFastWalkerToItsCapacity() {
-        // The walker fills the queue, then waits: with nobody taking yet, it gets exactly `capacity` paths ahead. Once
-        // the hashers take, slowly, every path reaches one of them, once, in walk order for each.
         let capacity = 4
         let paths = 100
         let hashers = 2
@@ -792,9 +830,11 @@ final class RunnerConcurrencyTests: XCTestCase {
         XCTAssertEqual(lists.flatMap(\.self).sorted(), Array(0 ..< paths))
     }
 
+    /**
+     Hashers outnumber what a slow walker delivers: each path wakes one of them, and closing the handoff wakes every
+     one of them a last time, so none is left waiting.
+     */
     func testHandoffWakesIdleHashersForEachPathOfSlowWalker() {
-        // Hashers outnumber what a slow walker delivers: each path wakes one of them, and closing the handoff wakes every
-        // one of them a last time, so none is left waiting.
         let hashers = 4
         let paths = 50
         let handoff = Handoff(capacity: 64)
@@ -825,9 +865,11 @@ final class RunnerConcurrencyTests: XCTestCase {
 
     // MARK: - Console
 
+    /**
+     Off a terminal Console takes no lock: a line is one write, so lines up to `PIPE_BUF` stay whole on their own, on
+     either stream, from however many threads. Longer ones rely on their caller's lock (see the Output tests).
+     */
     func testConsoleLinesFromConcurrentThreadsStayWhole() throws {
-        // Off a terminal Console takes no lock: a line is one write, so lines up to PIPE_BUF stay whole on their own, on
-        // either stream, from however many threads. Longer ones rely on their caller's lock (see the Output tests).
         let threads = 8
         let rounds = 200
         let text = String(repeating: "x", count: 400)
@@ -856,9 +898,11 @@ final class RunnerConcurrencyTests: XCTestCase {
 
     // MARK: - Scan
 
+    /**
+     The run end to end in this process, walker to Output, where the sanitizer sees it when the tests are built
+     with one: files of two sizes finish out of order on every CPU, and --sort prints what one job does.
+     */
     func testScanPrintsTheSameOnEveryCPU() throws {
-        // The run end to end in this process, walker to Output, where the sanitizer sees it when the tests are built
-        // with one: files of two sizes finish out of order on every CPU, and --sort prints what one job does.
         let directory = FileManager.default.temporaryDirectory / "fashion-runner-scan-\(UUID())"
         try FileManager.default.createDirectory(at: directory / "sub", withIntermediateDirectories: true)
         defer {

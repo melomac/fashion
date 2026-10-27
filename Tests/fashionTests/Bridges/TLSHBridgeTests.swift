@@ -12,8 +12,10 @@ final class TLSHBridgeTests: XCTestCase {
         )
     }
 
+    /**
+     libtlsh says nothing of a digest it does not make: fashion names why, after the TLSH tools' own errors.
+     */
     func testCaveats() throws {
-        // libtlsh says nothing of a digest it does not make: fashion names why, after the TLSH tools' own errors.
         var caveats: [String] = []
         XCTAssertNil(try ByteHash.tlsh.digest(Data(repeating: 0x41, count: 10)) { caveats.append($0) })
         XCTAssertNil(try ByteHash.tlsh.digest(Data([0x41])) { caveats.append($0) })
@@ -29,9 +31,11 @@ final class TLSHBridgeTests: XCTestCase {
         ])
     }
 
+    /**
+     Past its length limit TLSH hashes the first maximumDataSize bytes, too many to feed a test: the caveat is asked
+     for directly.
+     */
     func testCaveatPastLengthLimit() throws {
-        // Past its length limit TLSH hashes the first maximumDataSize bytes, too many to feed a test: the caveat is asked
-        // for directly.
         let limit = Int(TLSHBridge.maximumDataSize)
         let digest = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
         XCTAssertNil(TLSHBridge.caveat(length: limit, digest: digest))
@@ -61,10 +65,12 @@ final class TLSHBridgeTests: XCTestCase {
         XCTAssertEqual(distance, 0)
     }
 
+    /**
+     A 50,704-byte Mach-O, then the same file padded with zeros to 2,952,771 bytes: only the length and the checksum
+     differ, 42 length steps of 12 and 1. Without the length, as the tlsh tool's -xlen, the checksum is all that is
+     left.
+     */
     func testDiffWithoutLength() {
-        // A 50,704-byte Mach-O, then the same file padded with zeros to 2,952,771 bytes: only the length and the checksum
-        // differ, 42 length steps of 12 and 1. Without the length, as the tlsh tool's -xlen, the checksum is all that is
-        // left.
         let exact = "T13D338D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
         let padded = "T1B2D58D7A3B0DE1A6C29CC134A5EFCB829D63F9151D7863432B91C5792FC86942F21B4B"
         XCTAssertEqual(TLSHBridge.diff(exact, padded), 505)
@@ -80,8 +86,10 @@ final class TLSHBridgeTests: XCTestCase {
         XCTAssertEqual(distance, -1)
     }
 
+    /**
+     libtlsh reads the 70 digits it needs and accepts whatever follows them: only whole digests may be compared.
+     */
     func testDiffRequiresWholeDigests() throws {
-        // libtlsh reads the 70 digits it needs and accepts whatever follows them: only whole digests may be compared.
         let hash = try XCTUnwrap(ByteHash.tlsh.digest(self.data))
         let digits = String(hash.dropFirst(2))
         XCTAssertEqual(TLSHBridge.diff(hash, digits), 0, "the T1 prefix is optional")

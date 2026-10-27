@@ -30,8 +30,10 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: 3), "x86_64")
     }
 
+    /**
+     `CPU_SUBTYPE_X86_64_H (8)`: a Haswell slice is its own architecture to codesign, not a second `x86_64`.
+     */
     func testArchNameX86_64H() {
-        // CPU_SUBTYPE_X86_64_H (8): a Haswell slice is its own architecture to codesign, not a second `x86_64`.
         XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_H), "x86_64h")
     }
 
@@ -68,10 +70,10 @@ final class MachOTests: XCTestCase {
     }
 
     /**
-     Slice names must be the ones codesign uses (`--arch`), so that a new subtype such as arm64e.x1 is not reported
+     Slice names must be the ones codesign uses (--arch), so that a new subtype such as `arm64e.x1` is not reported
      under its base architecture.
 
-     codesign is the oracle rather than `lipo`: it ships with the OS,while Xcode's lipo may predate the OS and print
+     codesign is the oracle rather than `lipo`: it ships with the OS, while Xcode's `lipo` may predate the OS and print
      `unknown(16777228,12)` for a slice it has never seen.
      */
     func testArchNamesMatchCodesign() throws {
@@ -317,9 +319,11 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     `lipo -create` also builds universal static libraries, whose slices are `ar` archives rather
+     than Mach-O. The container must open, and the Mach-O-only hashes must simply yield nothing.
+     */
     func testOpenAcceptsUniversalArchive() throws {
-        // `lipo -create` also builds universal static libraries, whose slices are `ar` archives rather
-        // than Mach-O. The container must open, and the Mach-O-only hashes must simply yield nothing.
         var data = self.makeFatArchive()
         if case let .fat(archs) = try Universal.open(data: data) {
             XCTAssertEqual(archs.map(\.name), ["arm64", "x86_64"])
@@ -335,9 +339,11 @@ final class MachOTests: XCTestCase {
         XCTAssertTrue(try SymHash.compute(File(data: data), algorithm: .md5, separator: ",", sortSymbols: true).isEmpty)
     }
 
+    /**
+     The container itself is well-formed; the Mach-O inside it declares a load command that the
+     40-byte slice cannot hold. Each hash must report that rather than treat the slice as unsigned.
+     */
     func testMalformedMachOInsideFatIsRejectedByConsumers() throws {
-        // The container itself is well-formed; the Mach-O inside it declares a load command that the
-        // 40-byte slice cannot hold. Each hash must report that rather than treat the slice as unsigned.
         var slice = Data()
         slice.appendUInt32(MH_MAGIC_64)
         slice.appendInt32(CPU_TYPE_ARM64)
@@ -406,9 +412,11 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     Security (`MachORep::candidate`) reads a 28-byte `mach_header` before it calls a file Mach-O, and `isMachO(path:)`
+     does too; `open(data:)` must agree, so no mode reports a shorter stub as a broken Mach-O.
+     */
     func testOpenShortMagicIsNotMachO() throws {
-        // Security (MachORep::candidate) reads a 28-byte mach_header before it calls a file Mach-O, and isMachO(path:)
-        // does too; open(data:) must agree, so no mode reports a shorter stub as a broken Mach-O.
         for magic in [MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64, FAT_MAGIC, FAT_CIGAM, FAT_MAGIC_64, FAT_CIGAM_64] {
             for count in [4, 7, 8, 20, 27] {
                 var data = Data()
@@ -452,9 +460,11 @@ final class MachOTests: XCTestCase {
         XCTAssertTrue(try Universal.isMachO(data: self.makeFat())) // 1 architecture
     }
 
+    /**
+     dyld's `mach_o::Universal` accepts at most `kMaxSliceCount (16)` slices: fashion reads a universal file exactly
+     when libdyld's `macho_for_each_slice` does.
+     */
     func testUniversalSliceLimitMatchesDyld() throws {
-        // dyld's mach_o::Universal accepts at most kMaxSliceCount (16) slices: fashion reads a universal file exactly
-        // when libdyld's macho_for_each_slice does.
         for count in [16, 17] {
             var data = Data()
             data.appendUInt32BE(FAT_MAGIC)
@@ -490,8 +500,10 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     0xCAFEBABE shared magic, but the big-endian u32 at offset 4 is a Java major version (52), not an arch count.
+     */
     func testIsMachOFalseForJavaClass() throws {
-        // 0xCAFEBABE shared magic, but the big-endian u32 at offset 4 is a Java major version (52), not an arch count.
         var data = Data([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])
         data.append(Data(repeating: 0, count: 64))
 
@@ -623,8 +635,10 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     One 24-byte command inside a declared 32-byte table: the leftover bytes are not a command.
+     */
     func testSliceRejectsCommandsNotFillingTable() {
-        // One 24-byte command inside a declared 32-byte table: the leftover bytes are not a command.
         let data = self.thinHeader(ncmds: 1, sizeofcmds: 32, commands: self.command(LC_UUID, size: 24) + Data(repeating: 0, count: 8))
 
         XCTAssertThrowsError(try MachO(data)) { error in
@@ -632,15 +646,19 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     Security requires no alignment of cmdsize (codesign signs such a binary, and Rosetta runs it).
+     */
     func testSliceAcceptsUnalignedCommand() {
-        // Security requires no alignment of cmdsize (codesign signs such a binary, and Rosetta runs it).
         for (is64, size) in [(true, UInt32(28)), (false, UInt32(26))] {
             XCTAssertNotNil(try MachO(self.thinHeader(is64: is64, ncmds: 1, sizeofcmds: size, commands: self.command(LC_UUID, size: size))), "is64 \(is64)")
         }
     }
 
+    /**
+     `MachOBase::nextCommand` walks `sizeofcmds` alone: a wrong ncmds neither hides nor invents a command.
+     */
     func testSliceIgnoresNcmds() throws {
-        // MachOBase::nextCommand walks sizeofcmds alone: a wrong ncmds neither hides nor invents a command.
         let commands = self.command(LC_UUID, size: 24) + self.command(LC_SOURCE_VERSION, size: 16)
         for ncmds: UInt32 in [0, 1, 3] {
             let slice = try XCTUnwrap(MachO(self.thinHeader(ncmds: ncmds, sizeofcmds: 40, commands: commands)))
@@ -648,8 +666,10 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     `MachO::validateStructure`: an `LC_SEGMENT_64` must hold a whole `segment_command_64`, not just the 8-byte header.
+     */
     func testSliceRejectsCommandBelowMinimumSize() {
-        // MachO::validateStructure: an LC_SEGMENT_64 must hold a whole segment_command_64, not just the 8-byte header.
         let data = self.thinHeader(ncmds: 1, sizeofcmds: 16, commands: self.command(LC_SEGMENT_64, size: 16))
 
         XCTAssertThrowsError(try MachO(data)) { error in
@@ -657,9 +677,11 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     `validateStructure` stops at the first `__LINKEDIT` segment or `LC_SYMTAB`, and checks no other command: a short
+     command after it parses (a short `LC_SYMTAB` is then an error to symhash alone).
+     */
     func testSliceChecksSizesOnlyUpToTheImageEnd() throws {
-        // validateStructure stops at the first __LINKEDIT segment or LC_SYMTAB, and checks no other command: a short
-        // command after it parses (a short LC_SYMTAB is then an error to symhash alone).
         var linkedit = self.command(LC_SEGMENT_64, size: 72)
         linkedit.replaceSubrange(8 ..< 18, with: Data("__LINKEDIT".utf8))
         let commands = linkedit + self.command(LC_SYMTAB, size: 16) + self.command(LC_DYSYMTAB, size: 16)
@@ -671,10 +693,12 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     Security compares segname with strncmp: "__LIN\u{212A}EDIT", a Kelvin sign for the K, equals "__LINKEDIT" as
+     a Swift string but is another segment to codesign, which neither stops checking commands at it nor ends the
+     image there.
+     */
     func testSegmentNamesCompareAsBytes() throws {
-        // Security compares segname with strncmp: "__LIN\u{212A}EDIT", a Kelvin sign for the K, equals "__LINKEDIT" as
-        // a Swift string but is another segment to codesign, which neither stops checking commands at it nor ends the
-        // image there.
         let name = Data("__LIN\u{212A}EDIT".utf8)
         var kelvin = self.command(LC_SEGMENT_64, size: 72)
         kelvin.replaceSubrange(8 ..< 8 + name.count, with: name)
@@ -695,8 +719,10 @@ final class MachOTests: XCTestCase {
 #endif
     }
 
+    /**
+     A command header declaring cmdsize 0 can never advance the parser; it must not count as a command.
+     */
     func testSliceRejectsZeroSizeCommand() {
-        // A command header declaring cmdsize 0 can never advance the parser; it must not count as a command.
         var zeroSized = Data()
         zeroSized.appendUInt32(UInt32(LC_UUID))
         zeroSized.appendUInt32(0)
@@ -766,8 +792,10 @@ final class MachOTests: XCTestCase {
         return (data, symtab)
     }
 
+    /**
+     Only `N_UNDF | N_EXT` entries count: a defined external (`N_SECT`), a local, and a stab are skipped.
+     */
     func testExternalSymbolNamesKeepsUndefinedExternalsOnly() throws {
-        // Only N_UNDF | N_EXT entries count: a defined external (N_SECT), a local, and a stab are skipped.
         let strTable = Data("_puts\u{0}_main\u{0}_local\u{0}".utf8)
         let symoff = UInt32(strTable.count)
         var data = strTable
@@ -780,8 +808,10 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(try self.externalSymbolNames(data, symtab), ["_puts"])
     }
 
+    /**
+     A foreign-endian slice stores `n_strx` byte-swapped; the reader must swap it back before indexing.
+     */
     func testExternalSymbolNamesSwapsStringIndex() throws {
-        // A foreign-endian slice stores n_strx byte-swapped; the reader must swap it back before indexing.
         let strTable = Data("_a\u{0}_b\u{0}".utf8)
         let symoff = UInt32(strTable.count)
         var data = strTable
@@ -791,15 +821,19 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(try self.externalSymbolNames(data, symtab, swap: true), ["_b"])
     }
 
+    /**
+     A string table with no NUL terminator: the name ends with the table, whatever follows it in the file.
+     */
     func testSymbolNameUnterminatedTableIsBounded() throws {
-        // A string table with no NUL terminator: the name ends with the table, whatever follows it in the file.
         let (data, symtab) = self.symbols(strings: Data("_main".utf8), indexes: [0])
 
         XCTAssertEqual(try self.externalSymbolNames(data, symtab), ["_main"])
     }
 
+    /**
+     `strx` points past the declared string table extent even though it is within the file.
+     */
     func testSymbolNameStrxBeyondStrsizeThrows() {
-        // strx points past the declared string table extent even though it is within the file.
         let (data, symtab) = self.symbols(strings: Data("_main\u{0}padding".utf8), strsize: 6, indexes: [6])
 
         XCTAssertThrowsError(try self.externalSymbolNames(data, symtab)) { error in
@@ -807,10 +841,12 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     The string table is read in windows of `File.chunkSize` from the names wanted: names crossing a window's end,
+     overlapping names, a repeated index, and a last name running to the end of the table all read whole, in
+     table order.
+     */
     func testExternalSymbolNamesAcrossWindows() throws {
-        // The string table is read in windows of File.chunkSize from the names wanted: names crossing a window's end,
-        // overlapping names, a repeated index, and a last name running to the end of the table all read whole, in
-        // table order.
         var strings = Data(repeating: 0x2e, count: 3 * File.chunkSize)
         func put(_ name: String, at offset: Int) {
             strings.replaceSubrange(offset ..< offset + name.utf8.count + 1, with: Data(name.utf8) + Data([0]))
@@ -830,9 +866,11 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(try self.externalSymbolNames(data, symtab), expected)
     }
 
+    /**
+     As if each name were read in turn: names beyond the limit before a bad index fail as too long, and a bad
+     index before them fails as a bad index.
+     */
     func testExternalSymbolNamesReportTheFirstFailureInTableOrder() throws {
-        // As if each name were read in turn: names beyond the limit before a bad index fail as too long, and a bad
-        // index before them fails as a bad index.
         let name = Data(repeating: 0x41, count: 1 << 20) + Data([0])
         let count = SymHash.maxSymbolNamesLength / (1 << 20) + 1
         let bad = UInt32(name.count)
@@ -847,9 +885,11 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     A 32-bit slice packs symbols as 12-byte `nlist`; the reader must use the 12-byte stride so the
+     second entry's `n_strx` is read at the right offset rather than 4 bytes into a 16-byte gap.
+     */
     func testExternalSymbolNames32BitStride() throws {
-        // A 32-bit slice packs symbols as 12-byte `nlist`; the reader must use the 12-byte stride so the
-        // second entry's n_strx is read at the right offset rather than 4 bytes into a 16-byte gap.
         let strTable = Data("_a\u{0}_b\u{0}".utf8)
         let symoff = UInt32(strTable.count)
         var data = strTable
@@ -860,8 +900,10 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(try self.externalSymbolNames(data, symtab, is64: false), ["_a", "_b"])
     }
 
+    /**
+     Names may overlap: symbols all pointing at one long name add up to far more than the file holds.
+     */
     func testExternalSymbolNamesAreBounded() throws {
-        // Names may overlap: symbols all pointing at one long name add up to far more than the file holds.
         let name = Data(repeating: 0x41, count: 1 << 20)
         let count = SymHash.maxSymbolNamesLength / name.count + 1
         var data = name
@@ -1032,9 +1074,11 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(MachO.logicalEnd(data: data), logicalEnd)
     }
 
+    /**
+     The indirect symbol table `LC_DYSYMTAB` references ends the image, except to Security's MachO, which ends it
+     only at `__LINKEDIT` or the `LC_SYMTAB` strings.
+     */
     func testMachOEndWithOnlyADysymtab() {
-        // The indirect symbol table LC_DYSYMTAB references ends the image, except to Security's MachO, which ends it
-        // only at __LINKEDIT or the LC_SYMTAB strings.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -1065,9 +1109,11 @@ final class MachOTests: XCTestCase {
 #endif
     }
 
+    /**
+     `LC_SYMTAB` comes before `__LINKEDIT` here: to Security's MachO its string table ends the image even though
+     `__LINKEDIT` reaches further.
+     */
     func testMachOEndSymtabBeforeLinkedit() {
-        // LC_SYMTAB comes before __LINKEDIT here: to Security's MachO its string table ends the image even though
-        // __LINKEDIT reaches further.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -1127,8 +1173,10 @@ final class MachOTests: XCTestCase {
         }
     }
 
+    /**
+     A dSYM's `__DWARF` segment follows `__LINKEDIT`, where Security's MachO ends the image.
+     */
     func testMachOEndSegmentPastLinkedit() {
-        // A dSYM's __DWARF segment follows __LINKEDIT, where Security's MachO ends the image.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
@@ -1155,9 +1203,11 @@ final class MachOTests: XCTestCase {
 #endif
     }
 
+    /**
+     An empty string table at offset 0 ends the image at 0 for Security's MachO; the header and load commands
+     always belong to it otherwise.
+     */
     func testMachOEndEmptySymtab() {
-        // An empty string table at offset 0 ends the image at 0 for Security's MachO; the header and load commands
-        // always belong to it otherwise.
         var data = self.makeThin64()
         data.replaceSubrange(48 ..< 56, with: Data(count: 8)) // stroff, strsize
         data.append(Data(repeating: 0x41, count: 50))
@@ -1169,9 +1219,11 @@ final class MachOTests: XCTestCase {
 #endif
     }
 
+    /**
+     A command that might reference bytes not modeled here keeps the whole slice, except for Security's MachO,
+     which only looks for `__LINKEDIT` and `LC_SYMTAB`.
+     */
     func testMachOEndUnmodeledCommand() {
-        // A command that might reference bytes not modeled here keeps the whole slice, except for Security's MachO,
-        // which only looks for __LINKEDIT and LC_SYMTAB.
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)

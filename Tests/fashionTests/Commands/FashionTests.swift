@@ -2,14 +2,18 @@
 import XCTest
 
 final class FashionTests: XCTestCase {
+    /**
+     --jobs -7 reads `-7` as an option; joined with "=", the value reaches validation.
+     */
     func testNegativeJobsAreRefused() {
-        // `--jobs -7` reads `-7` as an option; joined with "=", the value reaches validation.
         XCTAssertEqual(usageError(["--jobs=-7"]), "--jobs must be zero or greater.")
     }
 
+    /**
+     CommandLine.arguments repairs bytes that are not UTF-8 to U+FFFD, another path that may name another file:
+     the run is refused before anything is hashed. A Japanese name is UTF-8 like any other.
+     */
     func testArgumentsMustBeUTF8() throws {
-        // CommandLine.arguments repairs bytes that are not UTF-8 to U+FFFD, another path that may name another file:
-        // the run is refused before anything is hashed. A Japanese name is UTF-8 like any other.
         let dir = FileManager.default.temporaryDirectory / "fashion-argv-\(UUID())"
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer {
@@ -37,9 +41,11 @@ final class FashionTests: XCTestCase {
         XCTAssertEqual(usageError(["-J", "-j", "4"]), "-J and --jobs are mutually exclusive.")
     }
 
+    /**
+     `fashion [options] <paths>` reads as it did before subcommands: the root runs `hash` unless another is named,
+     and `fashion hash` spells it out. The option groups of a default subcommand are validated like any other.
+     */
     func testHashIsTheDefaultSubcommand() throws {
-        // `fashion [options] <paths>` reads as it did before subcommands: the root runs `hash` unless another is named,
-        // and `fashion hash` spells it out. The option groups of a default subcommand are validated like any other.
         for arguments in [["--algo", "md5", "-J", "x"], ["hash", "--algo", "md5", "-J", "x"]] {
             let command = try XCTUnwrap(Fashion.parseAsRoot(arguments) as? Hasher)
             XCTAssertEqual(command.algo, .md5)

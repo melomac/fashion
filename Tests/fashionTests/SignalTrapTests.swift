@@ -94,8 +94,10 @@ final class SignalTrapTests: XCTestCase {
         return (process.terminationReason, process.terminationStatus, String(decoding: output, as: UTF8.self))
     }
 
+    /**
+     A reader that stops reading blocks the stdout write: SIGTERM must still end the run, as without the trap.
+     */
     func testSigTermEndsTheRunWhileStdOutIsBlocked() throws {
-        // A reader that stops reading blocks the stdout write: SIGTERM must still end the run, as without the trap.
         let binary = try fashionExecutable()
         let directory = FileManager.default.temporaryDirectory / UUID().uuidString
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -114,8 +116,10 @@ final class SignalTrapTests: XCTestCase {
         try self.assertSigTermEnds(process, blocking: stdout, "stdout")
     }
 
+    /**
+     A reader that stops reading blocks the stderr write of a diagnostic: SIGTERM must still end the run.
+     */
     func testSigTermEndsTheRunWhileStdErrIsBlocked() throws {
-        // A reader that stops reading blocks the stderr write of a diagnostic: SIGTERM must still end the run.
         let binary = try fashionExecutable()
         // Lines of about 150 bytes: 2000 missing paths overflow a 64 KiB pipe.
         let missing = (0 ..< 2000).map { "/nonexistent-\(String(repeating: "x", count: 100))/\($0)" }
