@@ -488,3 +488,12 @@ func codesignArchs(_ path: String) throws -> Set<String>? {
     }
     return nil
 }
+
+/// Where `upx` is, on the PATH or where Homebrew and MacPorts put it; skips the test without one.
+func upxExecutable() throws -> String {
+    let directories = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init) + ["/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"]
+    guard let path = directories.map({ $0 + "/upx" }).first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        throw XCTSkip("upx unavailable: brew install upx")
+    }
+    return path
+}

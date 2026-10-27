@@ -48,6 +48,7 @@ struct Fashion: ParsableCommand {
             Thinner.self,
             Unsigner.self,
             Unpacker.self,
+            Verifier.self,
         ],
         defaultSubcommand: Hasher.self,
         helpNames: [],

@@ -190,7 +190,7 @@ enum MachOEditor {
      The pieces of `image` without its signature, cut at `end`: its header and load commands in memory, then the rest
      of it; nil when it is not signed.
      */
-    private static func unsigned(_ image: MachO, end: Int) throws -> [File.Piece]? {
+    static func unsigned(_ image: MachO, end: Int) throws -> [File.Piece]? {
         guard let unsigned = try image.removingSignature(end: end) else {
             return nil
         }

@@ -92,6 +92,9 @@ final class FashionTests: XCTestCase {
         for alias in Unpacker.configuration.aliases {
             XCTAssertNotNil(try Fashion.parseAsRoot([alias, "x"]) as? Unpacker, alias)
         }
+        for alias in Verifier.configuration.aliases {
+            XCTAssertNotNil(try Fashion.parseAsRoot([alias, "x"]) as? Verifier, alias)
+        }
         XCTAssertTrue(Thinner.configuration.aliases.contains("t") && Thinner.configuration.aliases.contains("thin"))
         XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot([]) as? Hasher).scan.paths, ["."], "hash stays the default")
         XCTAssertEqual(try runFashion(["h", "--algo", "md5", "-q", "/bin/ls"]).status, 0)
@@ -104,7 +107,7 @@ final class FashionTests: XCTestCase {
         try process.run()
         let listed = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         process.waitUntilExit()
-        for command in [Hasher.self, Thinner.self, Unsigner.self, Unpacker.self] as [ParsableCommand.Type] {
+        for command in [Hasher.self, Thinner.self, Unsigner.self, Unpacker.self, Verifier.self] as [ParsableCommand.Type] {
             let name = try ([XCTUnwrap(command.configuration.commandName)] + command.configuration.aliases).joined(separator: ", ")
             XCTAssertTrue(listed.contains(name), name)
         }

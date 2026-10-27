@@ -139,7 +139,7 @@ struct PackMach {
     /// The Adler-32 of the packed bytes, block by block as the packer summed them: the pack header's `c_adler`.
     private let cAdler: UInt32
     /// What packed the image: UPX, or a modified UPX, the marker it bears in place of "UPX!" named.
-    private let packer: String
+    let packer: String
     /// Whether a modified UPX packed the image, by its marker.
     private let modified: Bool
 
