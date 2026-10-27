@@ -88,6 +88,7 @@ struct Hasher: ParsableCommand {
         usage: "fashion [hash] [<options>] [<paths> ...]",
         discussion: "Other subcommands are listed by 'fashion help'.",
         helpNames: .shortAndLong,
+        aliases: ["h"],
     )
 
     // MARK: - Options

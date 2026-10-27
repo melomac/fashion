@@ -52,6 +52,16 @@ struct Fashion: ParsableCommand {
         defaultSubcommand: Hasher.self,
         helpNames: [],
     )
+
+    /// The parser's own, but for a completion script, which then completes what the default subcommand and the
+    /// aliases take.
+    static func main() {
+        if let shell = requestedCompletionShell {
+            print(wrappedCompletionScript(for: shell))
+        } else {
+            self.main(nil)
+        }
+    }
 }
 
 // MARK: - Scan Options

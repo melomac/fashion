@@ -68,11 +68,11 @@ final class PackMachTests: XCTestCase {
         return resigned
     }
 
-    /// The x86_64 and arm64e slices of `/bin/ls` without their signature, as thin --unsign writes them, by name.
+    /// The `x86_64` and arm64e slices of `/bin/ls` without their signature, as thin --unsign writes them, by name.
     private func unsignedLs(in directory: URL) throws -> [(name: String, file: URL, data: Data)] {
         let ls = directory / "ls"
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: ls)
-        _ = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, overwrite: false, reporter: Reporter(console: Console()))
+        _ = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console()))
         let slices = try ["x86_64", "arm64e"].map { ($0, directory / "ls_\($0)_unsigned") }.filter { FileManager.default.fileExists(atPath: $0.1.path) }.map { try ($0.0, $0.1, Data(contentsOf: $0.1)) }
         try XCTSkipIf(slices.isEmpty, "/bin/ls has neither an x86_64 nor an arm64e slice")
         return slices
@@ -198,7 +198,7 @@ final class PackMachTests: XCTestCase {
                 XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), [digest], "\(name) \(method)")
 
                 let artifact = URL(fileURLWithPath: file.path + "_unpacked")
-                XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [artifact.path])
+                XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: Reporter(console: Console())).map(\.text), [artifact.path])
                 XCTAssertEqual(try Data(contentsOf: artifact), original, "\(name) \(method)")
                 // upx -d, the oracle, into a file of its own, where it unpacks: for a __TEXT of a single page it looks for
                 // its pack header from before the file's start and gives up, where unpack starts looking at the file's
@@ -378,13 +378,13 @@ final class PackMachTests: XCTestCase {
         // thin writes the packed file without the signature that had to come out to unpack it, then Apple's slice
         // back, signature and all: codesign's strict validation is the second oracle.
         let unpacked = URL(fileURLWithPath: packed.path + "_unsigned_unpacked")
-        XCTAssertEqual(Thinner.lines(for: packed.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [packed.path + "_unsigned", unpacked.path])
+        XCTAssertEqual(Thinner.lines(for: packed.path, exact: false, unsign: false, unpack: true, write: false, reporter: Reporter(console: Console())).map(\.text), [packed.path + "_unsigned", unpacked.path])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: packed.path + "_unsigned")), try Data(contentsOf: URL(fileURLWithPath: apple.path + "_packed")))
         XCTAssertEqual(try Data(contentsOf: unpacked), signed)
         _ = try codesign(["--verify", "--strict", unpacked.path])
         // unpack writes the file as thin leaves it, found in place; unsign over it takes Apple's signature off.
-        XCTAssertEqual(Unpacker.lines(for: packed.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
-        XCTAssertEqual(Unsigner.lines(for: unpacked.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
+        XCTAssertEqual(Unpacker.lines(for: packed.path, exact: false, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
+        XCTAssertEqual(Unsigner.lines(for: unpacked.path, exact: false, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked.path + "_unsigned")), data)
     }
 
@@ -409,9 +409,9 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(try runFashion(["--unpack", "--unsign", file.path]).errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"])
 
         let reporter = Reporter(console: Console())
-        XCTAssertEqual(Unpacker.lines(for: file.path, exact: false, overwrite: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_exact_unsigned_unpacked"])
+        XCTAssertEqual(Unpacker.lines(for: file.path, exact: false, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, write: false, reporter: reporter).map(\.text), [file.path + "_exact_unsigned_unpacked"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact_unsigned_unpacked")), data)
         XCTAssertEqual(reporter.errorCount, 0)
     }
@@ -432,20 +432,20 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(padded))], name)
             XCTAssertEqual(try self.hashLines(file.path, ["--unpack", "--exact"]), try [XCTUnwrap(ByteHash.sha256.digest(original))], name)
             let reporter = Reporter(console: Console())
-            XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: false, unpack: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_unpacked", file.path + "_unpacked_exact"], name)
+            XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: false, unpack: true, write: false, reporter: reporter).map(\.text), [file.path + "_unpacked", file.path + "_unpacked_exact"], name)
             XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), padded, name)
             XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked_exact")), original, name)
-            XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_unpacked_exact"], name)
+            XCTAssertEqual(Unpacker.lines(for: file.path, exact: true, write: false, reporter: reporter).map(\.text), [file.path + "_unpacked_exact"], name)
             let signed = try self.resigned(file)
             XCTAssertEqual(try self.hashLines(signed.path, ["--unpack", "--exact"]), try [XCTUnwrap(ByteHash.sha256.digest(original))], name)
-            XCTAssertEqual(Unpacker.lines(for: signed.path, exact: true, overwrite: false, reporter: reporter).map(\.text), [signed.path + "_unsigned_unpacked_exact"], name)
+            XCTAssertEqual(Unpacker.lines(for: signed.path, exact: true, write: false, reporter: reporter).map(\.text), [signed.path + "_unsigned_unpacked_exact"], name)
             XCTAssertEqual(reporter.errorCount, 0, name)
         }
     }
 
     /**
      `fashion unpack`, parsed as the root command parses it, over a folder: the packed file gets its artifact,
-     the others nothing; run again it finds the artifact in place, and --overwrite replaces a file in its way.
+     the others nothing; run again it finds the artifact in place, and --write replaces a file in its way.
      */
     func testUnpackSubcommandRunsOverATree() throws {
         let directory = try self.directory("subcommand")
@@ -460,7 +460,7 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(errors, [])
         try Data("other".utf8).write(to: artifact)
         XCTAssertEqual(try runFashion(["unpack", file.path]).status, 2)
-        XCTAssertEqual(try runFashion(["unpack", "--overwrite", file.path]).status, 0)
+        XCTAssertEqual(try runFashion(["unpack", "--write", file.path]).status, 0)
         XCTAssertEqual(try Data(contentsOf: artifact), original)
     }
 
@@ -480,9 +480,9 @@ final class PackMachTests: XCTestCase {
 
         XCTAssertEqual(try self.hashLines(universal.path, ["--unpack"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
         // unpack writes the universal file whole, as lipo made it of the originals; thin writes its slices.
-        XCTAssertEqual(Unpacker.lines(for: universal.path, exact: false, overwrite: false, reporter: Reporter(console: Console())).map(\.text), [universal.path + "_unpacked"])
+        XCTAssertEqual(Unpacker.lines(for: universal.path, exact: false, write: false, reporter: Reporter(console: Console())).map(\.text), [universal.path + "_unpacked"])
         XCTAssertEqual(try Data(contentsOf: directory / "universal_unpacked"), try Data(contentsOf: original))
-        XCTAssertEqual(Thinner.lines(for: universal.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: Reporter(console: Console())).count, 3)
+        XCTAssertEqual(Thinner.lines(for: universal.path, exact: false, unsign: false, unpack: true, write: false, reporter: Reporter(console: Console())).count, 3)
         // The slice UPX packed is written as it is and named for its unpacking; the other, as it was, keeps its name.
         XCTAssertEqual(try Data(contentsOf: directory / "universal_\(slices[0].name)"), try Data(contentsOf: packed))
         XCTAssertEqual(try Data(contentsOf: directory / "universal_\(slices[0].name)_unpacked"), slices[0].data)
@@ -493,7 +493,7 @@ final class PackMachTests: XCTestCase {
         // both slices, the packed one unsigned then unpacked, since its signature had to come out to unpack it.
         let resigned = try self.resigned(universal)
         XCTAssertEqual(try self.hashLines(resigned.path, ["--unpack", "--unsign"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
-        XCTAssertEqual(Thinner.lines(for: resigned.path, exact: false, unsign: true, unpack: true, overwrite: false, reporter: Reporter(console: Console())).count, 5)
+        XCTAssertEqual(Thinner.lines(for: resigned.path, exact: false, unsign: true, unpack: true, write: false, reporter: Reporter(console: Console())).count, 5)
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[0].name)_unsigned"), try Data(contentsOf: packed))
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[0].name)_unsigned_unpacked"), slices[0].data)
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[1].name)_unsigned"), slices[1].data)
@@ -501,9 +501,9 @@ final class PackMachTests: XCTestCase {
         // the artifact gives the originals' file.
         let reporter = Reporter(console: Console())
         let unpacked = resigned.path + "_unsigned_unpacked"
-        XCTAssertEqual(Unpacker.lines(for: resigned.path, exact: false, overwrite: false, reporter: reporter).map(\.text), [unpacked])
+        XCTAssertEqual(Unpacker.lines(for: resigned.path, exact: false, write: false, reporter: reporter).map(\.text), [unpacked])
         XCTAssertEqual(try self.hashLines(unpacked, ["--unsign"]), try [ByteHash.sha256.digest(Data(contentsOf: original))])
-        XCTAssertEqual(Unsigner.lines(for: unpacked, exact: false, overwrite: false, reporter: reporter).map(\.text), [unpacked + "_unsigned"])
+        XCTAssertEqual(Unsigner.lines(for: unpacked, exact: false, write: false, reporter: reporter).map(\.text), [unpacked + "_unsigned"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked + "_unsigned")), try Data(contentsOf: original))
         XCTAssertEqual(reporter.errorCount, 0)
     }
@@ -533,7 +533,7 @@ final class PackMachTests: XCTestCase {
             let file = directory / name
             try data.write(to: file)
             let reporter = Reporter(console: Console())
-            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
             XCTAssertEqual(lines.count, 1, name)
             XCTAssertEqual(lines.first?.tint, .malformed, name)
             XCTAssertEqual(reporter.errorCount, 1, name)
@@ -570,7 +570,7 @@ final class PackMachTests: XCTestCase {
         try packed.write(to: file)
 
         let reporter = Reporter(console: Console())
-        let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+        let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
         XCTAssertEqual(lines.count, 1)
         XCTAssertEqual(lines.first?.tint, .malformed)
         XCTAssertEqual(reporter.errorCount, 1)
@@ -602,7 +602,7 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(status, 0, name)
             XCTAssertEqual(errors, [warning], name)
             let reporter = Reporter(console: Console())
-            let lines = Thinner.lines(for: swapped.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+            let lines = Thinner.lines(for: swapped.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
             XCTAssertEqual(lines.map(\.text), [warning, swapped.path + "_unpacked"], name)
             XCTAssertEqual(lines.map(\.diagnostic), [true, false], name)
             XCTAssertEqual(reporter.errorCount, 0, name)
@@ -614,7 +614,7 @@ final class PackMachTests: XCTestCase {
             let alone = directory / "\(name)_header-swapped"
             try header.write(to: alone)
             XCTAssertEqual(try self.hashLines(alone.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(header))], name)
-            XCTAssertEqual(Thinner.lines(for: alone.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter).count, 0, name)
+            XCTAssertEqual(Thinner.lines(for: alone.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).count, 0, name)
             XCTAssertEqual(reporter.errorCount, 0, name)
         }
     }
@@ -669,7 +669,7 @@ final class PackMachTests: XCTestCase {
                 XCTAssertEqual(status, 0, name)
                 XCTAssertEqual(errors, [warning], name)
                 let reporter = Reporter(console: Console())
-                let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+                let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
                 XCTAssertEqual(lines.map(\.text), [warning, file.path + "_unpacked"], name)
                 XCTAssertEqual(reporter.errorCount, 0, name)
                 XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), original, name)
@@ -710,7 +710,7 @@ final class PackMachTests: XCTestCase {
                 let said = data[at + 12 ..< at + 16].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
                 XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: checksum error: the packed bytes sum to \(String(format: "0x%x", sum)), the pack header says \(String(format: "0x%x", said))"], name)
                 let reporter = Reporter(console: Console())
-                let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+                let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
                 XCTAssertEqual(lines.map(\.tint), [.malformed], name)
                 XCTAssertEqual(reporter.errorCount, 1, name)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
@@ -739,7 +739,7 @@ final class PackMachTests: XCTestCase {
             let filtered = try self.blocks(of: packed).contains { $0.filter != 0 && $0.compressed < $0.uncompressed }
             XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: checksum error on the unpacked image, packed by UPX: it sums to \(String(format: "0x%x", sum)), the pack header says \(String(format: "0x%x", sum ^ 0xff))\(filtered ? ", under no XOR key" : "")"], name)
             let reporter = Reporter(console: Console())
-            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
             XCTAssertEqual(lines.map(\.tint), [.malformed], name)
             XCTAssertEqual(reporter.errorCount, 1, name)
             XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
@@ -768,7 +768,7 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(status, 2, name)
             XCTAssertEqual(errors, ["fashion: \(file.path): \(message)"], name)
             let reporter = Reporter(console: Console())
-            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter)
+            let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
             XCTAssertEqual(lines.count, 1, name)
             XCTAssertTrue(lines.first?.text.hasSuffix(message) ?? false, name)
             XCTAssertEqual(lines.first?.tint, .malformed, name)
@@ -801,7 +801,7 @@ final class PackMachTests: XCTestCase {
         let warning = "fashion: \(file.path) (\(slices[0].name)): packed by a modified UPX, its marker \"VQY\\\"\" in place of \"UPX!\""
         XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]).first, warning)
         let reporter = Reporter(console: Console())
-        for lines in [Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter), Unpacker.lines(for: file.path, exact: false, overwrite: false, reporter: reporter)] {
+        for lines in [Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter), Unpacker.lines(for: file.path, exact: false, write: false, reporter: reporter)] {
             XCTAssertEqual(lines.map(\.diagnostic), [true, true])
             XCTAssertEqual(lines.first?.text, warning)
             XCTAssertEqual(lines.last?.tint, .malformed)
@@ -821,7 +821,7 @@ final class PackMachTests: XCTestCase {
 
         let reporter = Reporter(console: Console())
         XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [ByteHash.sha256.digest(image)])
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter).count, 0)
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).count, 0)
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
@@ -839,7 +839,7 @@ final class PackMachTests: XCTestCase {
             throw XCTSkip("/bin/ls is not universal")
         }
         let reporter = Reporter(console: Console())
-        XCTAssertEqual(Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, overwrite: false, reporter: reporter).count, 2 * slices.count)
+        XCTAssertEqual(Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).count, 2 * slices.count)
 
         // ls_x86_64_unsigned packed into ls_x86_64_unsigned_packed, signed into ls_x86_64_unsigned_packed_resigned, then
         // unsigned into ls_x86_64_unsigned_packed_resigned_unsigned, the packed file again, and unpacked into
@@ -848,7 +848,7 @@ final class PackMachTests: XCTestCase {
             try self.resigned(self.packed(directory / "ls_\(slice.name)_unsigned"))
         }
         for file in packed {
-            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, overwrite: false, reporter: reporter).map(\.text), [file.path + "_unsigned", file.path + "_unsigned_unpacked"])
+            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).map(\.text), [file.path + "_unsigned", file.path + "_unsigned_unpacked"])
             XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unsigned")), try Data(contentsOf: URL(fileURLWithPath: String(file.path.dropLast("_resigned".count)))))
         }
         XCTAssertEqual(reporter.errorCount, 0)

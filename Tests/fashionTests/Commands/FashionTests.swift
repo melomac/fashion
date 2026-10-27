@@ -1,3 +1,4 @@
+import ArgumentParser
 @testable import fashion
 import XCTest
 
@@ -74,5 +75,39 @@ final class FashionTests: XCTestCase {
         // End to end, through the binary, both spellings.
         XCTAssertEqual(try runFashion(["--algo", "md5", "-q", "/bin/ls"]).status, 0)
         XCTAssertEqual(try runFashion(["hash", "--algo", "md5", "-q", "/bin/ls"]).status, 0)
+    }
+
+    /**
+     Each subcommand answers to its first letter as well, `h` for `hash`, the default still, `t` for `thinr`, which
+     answers to `thin` too, `s` for `unsign` and `p` for `unpack`, which `fashion help` lists beside the names.
+     */
+    func testSubcommandsAnswerToOneLetter() throws {
+        XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot(["h", "--algo", "md5", "x"]) as? Hasher).scan.paths, ["x"])
+        for alias in Thinner.configuration.aliases {
+            XCTAssertNotNil(try Fashion.parseAsRoot([alias, "x"]) as? Thinner, alias)
+        }
+        for alias in Unsigner.configuration.aliases {
+            XCTAssertNotNil(try Fashion.parseAsRoot([alias, "x"]) as? Unsigner, alias)
+        }
+        for alias in Unpacker.configuration.aliases {
+            XCTAssertNotNil(try Fashion.parseAsRoot([alias, "x"]) as? Unpacker, alias)
+        }
+        XCTAssertTrue(Thinner.configuration.aliases.contains("t") && Thinner.configuration.aliases.contains("thin"))
+        XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot([]) as? Hasher).scan.paths, ["."], "hash stays the default")
+        XCTAssertEqual(try runFashion(["h", "--algo", "md5", "-q", "/bin/ls"]).status, 0)
+        let process = Process()
+        process.executableURL = try fashionExecutable()
+        process.arguments = ["help"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let listed = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        for command in [Hasher.self, Thinner.self, Unsigner.self, Unpacker.self] as [ParsableCommand.Type] {
+            let name = try ([XCTUnwrap(command.configuration.commandName)] + command.configuration.aliases).joined(separator: ", ")
+            XCTAssertTrue(listed.contains(name), name)
+        }
+        XCTAssertTrue(listed.contains("hash, h (default)"))
     }
 }

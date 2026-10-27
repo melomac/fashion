@@ -12,6 +12,7 @@ struct Unpacker: ParsableCommand {
         commandName: "unpack",
         abstract: "Write and restore a UPX-packed Mach-O image, unpacked without UPX.",
         helpNames: .shortAndLong,
+        aliases: ["u", "p", "x", "upx"],
     )
 
     @OptionGroup
@@ -21,7 +22,7 @@ struct Unpacker: ParsableCommand {
     var exact = false
 
     @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
-    var overwrite = false
+    var write = false
 
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
@@ -34,13 +35,13 @@ struct Unpacker: ParsableCommand {
 /**
  The work on one file: write it beside itself with what UPX packed unpacked, as `upx -d` unpacks it. `MachOEditor`
  makes the edit in memory, and the artifact is what hash mode's --unpack reads. The file is written whole: a universal
- file keeps every architecture, laid out again as `lipo` lays them out. `thin --unpack` writes each architecture as a
+ file keeps every architecture, laid out again as `lipo` lays them out. `thinr --unpack` writes each architecture as a
  file of its own instead, and every state on the way; this goes straight to the last.
 
  `sample` gives `sample_unpacked`. A signature added after packing hides what UPX left, so it comes out first, and the
- artifact is `sample_unsigned_unpacked`, as `thin --unpack` names its last artifact. The unpacked code keeps the
+ artifact is `sample_unsigned_unpacked`, as `thinr --unpack` names its last artifact. The unpacked code keeps the
  signature it had before packing, if any: `unsign` over the artifact takes it off, into
- `sample_unsigned_unpacked_unsigned`, as `thin --unpack --unsign` would.
+ `sample_unsigned_unpacked_unsigned`, as `thinr --unpack --unsign` would.
 
  A file UPX did not pack, or that is not Mach-O, has nothing to write, unless --exact cuts bytes appended to it: the
  cut alone is written then, as `_exact`. Packed data that does not hold is reported, in red.
@@ -59,13 +60,13 @@ extension Unpacker {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Unpack\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, overwrite) = (self.exact, self.overwrite)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, exact: exact, overwrite: overwrite, reporter: $1) }
+        let (exact, write) = (self.exact, self.write)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, exact: exact, write: write, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
     /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unpacked, whole.
-    static func lines(for path: String, exact: Bool, overwrite: Bool, reporter: Reporter) -> [Line] {
-        ArtifactWriter(exact: exact, unsign: false, unpack: true, split: false, overwrite: overwrite).lines(for: path, reporter: reporter)
+    static func lines(for path: String, exact: Bool, write: Bool, reporter: Reporter) -> [Line] {
+        ArtifactWriter(exact: exact, unsign: false, unpack: true, split: false, write: write).lines(for: path, reporter: reporter)
     }
 }

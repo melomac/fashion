@@ -19,27 +19,30 @@ extension ArtifactError: LocalizedError {
 }
 
 /**
- What `thin`, `unsign` and `unpack` write beside a file, and how: the file as `MachOEditor` edits it, `unsign` and
- `unpack`, cut where its image ends with `exact`, as hash mode reads it under the same flags, then `split` into one
- file per architecture of a universal file, as `thin` writes them, or written whole, as `unsign` and `unpack` do.
+ What `thinr`, `unsign` and `unpack` write beside a file, and how.
 
- Split, every state an image goes through is an artifact: a universal file's slice as the fat table places it, then
- cut, then without its signature, then unpacked, then the unpacked image cut and without its own signature, as far as
- the flags take it; so `thin` leaves the way behind it, `ls_x86_64`, `ls_x86_64_unsigned`,
- `ls_x86_64_unsigned_unpacked`, where `unsign` and `unpack` write the file as the edits leave it, whole.
+ The file is first edited in memory by `MachOEditor`, as the flags ask: its signatures out with `unsign`, what UPX
+ packed unpacked with `unpack`, each image cut where it ends with `exact`. That is what hash mode reads under the same
+ flags. Then it is written out, `split` into one file per architecture, as `thinr` writes a universal file, or whole,
+ as `unsign` and `unpack` write it.
 
- An artifact is named after the file for what was done to it, in the order it was done: `_exact`, `_unsigned`, then
- `_unpacked`, and the unpacked image's own `_exact` and `_unsigned`, after the architecture of a slice `split` out,
- `ls_x86_64_unsigned`, or after the name of the file itself, `sample_unsigned` or `ls_unsigned`. A slice nothing was
- done to keeps its name, `ls_x86_64`, and a file nothing was done to yields no artifact, since it would be the file.
- A later run with other flags over an artifact names what it makes as one run with them all would: `ls_x86_64`
- unsigned is `ls_x86_64_unsigned` either way.
+ Split, every state an image goes through is an artifact of its own: the slice as the fat table places it, then cut,
+ then without its signature, then unpacked, then the unpacked image cut and without its own signature, as far as the
+ flags go. So `thinr` leaves the whole way behind it: `ls_x86_64`, `ls_x86_64_unsigned`,
+ `ls_x86_64_unsigned_unpacked`. Whole, only the end of the way is written, the file as the edits leave it.
 
- An artifact already in place, byte for byte, is left as it is and noted in the unified log alone, so a second run over
- a tree is as quiet on the terminal as the first was. A different file under an artifact's name is left alone and
- reported, with its size and SHA-256 and the artifact's, unless `overwrite` replaces it, in which case the unified log
- alone records the same. A symbolic link, or anything that is not a regular file, is never followed nor replaced: it
- is reported and left alone, a safety rule for analysis.
+ An artifact is named after the file, with a suffix for each thing done to it, in the order it was done: `_exact`,
+ `_unsigned`, `_unpacked`, then the unpacked image's own `_exact` and `_unsigned`. A slice's name carries its
+ architecture first, `ls_x86_64_unsigned`; a thin file's does not, `sample_unsigned`. A slice nothing was done to
+ keeps its name, `ls_x86_64`, and a file nothing was done to gets no artifact, since it would be the file itself.
+ The names add up: a later run with other flags over an artifact makes what one run with all the flags would,
+ `ls_x86_64` unsigned being `ls_x86_64_unsigned` either way.
+
+ An artifact already in place, byte for byte, is left as it is and only noted in the unified log, so a second run
+ over a tree is as quiet on the terminal as the first. A different file under an artifact's name is left alone and
+ reported, with its size and SHA-256 and the artifact's, unless `write` replaces it; the unified log records that
+ too. A symbolic link, or anything that is not a regular file, is never followed nor replaced: it is reported and
+ left alone, a safety rule for analysis.
  */
 struct ArtifactWriter {
     let exact: Bool
@@ -47,11 +50,11 @@ struct ArtifactWriter {
     let unpack: Bool
     /// Whether each architecture of a universal file comes out as a file of its own, or the file comes out whole.
     let split: Bool
-    let overwrite: Bool
+    let write: Bool
 
     /**
      The lines to print for one file: the path of each artifact written or found in place, or a diagnostic for each
-     that could not be written, or that a different file stands for without `overwrite`. A file that cannot be read,
+     that could not be written, or that a different file stands for without `write`. A file that cannot be read,
      whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead, and
      nothing is written. An image a modified UPX packed is warned about before its artifacts, which are written.
      */
@@ -76,7 +79,7 @@ struct ArtifactWriter {
                 Self.writing.release(artifact)
             }
             do {
-                switch try Self.write(bytes, to: artifact, overwrite: self.overwrite) {
+                switch try Self.write(bytes, to: artifact, overwrite: self.write) {
                 case .written:
                     return [Line(text: OutputFormatter.formatPath(artifact))]
                 case let .identical(identity):
@@ -86,7 +89,7 @@ struct ArtifactWriter {
                     logger.info("\(artifact, privacy: .public): overwritten, was \(before.description, privacy: .public), now \(after.description, privacy: .public)")
                     return [Line(text: OutputFormatter.formatPath(artifact))]
                 case let .differs(before, after):
-                    return [reporter.report(path: artifact, message: "exists and differs, \(before) where the artifact is \(after); left alone without --overwrite")]
+                    return [reporter.report(path: artifact, message: "exists and differs, \(before) where the artifact is \(after); left alone without --write")]
                 }
             } catch {
                 return [reporter.report(path: artifact, message: File.message(for: error))]

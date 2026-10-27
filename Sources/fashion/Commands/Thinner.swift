@@ -2,16 +2,18 @@ import ArgumentParser
 import Foundation
 import os
 
-private let logger = Logger(subsystem: "fashion", category: "thin")
+private let logger = Logger(subsystem: "fashion", category: "thinr")
 
 /**
- `fashion thin`: each architecture of a universal Mach-O written out beside it, as a file of its own.
+ `fashion thinr`: each architecture of a universal Mach-O written out beside it, as a file of its own, and every state
+ the flags take it through.
  */
 struct Thinner: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "thin",
-        abstract: "Write each architecture of a universal Mach-O out beside it, as a file of its own.",
+        commandName: "thinr",
+        abstract: "Write the artifacts of a Mach-O beside it: each architecture, each state the flags take it through.",
         helpNames: .shortAndLong,
+        aliases: ["t", "thin"],
     )
 
     @OptionGroup
@@ -27,7 +29,7 @@ struct Thinner: ParsableCommand {
     var unpack = false
 
     @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
-    var overwrite = false
+    var write = false
 
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
@@ -69,13 +71,13 @@ extension Thinner {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public)\(self.unpack ? " unpack" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, unsign, unpack, overwrite) = (self.exact, self.unsign, self.unpack, self.overwrite)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { Self.lines(for: $0, exact: exact, unsign: unsign, unpack: unpack, overwrite: overwrite, reporter: $1) }
+        let (exact, unsign, unpack, write) = (self.exact, self.unsign, self.unpack, self.write)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { Self.lines(for: $0, exact: exact, unsign: unsign, unpack: unpack, write: write, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
     /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` split.
-    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, overwrite: Bool, reporter: Reporter) -> [Line] {
-        ArtifactWriter(exact: exact, unsign: unsign, unpack: unpack, split: true, overwrite: overwrite).lines(for: path, reporter: reporter)
+    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, write: Bool, reporter: Reporter) -> [Line] {
+        ArtifactWriter(exact: exact, unsign: unsign, unpack: unpack, split: true, write: write).lines(for: path, reporter: reporter)
     }
 }
