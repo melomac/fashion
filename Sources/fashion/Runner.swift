@@ -1008,8 +1008,10 @@ struct Digester {
     private func digests(_ path: String, reporter: Reporter, note: @escaping (Line) -> Void) throws -> [DigestResult] {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed, or the
         // size of its edit, unpacked or without signatures, which every mode then reads as the file.
-        let opened = try File(path: path)
-        // A modified UPX packed it: a second look, whatever --quiet keeps off, like a signature that does not hold.
+        let read = try File(path: path)
+        // A modified UPX packed it, or the file is cut short of its last page: a second look, whatever --quiet keeps
+        // off, like a signature that does not hold.
+        let opened = try self.exact ? MachOEditor.padded(read, caveat: { note(reporter.warn(path: path, message: $0)) }) : read
         let file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
             note(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
         })?.file ?? opened : opened

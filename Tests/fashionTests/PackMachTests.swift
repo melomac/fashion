@@ -755,7 +755,9 @@ final class PackMachTests: XCTestCase {
         let directory = try self.directory("cut-short")
         for (name, unsigned, _) in try self.unsignedLs(in: directory) {
             var packed = try Data(contentsOf: self.packed(unsigned))
-            let linkedit = try XCTUnwrap(XCTUnwrap(MachO(File(data: packed))).findSegment("__LINKEDIT"))
+            let image = try XCTUnwrap(MachO(File(data: packed)))
+            let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT"))
+            let text = try XCTUnwrap(image.findSegment("__TEXT")).load(segment_command_64.self)
             let fileoff = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.fileoff))
             let filesize = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.filesize))
             packed.replaceSubrange(fileoff ..< fileoff + 8, with: withUnsafeBytes(of: UInt64(packed.count + 0x1000).littleEndian) { Data($0) })
@@ -774,6 +776,24 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(lines.first?.tint, .malformed, name)
             XCTAssertEqual(reporter.errorCount, 1, name)
             XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
+
+            // With --exact, the page comes back and the file is named for it: hashed as its headers lay it out, padded,
+            // and written so as _exact, where the image ends at __LINKEDIT; cut back to the bytes the segments
+            // reference, __TEXT's, where every range counts, and written so as _exact.
+            let caveat = "fashion: \(file.path): cut short of its last page, 0x1000 bytes before __LINKEDIT at \((packed.count + 0x1000).hex): padded with zeros"
+            let padded = Reporter(console: Console())
+            let exacted = Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: false, reporter: padded).map(\.text)
+#if SECURITY_STRICT_VALIDATION
+            XCTAssertEqual(try self.hashLines(file.path, ["--exact"]), try [caveat, XCTUnwrap(ByteHash.sha256.digest(packed + Data(count: 0x1000)))], name)
+            XCTAssertEqual(exacted, [caveat, file.path + "_exact"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact")), packed + Data(count: 0x1000), name)
+#else
+            let referenced = packed.prefix(Int(text.fileoff + text.filesize))
+            XCTAssertEqual(try self.hashLines(file.path, ["--exact"]), try [caveat, XCTUnwrap(ByteHash.sha256.digest(referenced))], name)
+            XCTAssertEqual(exacted, [caveat, file.path + "_exact"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_exact")), referenced, name)
+#endif
+            XCTAssertEqual(padded.errorCount, 0, name)
         }
     }
 

@@ -62,10 +62,12 @@ struct ArtifactWriter {
         let artifacts: [(suffix: String, bytes: File)]
         var caveats: [Line] = []
         do {
-            let opened = try File(path: path)
-            let edited = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
+            let read = try File(path: path)
+            // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it.
+            let edited = try self.unsign || self.unpack || self.exact ? MachOEditor.edit(read, exact: self.exact, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
                 caveats.append(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
             }) : nil
+            let opened = edited?.source ?? read
             artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
         } catch {
             // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
