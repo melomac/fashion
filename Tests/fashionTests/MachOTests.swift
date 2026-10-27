@@ -1332,7 +1332,7 @@ final class MachOTests: XCTestCase {
         XCTAssertThrowsError(try Universal.fileEnd(data: data)) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "Invalid Mach-O: fat architecture range at offset \(UInt64.max) with size 1 is outside the 40-byte file",
+                "Invalid Mach-O: fat architecture range at offset 0xffffffffffffffff with size 0x1 is outside the 0x28-byte file",
             )
         }
     }
@@ -1348,11 +1348,11 @@ final class MachOTests: XCTestCase {
         )
         XCTAssertEqual(
             ParserError.invalidSymbolTableRange(offset: 32, count: 1, fileSize: 40).localizedDescription,
-            "Invalid Mach-O: symbol table at offset 32 with 1 entry is outside the 40-byte slice",
+            "Invalid Mach-O: symbol table at offset 0x20 with 1 entry is outside the 0x28-byte slice",
         )
         XCTAssertEqual(
             ParserError.invalidSymbolTableRange(offset: 32, count: 2, fileSize: 40).localizedDescription,
-            "Invalid Mach-O: symbol table at offset 32 with 2 entries is outside the 40-byte slice",
+            "Invalid Mach-O: symbol table at offset 0x20 with 2 entries is outside the 0x28-byte slice",
         )
         XCTAssertEqual(
             CDHashError.truncatedCodeSignatureSuperblob(signatureSize: 1).localizedDescription,
@@ -1364,7 +1364,7 @@ final class MachOTests: XCTestCase {
         )
         XCTAssertEqual(
             ParserError.invalidSegmentRange(name: "__LINKEDIT", offset: 32768, size: 0, fileSize: 28672).localizedDescription,
-            "Invalid Mach-O: segment __LINKEDIT at offset 32768 with size 0 is outside the 28672-byte slice",
+            "Invalid Mach-O: segment __LINKEDIT at offset 0x8000 with size 0x0 is outside the 0x7000-byte slice",
         )
     }
 

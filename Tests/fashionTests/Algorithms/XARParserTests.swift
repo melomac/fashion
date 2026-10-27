@@ -43,7 +43,7 @@ final class XARParserTests: XCTestCase {
         XCTAssertNotNil(XARParser.XARError.headerTooShort.errorDescription)
         XCTAssertEqual(
             XARParser.XARError.tocOutsideFile(offset: 28, length: 1000, fileSize: 28).errorDescription,
-            "Invalid XAR: table of contents at offset 28 with length 1000 is outside the 28-byte file",
+            "Invalid XAR: table of contents at offset 0x1c with length 0x3e8 is outside the 0x1c-byte file",
         )
         XCTAssertEqual(
             XARParser.XARError.tocTooLarge(size: 1 << 30).errorDescription,

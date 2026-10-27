@@ -344,7 +344,7 @@ struct PackMach {
     func unpack() throws -> (data: Data, caveat: String?) {
         let plain = try self.unpack(xor: 0)
         guard plain.cAdler == self.cAdler else {
-            throw UnpackError.cantUnpack("checksum error: the packed bytes sum to \(String(format: "0x%x", plain.cAdler)), the pack header says \(String(format: "0x%x", self.cAdler))")
+            throw UnpackError.cantUnpack("checksum error: the packed bytes sum to \(plain.cAdler.hex), the pack header says \(self.cAdler.hex)")
         }
         if plain.adler == self.uAdler {
             return (plain.data, self.caveat(xor: 0))
@@ -356,7 +356,7 @@ struct PackMach {
                 }
             }
         }
-        throw UnpackError.cantUnpack("checksum error on the unpacked image, \(self.packer): it sums to \(String(format: "0x%x", plain.adler)), the pack header says \(String(format: "0x%x", self.uAdler))\(plain.filtered ? ", under no XOR key" : "")")
+        throw UnpackError.cantUnpack("checksum error on the unpacked image, \(self.packer): it sums to \(plain.adler.hex), the pack header says \(self.uAdler.hex)\(plain.filtered ? ", under no XOR key" : "")")
     }
 
     /// The word on the image for a modified UPX: its marker, the `key` its filtered blocks are XORed with, or both;
@@ -582,7 +582,7 @@ struct PackMach {
                 cmdsize >= 8,
                 cmdsize <= headers.count - offset
             else {
-                throw UnpackError.cantUnpack("bad packed Mach load_command @0x\(String(offset, radix: 16))")
+                throw UnpackError.cantUnpack("bad packed Mach load_command @\(offset.hex)")
             }
             let command = MachO.LoadCommand(cmd: cmd, data: headers.subdata(in: offset ..< offset + cmdsize))
             commands.append(Command(segment: Segment(command, in: self.image)))
@@ -819,7 +819,7 @@ struct PackMach {
                 ic += 4
             }
         default:
-            throw UnpackError.cantUnpack("unknown filter 0x\(String(id, radix: 16))")
+            throw UnpackError.cantUnpack("unknown filter \(id.hex)")
         }
     }
 }

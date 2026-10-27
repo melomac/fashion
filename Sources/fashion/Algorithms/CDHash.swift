@@ -21,7 +21,7 @@ extension CDHashError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .invalidCodeSignatureRange(offset, size, fileSize):
-            "Invalid Mach-O: code signature range at offset \(offset) with size \(size) is outside the \(fileSize)-byte slice"
+            "Invalid Mach-O: code signature range at offset \(offset.hex) with size \(size.hex) is outside the \(fileSize.hex)-byte slice"
         case let .truncatedCodeSignatureSuperblob(signatureSize):
             "Invalid Mach-O: code signature is only \(String(signatureSize, pluralizing: "byte")); an embedded signature header requires 12"
         case let .invalidCodeSignatureMagic(magic):
@@ -31,9 +31,9 @@ extension CDHashError: LocalizedError {
         case let .invalidCodeSignatureIndexTable(count, length):
             "Invalid Mach-O: code signature index count \(count) does not fit in the \(length)-byte superblob"
         case let .invalidCodeSignatureBlobOffset(offset, signatureSize):
-            "Invalid Mach-O: code signature blob offset \(offset) is outside the \(signatureSize)-byte superblob"
+            "Invalid Mach-O: code signature blob offset \(offset.hex) is outside the \(signatureSize.hex)-byte superblob"
         case let .invalidCodeSignatureBlobRange(offset, size, signatureSize):
-            "Invalid Mach-O: code signature blob at offset \(offset) with size \(size) is outside the \(signatureSize)-byte superblob"
+            "Invalid Mach-O: code signature blob at offset \(offset.hex) with size \(size.hex) is outside the \(signatureSize.hex)-byte superblob"
         case let .codeDirectoryTooLarge(length):
             "Mach-O too large: its \(length)-byte ad-hoc CodeDirectory would overflow the 32-bit length field"
         }

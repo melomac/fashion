@@ -37,3 +37,10 @@ extension Sequence<UInt8> {
         return String(decoding: out, as: UTF8.self)
     }
 }
+
+extension BinaryInteger {
+    /// The number in hexadecimal, as an offset or a size reads beside an address: `0x7000`.
+    var hex: String {
+        "0x" + String(self, radix: 16)
+    }
+}

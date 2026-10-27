@@ -23,21 +23,21 @@ extension ParserError: LocalizedError {
         case let .invalidLoadCommandTable(size, fileSize):
             "Invalid Mach-O: sizeofcmds \(size) does not hold a load-command table in the \(fileSize)-byte slice"
         case let .truncatedLoadCommand(cmd, size, expectedSize):
-            "Invalid Mach-O: load command 0x\(String(cmd, radix: 16)) is only \(String(size, pluralizing: "byte")); its structure requires \(expectedSize)"
+            "Invalid Mach-O: load command \(cmd.hex) is only \(String(size, pluralizing: "byte")); its structure requires \(expectedSize)"
         case let .invalidFatArchitectureTable(count, fileSize):
             "Invalid Mach-O: nfat_arch \(count) does not fit in the \(fileSize)-byte file"
         case let .invalidFatArchitectureRange(offset, size, fileSize):
-            "Invalid Mach-O: fat architecture range at offset \(offset) with size \(size) is outside the \(fileSize)-byte file"
+            "Invalid Mach-O: fat architecture range at offset \(offset.hex) with size \(size.hex) is outside the \(fileSize.hex)-byte file"
         case let .invalidSymbolTableRange(offset, count, fileSize):
-            "Invalid Mach-O: symbol table at offset \(offset) with \(String(Int(count), pluralizing: "entry", plural: "entries")) is outside the \(fileSize)-byte slice"
+            "Invalid Mach-O: symbol table at offset \(offset.hex) with \(String(Int(count), pluralizing: "entry", plural: "entries")) is outside the \(fileSize.hex)-byte slice"
         case let .invalidStringTableRange(offset, size, fileSize):
-            "Invalid Mach-O: string table at offset \(offset) with size \(size) is outside the \(fileSize)-byte slice"
+            "Invalid Mach-O: string table at offset \(offset.hex) with size \(size.hex) is outside the \(fileSize.hex)-byte slice"
         case let .symbolNamesTooLong(limit):
             "Mach-O too large: its external symbol names add up to more than \(limit) bytes"
         case let .invalidStringTableIndex(index, tableSize):
-            "Invalid Mach-O: string table index \(index) is outside the \(tableSize)-byte table"
+            "Invalid Mach-O: string table index \(index.hex) is outside the \(tableSize.hex)-byte table"
         case let .invalidSegmentRange(name, offset, size, fileSize):
-            "Invalid Mach-O: segment \(name) at offset \(offset) with size \(size) is outside the \(fileSize)-byte slice"
+            "Invalid Mach-O: segment \(name) at offset \(offset.hex) with size \(size.hex) is outside the \(fileSize.hex)-byte slice"
         }
     }
 }

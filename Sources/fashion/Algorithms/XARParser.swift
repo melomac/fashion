@@ -34,7 +34,7 @@ enum XARParser {
             case .headerTooShort:
                 "XAR header too short"
             case let .tocOutsideFile(offset, length, fileSize):
-                "Invalid XAR: table of contents at offset \(offset) with length \(length) is outside the \(fileSize)-byte file"
+                "Invalid XAR: table of contents at offset \(offset.hex) with length \(length.hex) is outside the \(fileSize.hex)-byte file"
             case let .tocTooLarge(size):
                 "Invalid XAR: table of contents declares \(size) bytes uncompressed, beyond the \(XARParser.maxUncompressedTocSize)-byte limit"
             case let .tocDoesNotDecompress(size):

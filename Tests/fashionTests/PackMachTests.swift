@@ -708,7 +708,7 @@ final class PackMachTests: XCTestCase {
                 XCTAssertEqual(status, 2, name)
                 let sum = try self.cAdler(of: data)
                 let said = data[at + 12 ..< at + 16].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
-                XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: checksum error: the packed bytes sum to \(String(format: "0x%x", sum)), the pack header says \(String(format: "0x%x", said))"], name)
+                XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: checksum error: the packed bytes sum to \(sum.hex), the pack header says \(said.hex)"], name)
                 let reporter = Reporter(console: Console())
                 let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
                 XCTAssertEqual(lines.map(\.tint), [.malformed], name)
@@ -737,7 +737,7 @@ final class PackMachTests: XCTestCase {
             let (status, errors) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 2, name)
             let filtered = try self.blocks(of: packed).contains { $0.filter != 0 && $0.compressed < $0.uncompressed }
-            XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: checksum error on the unpacked image, packed by UPX: it sums to \(String(format: "0x%x", sum)), the pack header says \(String(format: "0x%x", sum ^ 0xff))\(filtered ? ", under no XOR key" : "")"], name)
+            XCTAssertEqual(errors, ["fashion: \(file.path): Invalid UPX data: checksum error on the unpacked image, packed by UPX: it sums to \(sum.hex), the pack header says \((sum ^ 0xff).hex)\(filtered ? ", under no XOR key" : "")"], name)
             let reporter = Reporter(console: Console())
             let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
             XCTAssertEqual(lines.map(\.tint), [.malformed], name)
@@ -763,7 +763,7 @@ final class PackMachTests: XCTestCase {
             let file = directory / name
             try packed.write(to: file)
             saveFixture(path: file.path)
-            let message = "Invalid Mach-O: segment __LINKEDIT at offset \(packed.count + 0x1000) with size 0 is outside the \(packed.count)-byte slice"
+            let message = "Invalid Mach-O: segment __LINKEDIT at offset \((packed.count + 0x1000).hex) with size 0x0 is outside the \(packed.count.hex)-byte slice"
             let (status, errors) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 2, name)
             XCTAssertEqual(errors, ["fashion: \(file.path): \(message)"], name)
