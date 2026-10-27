@@ -511,7 +511,7 @@ final class CDHashTests: XCTestCase {
         return data
     }
 
-    /// Sign `file` (its `arch` slice when given) ad hoc into a detached signature, and return codesign's `-dvvvv` display of it.
+    /// Sign `file` (its `arch` slice when given) ad hoc into a detached signature, and return codesign's -dvvvv display of it.
     private static func codesignDetached(_ file: URL, arch: String? = nil) throws -> String {
         let sig = file.deletingLastPathComponent() / "\(file.lastPathComponent).sig"
         let archArgs = arch.map { ["--arch", $0] } ?? []
@@ -561,7 +561,7 @@ final class CDHashTests: XCTestCase {
     }
 
     /**
-     `codesign -d` output must describe the slice we asked for: `--arch` resolves a generic name (`arm64`) to
+     `codesign -d` output must describe the slice we asked for: --arch resolves a generic name (`arm64`) to
      whichever matching slice codesign prefers rather than failing, silently comparing against the wrong slice.
      */
     private static func assertInspectedSlice(_ output: String, arch: String?) {

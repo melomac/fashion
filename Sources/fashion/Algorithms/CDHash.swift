@@ -461,7 +461,7 @@ extension MachO {
     private static let csslotAlternateBase: UInt32 = 0x1000
     private static let csslotAlternateLimit: UInt32 = 0x1005
 
-    // Filetypes codesign signs as Mach-O code; it signs any other one as a generic file (`Format=generic`).
+    /// Filetypes codesign signs as Mach-O code; it signs any other one as a generic file (`Format=generic`).
     private static let codeFiletypes = [
         MH_EXECUTE,
         MH_PRELOAD,

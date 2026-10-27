@@ -193,7 +193,7 @@ struct ArtifactWriter {
     private static let writing = Writing()
 
     /**
-     Two files can yield one artifact: a thin Mach-O with appended bytes and its universal file under `--exact`, or an
+     Two files can yield one artifact: a thin Mach-O with appended bytes and its universal file under --exact, or an
      earlier artifact and its file under a later run's flags. Handed to two threads at once, the second to reach the
      artifact waits for the first, and finds it in place, rather than half written and reported as a different file.
      */

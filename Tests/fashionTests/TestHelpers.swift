@@ -372,7 +372,7 @@ func runFashion(_ arguments: [String], sh script: String? = nil) throws -> (stat
 }
 
 /**
- `paths` in the natural order `--sort` lists files in, written apart from `fashion_fts_compare`: each path is cut into
+ `paths` in the natural order --sort lists files in, written apart from `fashion_fts_compare`: each path is cut into
  runs of ASCII digits and single other bytes, and two paths compare at the first run they differ in, two numbers by
  value, then the one with more leading zeros first, and anything else by its first byte.
  */
@@ -437,7 +437,7 @@ struct CodesignFailure: Error, CustomStringConvertible {
 }
 
 /**
- Run `/usr/bin/codesign` and return its combined stdout+stderr (codesign `-d` prints to stderr).
+ Run `/usr/bin/codesign` and return its combined stdout+stderr (codesign -d prints to stderr).
 
  Skips the calling test when codesign is unavailable, and throws `CodesignFailure` when it exits non-zero, so a
  failed signing or inspection reports codesign's own message rather than a downstream symptom.

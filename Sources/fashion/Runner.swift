@@ -292,7 +292,7 @@ final class Console: @unchecked Sendable {
 // MARK: - Output
 
 /**
- Thread-safe stdout writer: each file's lines print once it is hashed, right away or, with `--sort`, in the sorted
+ Thread-safe stdout writer: each file's lines print once it is hashed, right away or, with --sort, in the sorted
  order the paths were handed out, holding a file's lines until every file before it has printed. On a terminal, the
  status line shows the count of hashed files, the files held back and the file hashed for the longest.
 
@@ -785,7 +785,7 @@ final class Handoff: @unchecked Sendable {
 
 /**
  The scan: this thread walks the paths and hands each file to `jobs` work threads, which print through `Output`.
- With `--sort`, the walk sorts each directory as it reads it, so files are handed out in order as they are found.
+ With --sort, the walk sorts each directory as it reads it, so files are handed out in order as they are found.
  */
 extension ScanOptions {
     /**
@@ -859,7 +859,7 @@ struct Digester {
      What a scan digests in each file. Every mode but cdhash streams bytes through a `ByteHash`.
      */
     enum Mode {
-        /// The whole file, or its Mach-O image with `--exact`.
+        /// The whole file, or its Mach-O image with --exact.
         case file([ByteHash])
         /// The whole file, then each architecture of a universal binary.
         case slices([ByteHash])
@@ -871,7 +871,7 @@ struct Digester {
         case cdhash
     }
 
-    /// The algorithms every file is hashed with: one, or with `--match` and no `--algo`, one per shape among the targets.
+    /// The algorithms every file is hashed with: one, or with --match and no --algo, one per shape among the targets.
     let algorithms: [Algorithm]
     let mode: Mode
     let targets: Targets
@@ -968,10 +968,10 @@ struct Digester {
 
     /**
      A match's green: full for an exact one, whose score is nil, or a fuzzy one by its distance from identical toward
-     the `--score` threshold: an ssdeep similarity falls from 100, a TLSH distance rises from 0, which `algorithm` tells.
+     the --score threshold: an ssdeep similarity falls from 100, a TLSH distance rises from 0, which `algorithm` tells.
 
      A TLSH distance has no upper bound, so from 300, where the TLSH paper's false positives pass 79% (Table II), a
-     match is gray whatever the threshold, and the greens stop there. Those rates count the length, so with `--xlen` the
+     match is gray whatever the threshold, and the greens stop there. Those rates count the length, so with --xlen the
      greens run to the threshold.
 
      An ssdeep match is never gray: the same paper keeps its false positives under 0.1% at any score (Table I).
@@ -1038,7 +1038,7 @@ struct Digester {
     }
 
     /**
-     One digest per code directory of each slice, `--exact` trimming an unsigned slice to its logical extent before
+     One digest per code directory of each slice, --exact trimming an unsigned slice to its logical extent before
      synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is labeled INVALID, and warned about
      once, however many of its directories fail.
      */
@@ -1066,7 +1066,7 @@ struct Digester {
     }
 
     /**
-     The whole-file digests, then each architecture of a universal binary's, each trimmed when `--exact` is set.
+     The whole-file digests, then each architecture of a universal binary's, each trimmed when --exact is set.
      */
     private func sliceDigests(_ file: File, hashes: [ByteHash], caveat: (_ arch: String?, _ message: String) -> Void) throws -> [DigestResult] {
         // Read the container first, so a malformed one fails before any hashing.
@@ -1084,7 +1084,7 @@ struct Digester {
     /**
      Where each architecture of a universal binary lies in the file, as Security's `Universal` places a `MachO` at its
      offset; none for any other file. Each slice is validated as a thin Mach-O, so a malformed slice is rejected like a
-     malformed thin file, and trimmed to its logical end when `--exact` is set. Only the headers are read.
+     malformed thin file, and trimmed to its logical end when --exact is set. Only the headers are read.
      */
     private func sliceRanges(_ file: File) throws -> [(range: Range<Int>, arch: String)] {
         guard case let .fat(archs) = try Universal.open(file) else {
@@ -1101,7 +1101,7 @@ struct Digester {
     }
 
     /**
-     The digests of the whole file, read once for every hash, or with `--exact` of a Mach-O's logical content only:
+     The digests of the whole file, read once for every hash, or with --exact of a Mach-O's logical content only:
      `fileEnd` reads just the headers.
      */
     private func fileDigests(_ file: File, hashes: [ByteHash], caveat: (String) -> Void) throws -> [DigestResult] {

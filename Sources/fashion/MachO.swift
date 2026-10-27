@@ -473,7 +473,7 @@ struct MachO {
         }
     }
 
-    // `<mach-o/loader.h>` filetypes, numbered from MH_OBJECT (1).
+    /// `<mach-o/loader.h>` filetypes, numbered from `MH_OBJECT` (1).
     private static let filetypeNames = [
         "MH_OBJECT",
         "MH_EXECUTE",

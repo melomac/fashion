@@ -1,7 +1,7 @@
 import Foundation
 
 /**
- The `--match` targets of a run, typed and normalised once at startup. Each is compared with one algorithm: `--algo`'s
+ The --match targets of a run, typed and normalised once at startup. Each is compared with one algorithm: --algo's
  when given, or without it the one the shape of the target names, so a list that mixes MD5, SHA-256, ssdeep and TLSH
  digests is searched for in one run. A byte hash's targets are lowercased and kept in a set, which an exact match looks
  up; a cdhash's are lowercased for the prefix rule; ssdeep's and TLSH's are kept as given, for the libraries that score
@@ -55,7 +55,7 @@ struct Targets {
      The algorithm whose digests have the shape of `target`: a byte hash by its count of hex digits (32 MD5, 40 SHA-1,
      64 SHA-256, 96 SHA-384, 128 SHA-512), TLSH by its `T1` version and 70 digits, or 70 alone as before TLSH 4.0,
      ssdeep by its `blocksize:chunk:chunk` form. Nil for any other string, and for git, git256 and cdhash, whose digests
-     have the SHA-1 and SHA-256 shapes and take `--algo`.
+     have the SHA-1 and SHA-256 shapes and take --algo.
      */
     static func shape(of target: String) -> Algorithm? {
         let bytes = target.utf8

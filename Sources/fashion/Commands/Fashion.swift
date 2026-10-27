@@ -93,7 +93,7 @@ struct ScanOptions: ParsableArguments {
     }
 
     mutating func validate() throws {
-        // A negative count only gets past the parser as `--jobs=-7`: `--jobs -7` reads `-7` as an option.
+        // A negative count only gets past the parser as --jobs=-7: --jobs -7 reads `-7` as an option.
         if let jobs = self.jobs, jobs < 0 {
             throw ValidationError(ScanOptionError.negativeJobs)
         }

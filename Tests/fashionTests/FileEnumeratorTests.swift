@@ -161,7 +161,7 @@ final class FileEnumeratorTests: XCTestCase {
     }
 
     /**
-     A tree whose names hold numbers, and its files in the order `--sort` lists them: numbers by value, past what 64 bits
+     A tree whose names hold numbers, and its files in the order --sort lists them: numbers by value, past what 64 bits
      hold, and equal ones with more leading zeros first, even where the rest of the path would order them the other way
      (`r01/z` before `r1/b`).
      */

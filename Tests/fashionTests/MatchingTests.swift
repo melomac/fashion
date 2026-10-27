@@ -2,7 +2,7 @@
 import XCTest
 
 final class MatchingTests: XCTestCase {
-    // Digests of "hello" and of nothing, one per shape.
+    /// Digests of "hello" and of nothing, one per shape.
     private let md5 = "5d41402abc4b2a76b9719d911017c592"
     private let sha1 = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
     private let sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"

@@ -14,7 +14,7 @@ final class RunnerTests: XCTestCase {
     }
 
     /**
-     A thin arm64 Mach-O with one LC_SYMTAB, whose declared load-command table is `padding` bytes longer than the command.
+     A thin arm64 Mach-O with one `LC_SYMTAB`, whose declared load-command table is `padding` bytes longer than the command.
      */
     private func machO(padding: UInt32 = 0) -> Data {
         var data = Data()
@@ -409,7 +409,7 @@ final class RunnerTests: XCTestCase {
 /**
  The lock-guarded parts of a run, driven from threads the way the walker and the hash threads drive them, with stdout
  and stderr sent into pipes like `fashion | sort 2>errors`, or into a pty like a terminal: every line comes out whole,
- in index order with `--sort`, and the counts add up. The in-process side of the spawned runs above, where
+ in index order with --sort, and the counts add up. The in-process side of the spawned runs above, where
  ThreadSanitizer sees the locking: `swift test --sanitize=thread --scratch-path .build/tsan`.
  */
 final class RunnerConcurrencyTests: XCTestCase {
@@ -537,7 +537,7 @@ final class RunnerConcurrencyTests: XCTestCase {
     }
 
     /**
-     Two lines for most files, like a two-architecture binary with `--slices`; none for every tenth, like a file that
+     Two lines for most files, like a two-architecture binary with --slices; none for every tenth, like a file that
      cannot be read.
      */
     private static func lines(of index: Int) -> [Line] {
