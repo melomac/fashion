@@ -227,8 +227,8 @@ extension MachO {
      go with it: removing it would cut off what follows.
 
      Security leaves the vmsize of `__LINKEDIT` as the signature needed it, which `assure_signature_space` rounded up to
-     16 KiB, so copies signed by different identities would still differ there: it is rounded up to the page the
-     linker aligns the image's segments to instead (`segmentAlignment`), as the linker left it before any signature.
+     16 KiB, so copies signed by different identities would still differ there: it is rounded as the tool that last
+     wrote the segment rounded it, before any signature (`linkeditSizeRounding`).
 
      Where Security goes astray, the intent is followed instead. It keeps pointers to the commands across the move, so
      when `LC_CODE_SIGNATURE` is not the last command it writes the size of `__LINKEDIT` 16 bytes past a command that
@@ -264,7 +264,8 @@ extension MachO {
 
         // Its size as Security writes it, wrapping when the segment starts past the new end.
         if let linkedit = try self.findSegment("__LINKEDIT") {
-            let page = self.segmentAlignment
+            // Rounding to 1 leaves the size as it is.
+            let page = self.linkeditSizeRounding
             if linkedit.cmd == UInt32(LC_SEGMENT_64) {
                 let segment = try linkedit.load(segment_command_64.self)
                 let filesize = UInt64(newEnd) &- self.sw(segment.fileoff)
@@ -289,8 +290,111 @@ extension MachO {
     }
 
     /**
+     What `__LINKEDIT`'s vmsize was rounded up to by the tool that last wrote the segment, before a signature, which
+     Security's `assure_signature_space` then rounds up to 16 KiB whatever it was, and `remove_signature_space` leaves
+     so, as Apple's sources have it:
+
+     - ld64 rounds it up to the page it aligns segments to (`segmentAlignment`): `(address - base + 4095) & -4096` in
+       `adjustLinkEditSections` of `MachOWriterExecutable.hpp`, ld64 77.1 to 97.17 (Mac OS X 10.5 to 10.6), then the
+       segment alignment of every segment in `HeaderAndLoadCommands.hpp` since ld64 123 (Xcode 4), 16 KiB on arm64;
+       cctools' classic `ld` rounded it to the segment alignment as well (`ld/layout.c`);
+     - `strip`, which rewrites the segment when it strips an image, sets it to the segment's file size (`misc/strip.c`),
+       32-bit and 64-bit alike, from cctools 698 (10.5) through 1009 (Xcode 15.2), and rounds 64-bit up to 16 KiB from
+       cctools 1010, which Xcode 15.3 shipped with ld64 1115: the linker's version, which `LC_BUILD_VERSION` records
+       (`linkerVersion`), tells the toolchain, where the SDK alone would not, since one builds against older SDKs.
+
+     An image is stripped when its symbol table is as `strip` leaves it (`isStripped`). 1 for the file size as it is.
+     */
+    var linkeditSizeRounding: Int {
+        guard self.isStripped else {
+            return self.segmentAlignment
+        }
+        if self.is64, let linker = self.linkerVersion, linker >= 0x045b_0000 {
+            return 0x4000
+        }
+        return 1
+    }
+
+    /**
+     The version of the linker that wrote the image, as `LC_BUILD_VERSION` records it among its tools (`TOOL_LD`),
+     X.Y.Z as `0xXXXXYYZZ` like the load commands encode versions; nil without the command, or a linker among its tools.
+     */
+    var linkerVersion: UInt32? {
+        guard
+            let command = self.findCommand(UInt32(LC_BUILD_VERSION)),
+            let build = command.payload(as: build_version_command.self)
+        else {
+            return nil
+        }
+        let header = MemoryLayout<build_version_command>.size
+        let entry = MemoryLayout<build_tool_version>.size
+        // As many tools as the command holds, whatever ntools claims: a count past them would be walked for nothing.
+        let count = min(Int(self.sw(build.ntools)), max(command.data.count - header, 0) / entry)
+        for index in 0 ..< count {
+            let tool = command.data.dropFirst(header + index * entry).withUnsafeBytes { $0.loadUnaligned(as: build_tool_version.self) }
+            if self.sw(tool.tool) == UInt32(TOOL_LD) {
+                return self.sw(tool.version)
+            }
+        }
+        return nil
+    }
+
+    /**
+     Whether the image's symbol table is as `strip` leaves it (`strip_symtab` in cctools' `misc/strip.c`): no local
+     symbol but the one `radr://5614542` placeholder `strip` writes when none is left and the image has an indirect
+     symbol table, so that no indirect symbol gets the index 0, which dyld reads as the classic linker's bug; and in an
+     executable, no defined global symbol but those `strip` keeps, the ones referenced dynamically
+     (`REFERENCED_DYNAMICALLY`, `__mh_execute_header` as the linker marks it) and the weak definitions, where the
+     linker leaves `_main` at least, while a library keeps every global symbol. An executable `strip -x` kept the global
+     symbols of passes for the linker's. An image without `LC_DYSYMTAB`, or whose tables the file does not hold, is
+     taken for unstripped.
+     */
+    var isStripped: Bool {
+        guard
+            let dysymtab = self.findCommand(UInt32(LC_DYSYMTAB))?.payload(as: dysymtab_command.self),
+            let symtab = self.findCommand(UInt32(LC_SYMTAB))?.payload(as: symtab_command.self)
+        else {
+            return false
+        }
+        let entry = self.is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size
+        func symbol(_ index: UInt32) -> Data? {
+            try? self.dataAt(Int(self.sw(symtab.symoff)) + Int(index) * entry, count: entry)
+        }
+        switch self.sw(dysymtab.nlocalsym) {
+        case 0:
+            break
+        case 1:
+            let placeholder = Array("radr://5614542".utf8)
+            guard
+                let local = symbol(self.sw(dysymtab.ilocalsym)),
+                let name = try? self.dataAt(Int(self.sw(symtab.stroff)) + Int(self.sw(local.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })), count: placeholder.count + 1),
+                name.elementsEqual(placeholder + [0])
+            else {
+                return false
+            }
+        default:
+            return false
+        }
+        guard self.filetype == UInt32(MH_EXECUTE) else {
+            return true
+        }
+        // What strip keeps a defined global symbol for; n_desc lies where it does in nlist_64 in nlist too.
+        let kept = UInt16(REFERENCED_DYNAMICALLY | N_WEAK_DEF)
+        let desc = MemoryLayout<nlist_64>.offset(of: \.n_desc)!
+        for index in 0 ..< self.sw(dysymtab.nextdefsym) {
+            guard let global = symbol(self.sw(dysymtab.iextdefsym) &+ index) else {
+                return false
+            }
+            if global.withUnsafeBytes({ self.sw($0.loadUnaligned(fromByteOffset: desc, as: UInt16.self)) }) & kept == 0 {
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
      The page the linker aligns the image's segments to, and rounds their vmsize up to, unless told otherwise: ld64
-     uses 16 KiB for arm64 and arm64_32, and for 32-bit ARM but in a kext, 4 KiB for anything else
+     uses 16 KiB for arm64 and `arm64_32`, and for 32-bit ARM but in a kext, 4 KiB for anything else
      (`Options::reconfigureDefaults`).
      */
     var segmentAlignment: Int {

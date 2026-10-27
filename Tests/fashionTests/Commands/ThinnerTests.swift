@@ -474,6 +474,150 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
+     `__LINKEDIT`'s vmsize is restored as the tool that last wrote the segment left it, which signing rounds to 16 KiB
+     and keeps nothing of: the page ld64 aligns segments to for an image with a local symbol; the segment's file size
+     for one `strip` emptied of them, as `strip` wrote it through cctools 1009, here today's stripped image reshaped so
+     and given Xcode 15.2's linker, ld64 1022.1, for its own; 16 KiB for one whose linker is ld64 1115 or later, as the
+     `strip` beside it has written it since cctools 1010, today's. Each, signed by `codesign`, comes back byte for byte.
+     */
+    func testUnsignRestoresTheLinkeditSizeAsStripOrTheLinkerLeftIt() throws {
+        let directory = try self.directory("linkedit-size")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        for arch in ["x86_64", "arm64"] {
+            let linked = try compile("linked-\(arch)", in: directory, ["-arch", arch])
+            let stripped = directory / "stripped-\(arch)"
+            try FileManager.default.copyItem(at: linked, to: stripped)
+            try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip", stripped.path]), "cannot run strip")
+            let image = try XCTUnwrap(MachO(File(path: linked.path)))
+            XCTAssertFalse(image.isStripped, arch)
+            XCTAssertEqual(image.linkeditSizeRounding, image.segmentAlignment, arch)
+            let strippedImage = try XCTUnwrap(MachO(File(path: stripped.path)))
+            XCTAssertTrue(strippedImage.isStripped, arch)
+            XCTAssertEqual(strippedImage.linkeditSizeRounding, 0x4000, "\(arch): today's strip rounds 64-bit to 16 KiB")
+            let linkedit = try XCTUnwrap(strippedImage.findSegment("__LINKEDIT"))
+            let segment = try linkedit.load(segment_command_64.self)
+            XCTAssertEqual(segment.vmsize, 0x4000, arch)
+
+            // The stripped image as strip left it through cctools 1009: the file size, its linker ld64 1022.1.
+            var old = try Data(contentsOf: stripped)
+            let vmsize = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.vmsize))
+            old.replaceSubrange(vmsize ..< vmsize + 8, with: withUnsafeBytes(of: segment.filesize.littleEndian) { Data($0) })
+            XCTAssertNotNil(strippedImage.linkerVersion, arch)
+            let build = try XCTUnwrap(strippedImage.findCommand(UInt32(LC_BUILD_VERSION)))
+            let tools = build.data.startIndex + MemoryLayout<build_version_command>.size
+            let linker = try tools + XCTUnwrap((0 ..< Int(XCTUnwrap(build.payload(as: build_version_command.self)).ntools)).first { old[tools + $0 * 8] == UInt8(TOOL_LD) }) * 8 + 4
+            old.replaceSubrange(linker ..< linker + 4, with: withUnsafeBytes(of: UInt32(0x03fe_0100).littleEndian) { Data($0) })
+            let older = directory / "older-\(arch)"
+            try old.write(to: older)
+            XCTAssertEqual(try XCTUnwrap(MachO(File(path: older.path))).linkeditSizeRounding, 1, arch)
+
+            for original in [linked, stripped, older] {
+                let name = "\(arch) \(original.lastPathComponent)"
+                let data = try Data(contentsOf: original)
+                let signed = try self.codesignedFile(data, in: directory)
+                XCTAssertEqual(try XCTUnwrap(MachO(File(path: signed.path))).findSegment("__LINKEDIT")?.load(segment_command_64.self).vmsize, 0x4000, "\(name): codesign rounds to 16 KiB")
+                XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], name)
+                XCTAssertEqual(Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
+                XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: signed.path + "_unsigned")), data, name)
+            }
+        }
+    }
+
+    /**
+     An executable with no local symbol to show for it is told stripped by its global symbols: a program with none at
+     all, one calling `puts` through a stub, and one `ld -x` emptied of them keep `_main` beside `__mh_execute_header`
+     and get the linker's page back, 4 KiB on `x86_64` where today's `strip` writes 16 KiB; through `strip`, they keep
+     what it keeps alone, `__mh_execute_header`, a weak definition, the `radr://5614542` placeholder written for the
+     stub's sake, and get the 16 KiB. Each, signed by `codesign`, comes back byte for byte.
+     */
+    func testAnExecutableWithoutLocalSymbolsIsToldStrippedByItsGlobalOnes() throws {
+        let directory = try self.directory("no-locals")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let plain = try compile("plain", in: directory, source: "int main(void) { return 0; }\n", ["-arch", "x86_64"])
+        let calling = try compile("calling", in: directory, source: "#include <stdio.h>\nint main(void) { puts(\"hi\"); return 0; }\n", ["-arch", "x86_64"])
+        let emptied = try compile("emptied", in: directory, ["-arch", "x86_64", "-Wl,-x"])
+        let weak = try compile("weak", in: directory, source: "__attribute__((weak)) int weak(int x) { return x + 1; }\nint (*pointer)(int) = weak;\nint main(void) { return pointer(1); }\n", ["-arch", "x86_64"])
+        func symbols(_ url: URL) throws -> (locals: UInt32, globals: UInt32, stripped: Bool, rounding: Int, vmsize: UInt64) {
+            let image = try XCTUnwrap(MachO(File(path: url.path)))
+            let dysymtab = try XCTUnwrap(image.findCommand(UInt32(LC_DYSYMTAB))?.payload(as: dysymtab_command.self))
+            let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT")).load(segment_command_64.self)
+            return (dysymtab.nlocalsym, dysymtab.nextdefsym, image.isStripped, image.linkeditSizeRounding, linkedit.vmsize)
+        }
+        for linked in [plain, calling, emptied] {
+            let symbols = try symbols(linked)
+            XCTAssertEqual(symbols.locals, 0, linked.lastPathComponent)
+            XCTAssertEqual(symbols.globals, 2, "\(linked.lastPathComponent): __mh_execute_header and _main")
+            XCTAssertFalse(symbols.stripped, linked.lastPathComponent)
+            XCTAssertEqual(symbols.rounding, 0x1000, linked.lastPathComponent)
+            XCTAssertEqual(symbols.vmsize, 0x1000, linked.lastPathComponent)
+        }
+
+        var stripped: [URL] = []
+        for linked in [plain, calling, weak] {
+            let copy = directory / "stripped-\(linked.lastPathComponent)"
+            try FileManager.default.copyItem(at: linked, to: copy)
+            try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip", copy.path]), "cannot run strip")
+            stripped.append(copy)
+            let symbols = try symbols(copy)
+            XCTAssertEqual(symbols.locals, linked == calling ? 1 : 0, "\(copy.lastPathComponent): the placeholder for the stub")
+            XCTAssertEqual(symbols.globals, linked == weak ? 2 : 1, "\(copy.lastPathComponent): __mh_execute_header, a weak definition")
+            XCTAssertTrue(symbols.stripped, copy.lastPathComponent)
+            XCTAssertEqual(symbols.rounding, 0x4000, copy.lastPathComponent)
+            XCTAssertEqual(symbols.vmsize, 0x4000, copy.lastPathComponent)
+        }
+
+        for original in [plain, calling, emptied] + stripped {
+            let name = original.lastPathComponent
+            let data = try Data(contentsOf: original)
+            let signed = try self.codesignedFile(data, in: directory)
+            XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], name)
+            XCTAssertEqual(Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: signed.path + "_unsigned")), data, name)
+        }
+    }
+
+    /**
+     `LC_BUILD_VERSION` names the linker among its tools, read within the command whatever ntools claims: a command of
+     24 bytes claiming four billion tools names none, at once, and one claiming a tool past its end names what it holds.
+     */
+    func testTheLinkerVersionIsReadWithinTheCommand() throws {
+        func image(ntools: UInt32, tools: [(UInt32, UInt32)]) throws -> MachO {
+            var data = Data()
+            data.appendUInt32(MH_MAGIC_64)
+            data.appendInt32(CPU_TYPE_X86_64)
+            data.appendInt32(0)
+            data.appendUInt32(UInt32(MH_EXECUTE))
+            data.appendUInt32(1) // ncmds
+            data.appendUInt32(UInt32(24 + 8 * tools.count)) // sizeofcmds
+            data.appendUInt32(0)
+            data.appendUInt32(0)
+            data.appendUInt32(UInt32(LC_BUILD_VERSION))
+            data.appendUInt32(UInt32(24 + 8 * tools.count))
+            data.appendUInt32(UInt32(PLATFORM_MACOS)); data.appendUInt32(0x000e_0000); data.appendUInt32(0x000e_0000); data.appendUInt32(ntools) // platform, minos, sdk, ntools
+            for (tool, version) in tools {
+                data.appendUInt32(tool); data.appendUInt32(version)
+            }
+            return try XCTUnwrap(MachO(File(data: data)))
+        }
+        XCTAssertEqual(try image(ntools: 2, tools: [(UInt32(TOOL_CLANG), 0x0001_0000), (UInt32(TOOL_LD), 0x045b_0000)]).linkerVersion, 0x045b_0000)
+        XCTAssertNil(try image(ntools: 1, tools: [(UInt32(TOOL_CLANG), 0x0001_0000)]).linkerVersion)
+        XCTAssertNil(try image(ntools: 0xffff_ffff, tools: []).linkerVersion)
+        XCTAssertEqual(try image(ntools: 2, tools: [(UInt32(TOOL_LD), 0x045b_0000)]).linkerVersion, 0x045b_0000, "a tool claimed past the command")
+    }
+
+    /// `data` written and signed ad hoc into a file of its own in `directory`, kept.
+    private func codesignedFile(_ data: Data, in directory: URL) throws -> URL {
+        let url = directory / "codesigned-\(UUID())"
+        try data.write(to: url)
+        _ = try codesign(["-f", "-s", "-", url.path])
+        return url
+    }
+
+    /**
      One run with --unsign leaves the signed slices beside the unsigned ones. A later run with other flags edits
      the artifacts of an earlier one too, thin files all: what it makes of `ls_x86_64` is named and made as one run
      makes it of `ls`, `ls_x86_64_unsigned`, so it is found in place. Running either again makes nothing more.

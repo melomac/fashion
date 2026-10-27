@@ -291,12 +291,15 @@ func makeBigEndianMachO(is64: Bool, textOffset: UInt32 = 0, linkeditSize: UInt32
     return data
 }
 
-/// `int main` built by `clang arguments` against the `sdk` SDK into `dir/name`, unsigned; skips the test when it cannot be built.
-func compile(_ name: String, in dir: URL, sdk: String = "macosx", _ arguments: [String]) throws -> URL {
-    let source = dir / "main.c"
-    try "int main(void) { return 0; }\n".write(to: source, atomically: true, encoding: .utf8)
+/**
+ `source`, by default `int main` with a static function so that the image has a local symbol, as a program has, built
+ by `clang arguments` against the `sdk` SDK into `dir/name`, unsigned; skips the test when it cannot be built.
+ */
+func compile(_ name: String, in dir: URL, sdk: String = "macosx", source: String = "static int local(int x) { return x + 1; }\nint main(void) { return local(1); }\n", _ arguments: [String]) throws -> URL {
+    let file = dir / "main.c"
+    try source.write(to: file, atomically: true, encoding: .utf8)
     let output = dir / name
-    let built = try execute("/usr/bin/xcrun", ["-sdk", sdk, "clang"] + arguments + ["-Wl,-no_adhoc_codesign", source.path(), "-o", output.path()])
+    let built = try execute("/usr/bin/xcrun", ["-sdk", sdk, "clang"] + arguments + ["-Wl,-no_adhoc_codesign", file.path(), "-o", output.path()])
     try XCTSkipUnless(built, "cannot build \(name) with the \(sdk) SDK")
     return output
 }
