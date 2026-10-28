@@ -21,6 +21,9 @@ struct Unpacker: ParsableCommand {
     @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
     var write = false
 
+    @Flag(help: "Keep unpacked data as _decompressed, for further investigation.")
+    var keep = false
+
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
         if code != 0 {
@@ -41,7 +44,8 @@ struct Unpacker: ParsableCommand {
  `sample_unsigned_unpacked_unsigned`, as `thinr --unpack --unsign` would.
 
  A file UPX did not pack, or that is not Mach-O, has nothing to write. Packed data that does not hold is reported, in
- red.
+ red; with --keep, what decompressed of it is written as it is all the same, `sample_decompressed`, or
+ `sample_arm64_decompressed` for a slice of a universal file, since it is no image to lay out, for analysis by hand.
 
  Bytes appended past a signature added after packing hide what UPX left: hash mode's --unpack hashes such a file as it
  is, with nothing said, and its --unsign refuses it. Here the bytes are cut off first, as --exact cuts them
@@ -59,13 +63,13 @@ extension Unpacker {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Unpack\(self.scan.sort ? " sorted" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let write = self.write
-        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, write: write, reporter: $1) }
+        let (write, keep) = (self.write, self.keep)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, write: write, keep: keep, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
     /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unpacked, whole.
-    static func lines(for path: String, write: Bool, reporter: Reporter) -> [Line] {
-        ArtifactWriter(exact: false, unsign: false, unpack: true, split: false, write: write).lines(for: path, reporter: reporter)
+    static func lines(for path: String, write: Bool, keep: Bool = false, reporter: Reporter) -> [Line] {
+        ArtifactWriter(exact: false, unsign: false, unpack: true, split: false, write: write, keep: keep).lines(for: path, reporter: reporter)
     }
 }

@@ -34,6 +34,9 @@ struct Thinner: ParsableCommand {
     @Flag(help: "Log what is odd about each Mach-O, as verify names it, to the unified log.")
     var verify = false
 
+    @Flag(help: "Keep unpacked data as _decompressed, for further investigation.")
+    var keep = false
+
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
         if code != 0 {
@@ -65,6 +68,9 @@ struct Thinner: ParsableCommand {
  frees, is reported under --unsign and nothing is written for the file; under --unpack alone it stays, and the image
  is looked at as it is.
 
+ With --keep, what decompressed of a UPX image that fails a check after, a sum or its headers, is written as it is,
+ `ls_x86_64_decompressed`, after the states before it, and the refusal is reported as without the flag.
+
  `ArtifactWriter` names and writes the artifacts, split: `ls_x86_64`, `ls_x86_64_unsigned`,
  `ls_x86_64_unsigned_unpacked` after the architecture of a universal file's slice, or `sample_unsigned` after the
  name of a thin file, which needs no architecture.
@@ -75,11 +81,11 @@ extension Thinner {
      or written. `trapSignals` as `Hasher.scan(trapSignals:)`.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public)\(self.unpack ? " unpack" : "", privacy: .public)\(self.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public)\(self.unpack ? " unpack" : "", privacy: .public)\(self.keep ? " keep" : "", privacy: .public)\(self.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, unsign, unpack, write, verify) = (self.exact, self.unsign, self.unpack, self.write, self.verify)
+        let (exact, unsign, unpack, write, keep, verify) = (self.exact, self.unsign, self.unpack, self.write, self.keep, self.verify)
         let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { path, reporter in
-            let lines = Self.lines(for: path, exact: exact, unsign: unsign, unpack: unpack, write: write, reporter: reporter)
+            let lines = Self.lines(for: path, exact: exact, unsign: unsign, unpack: unpack, write: write, keep: keep, reporter: reporter)
             if verify {
                 Verify.log(path)
             }
@@ -89,7 +95,7 @@ extension Thinner {
     }
 
     /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` split.
-    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, write: Bool, reporter: Reporter) -> [Line] {
-        ArtifactWriter(exact: exact, unsign: unsign, unpack: unpack, split: true, write: write).lines(for: path, reporter: reporter)
+    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, write: Bool, keep: Bool = false, reporter: Reporter) -> [Line] {
+        ArtifactWriter(exact: exact, unsign: unsign, unpack: unpack, split: true, write: write, keep: keep).lines(for: path, reporter: reporter)
     }
 }

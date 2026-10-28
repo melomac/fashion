@@ -44,6 +44,10 @@ extension ArtifactError: LocalizedError {
  signature. `unsign` cuts the bytes off and writes `sample_exact_unsigned`; `unpack` cuts them off and unpacks. A
  file cut short of its last page is padded to be read, when an edit comes of it.
 
+ With `keep`, what decompressed of a UPX image that fails a check after, a sum or its headers, is written as it is,
+ `_decompressed`, after the slice's architecture and the edits before it, for analysis by hand; the refusal is reported
+ as without it, red and counted, so that its digest is never taken for the original's.
+
  An artifact written is noted in the unified log with its size and SHA-256, a record of what a run left behind. One
  already in place, byte for byte, is left as it is and only noted there, so a second run over a tree is as quiet on
  the terminal as the first. A different file under an artifact's name is left alone and reported, with its size and
@@ -58,31 +62,45 @@ struct ArtifactWriter {
     /// Whether each architecture of a universal file comes out as a file of its own, or the file comes out whole.
     let split: Bool
     let write: Bool
+    /// Whether what decompressed of a UPX image that fails a check is written as it is, `_decompressed`, to look at by
+    /// hand.
+    var keep = false
 
     /**
      The lines to print for one file: the path of each artifact written or found in place, or a diagnostic for each
      that could not be written, or that a different file stands for without `write`. A file that cannot be read,
      whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead,
-     after the architecture of the slice at fault in a universal file, and nothing is written. An image a modified UPX
-     packed is warned about before its artifacts, which are written.
+     after the architecture of the slice at fault in a universal file, and nothing is written, but what decompressed
+     of a UPX image under `keep`, before the report. An image a modified UPX packed is warned about before its
+     artifacts, which are written.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
         let artifacts: [(suffix: String, bytes: File)]
         var caveats: [Line] = []
+        // What decompressed of an image that fails a check, under keep, named for its slice and the edits before it.
+        var kept: [(suffix: String, bytes: File)] = []
         do {
             let read = try File(path: path)
             // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it.
             let edited = try self.unsign || self.unpack || self.exact ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
                 caveats.append(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
-            }) : nil
+            }, keep: self.keep ? { arch, edits, data in
+                kept.append(("\(arch.map { "_\($0)" } ?? "")\(Self.suffix(edits))", File(editing: read, pieces: [.bytes(data)])))
+            } : nil) : nil
             let opened = edited?.source ?? read
             artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
         } catch {
             // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
-            return caveats + [reporter.report(path: Digester.subject(path, of: error), message: File.message(for: error), tint: Digester.tint(for: error))]
+            return caveats + self.written(kept, for: path, reporter: reporter) + [reporter.report(path: Digester.subject(path, of: error), message: File.message(for: error), tint: Digester.tint(for: error))]
         }
 
-        return caveats + artifacts.flatMap { suffix, bytes -> [Line] in
+        return caveats + self.written(artifacts, for: path, reporter: reporter)
+    }
+
+    /// The lines for `artifacts` written beside `path`, each named after it with its suffix: its path, or what kept it
+    /// from being written.
+    private func written(_ artifacts: [(suffix: String, bytes: File)], for path: String, reporter: Reporter) -> [Line] {
+        artifacts.flatMap { suffix, bytes -> [Line] in
             let artifact = path + suffix
             Self.writing.claim(artifact)
             defer {

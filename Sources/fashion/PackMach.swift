@@ -6,12 +6,15 @@ enum UnpackError: Error, Equatable {
     /// UPX's `CantUnpackException`: a Mach-O UPX packed whose packed data, or the image unpacked from it, does not hold,
     /// in UPX's words.
     case cantUnpack(String)
+    /// Packed data that decompressed to its end and fails a check after, a sum or the image's headers, in UPX's words
+    /// as much; with what decompressed, which `thinr` and `unpack` write as it is under --keep.
+    case unverified(String, decompressed: Data)
 }
 
 extension UnpackError: LocalizedError {
     var errorDescription: String? {
         switch self {
-        case let .cantUnpack(reason):
+        case let .cantUnpack(reason), let .unverified(reason, _):
             "Invalid UPX data: \(reason)"
         }
     }
@@ -347,11 +350,12 @@ struct PackMach {
      blocks it filtered with a byte before they are unfiltered, as the UPX 3.91 behind OSX/Keydnap did, which unfilter
      to a wrong image without it: the key is the byte, tried in turn, under which the image bears its checksum. An
      image that bears it under no key is refused as much, in red, its sum and the header's named with the packer.
+     Either refusal carries what decompressed, as it is, for --keep to write.
      */
     func unpack() throws -> (data: Data, caveat: String?, notes: [String]) {
         let plain = try self.unpack(xor: 0)
         guard plain.cAdler == self.cAdler else {
-            throw UnpackError.cantUnpack("checksum error: the packed bytes sum to \(plain.cAdler.hex), the pack header says \(self.cAdler.hex)")
+            throw UnpackError.unverified("checksum error: the packed bytes sum to \(plain.cAdler.hex), the pack header says \(self.cAdler.hex)", decompressed: plain.data)
         }
         if plain.adler == self.uAdler {
             return (plain.data, self.caveat(xor: 0), self.notes(plain))
@@ -363,7 +367,7 @@ struct PackMach {
                 }
             }
         }
-        throw UnpackError.cantUnpack("checksum error on the unpacked image, \(self.packer): it sums to \(plain.adler.hex), the pack header says \(self.uAdler.hex)\(plain.filtered ? ", under no XOR key" : "")")
+        throw UnpackError.unverified("checksum error on the unpacked image, \(self.packer): it sums to \(plain.adler.hex), the pack header says \(self.uAdler.hex)\(plain.filtered ? ", under no XOR key" : "")", decompressed: plain.data)
     }
 
     /**

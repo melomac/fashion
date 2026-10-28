@@ -47,9 +47,11 @@ enum MachOEditor {
         static let exactUnpacked = Edits(rawValue: 1 << 3)
         /// The unpacked image was signed, and its signature came out.
         static let unsignedUnpacked = Edits(rawValue: 1 << 4)
+        /// UPX packed it, and what decompressed fails a check: kept as it is, under --keep, in place of `unpacked`.
+        static let decompressed = Edits(rawValue: 1 << 5)
 
         /// The edits in the order they are done, each with the suffix `thin` names an artifact by for it.
-        static let suffixes: [(Edits, String)] = [(.exact, "_exact"), (.unsigned, "_unsigned"), (.unpacked, "_unpacked"), (.exactUnpacked, "_exact"), (.unsignedUnpacked, "_unsigned")]
+        static let suffixes: [(Edits, String)] = [(.exact, "_exact"), (.unsigned, "_unsigned"), (.decompressed, "_decompressed"), (.unpacked, "_unpacked"), (.exactUnpacked, "_exact"), (.unsignedUnpacked, "_unsigned")]
     }
 
     /// An image as one edit leaves it: what was done to it so far, and its bytes, in memory or ranges of the file.
@@ -91,9 +93,11 @@ enum MachOEditor {
      what an edit has to say about an image, named after its architecture in a universal file: that a modified UPX
      packed it, and how. Each edit done is noted in the unified log, under the edit category, after the image's path
      and architecture: the bytes a cut dropped, the signature removed, and how UPX packed what is unpacked, with where
-     its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand.
+     its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand. `keep`, when given,
+     gets what decompressed of an image that fails a check after, a sum or its headers, with the edits done before it
+     and `decompressed` for it, and the architecture: the refusal is thrown all the same.
      */
-    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> (file: File, states: [[State]], source: File)? {
+    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> (file: File, states: [[State]], source: File)? {
         let read = file
         var held: [String] = []
         let file = try exact == .never ? file : self.padded(file, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
@@ -103,7 +107,7 @@ enum MachOEditor {
             defer {
                 said.forEach { caveat(nil, $0) }
             }
-            guard let edit = try self.edit(image, of: file, subject: file.path, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { said.append($0) }) else {
+            guard let edit = try self.edit(image, of: file, subject: file.path, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { said.append($0) }, keep: keep.map { held in { held(nil, $0, $1) } }) else {
                 // Padded as needed for nothing: the file as it is, which the parser refuses, says why.
                 if file !== read {
                     _ = try Universal.open(read)
@@ -120,7 +124,7 @@ enum MachOEditor {
                         // An archive, aligned by lipo for its members' symbols.
                         return (arch, whole, arch.cpuType & CPU_ARCH_ABI64 != 0 ? 3 : 2, [])
                     }
-                    guard let edit = try self.edit(image, of: file, subject: "\(file.path) (\(arch.name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(arch.name, $0) }) else {
+                    guard let edit = try self.edit(image, of: file, subject: "\(file.path) (\(arch.name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(arch.name, $0) }, keep: keep.map { held in { held(arch.name, $0, $1) } }) else {
                         return (arch, whole, image.universalAlignment, [])
                     }
                     return (arch, edit.states.last!.pieces, edit.align, edit.states)
@@ -163,9 +167,11 @@ enum MachOEditor {
      alignment `lipo` gives the image they make; nil when they change nothing, an image the `exact` cut alone would
      shorten included, which is left as it is, and the padded image as needed. `caveat` hears `PackMach`'s word on the
      image: that a modified UPX packed it, and how. Each edit is noted in the unified log after `subject`, the image's
-     path and architecture. An unpacked image lives in memory, the states after it sharing its bytes.
+     path and architecture. An unpacked image lives in memory, the states after it sharing its bytes. `keep` gets
+     what decompressed of an image that fails a check after, with the edits before it and `decompressed`, before the
+     refusal is thrown.
      */
-    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void) throws -> (states: [State], align: Int)? {
+    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> (states: [State], align: Int)? {
         var states: [State] = []
         var edits: Edits = padded ? [.exact] : []
         let end = padded ? image.logicalEnd() : self.cut(image, exact: exact)
@@ -192,7 +198,27 @@ enum MachOEditor {
             // image is looked at without it.
             let probed = unsigned.flatMap { (try? MachO(File(editing: file, pieces: $0))) ?? nil } ?? image
             if let packMach = try PackMach(probed) {
-                let (data, message, notes) = try packMach.unpack()
+                // What decompressed of an image that fails a check, kept as it is for --keep: named for the edits
+                // before it, the signature that came out for UPX to be found behind it included.
+                let hold = { (data: Data, why: String) in
+                    guard let keep else {
+                        return
+                    }
+                    var kept = edits.subtracting(.unpacked)
+                    if unsigned != nil {
+                        kept.insert(.unsigned)
+                    }
+                    kept.insert(.decompressed)
+                    keep(kept, data)
+                    logger.info("\(subject, privacy: .public): decompressed, kept as it is: \(why, privacy: .public)")
+                }
+                let (data, message, notes): (Data, String?, [String])
+                do {
+                    (data, message, notes) = try packMach.unpack()
+                } catch let UnpackError.unverified(reason, decompressed) {
+                    hold(decompressed, reason)
+                    throw UnpackError.unverified(reason, decompressed: decompressed)
+                }
                 if let message {
                     caveat(message)
                 }
@@ -208,8 +234,15 @@ enum MachOEditor {
                     logger.info("\(subject, privacy: .public): unpacked, \(note, privacy: .public)")
                 }
 
-                guard let unpacked = try MachO(File(editing: file, pieces: [.bytes(data)])) else {
-                    throw UnpackError.cantUnpack("file header corrupted")
+                let unpacked: MachO
+                do {
+                    guard let parsed = try MachO(File(editing: file, pieces: [.bytes(data)])) else {
+                        throw UnpackError.cantUnpack("file header corrupted")
+                    }
+                    unpacked = parsed
+                } catch {
+                    hold(data, File.message(for: error))
+                    throw error
                 }
                 align = unpacked.universalAlignment
                 // Its own cut, as needed for its own signature to come out.

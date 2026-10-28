@@ -715,7 +715,9 @@ final class PackMachTests: XCTestCase {
     /**
      The pack header's `c_adler`, the packer's sum of the packed bytes, is checked before the image is: a literal of
      an NRV2B block changed decompresses all the same, to another image, and is refused for it in red, in UPX's
-     words with both sums, before any key is tried; a `c_adler` that is not the packer's, as much.
+     words with both sums, before any key is tried; a `c_adler` that is not the packer's, as much. Under --keep,
+     what decompressed is written as it is before the refusal, `_decompressed`: the other image for the changed
+     literals, the original for the header that lies.
      */
     func testPackedBytesThatFailTheirChecksumAreRefused() throws {
         let directory = try self.directory("c-adler")
@@ -742,6 +744,17 @@ final class PackMachTests: XCTestCase {
                 XCTAssertEqual(lines.map(\.tint), [.malformed], name)
                 XCTAssertEqual(reporter.errorCount, 1, name)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_decompressed"), name)
+
+                let keeping = Reporter(console: Console())
+                let kept = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, keep: true, reporter: keeping)
+                XCTAssertEqual(kept.map(\.text), [file.path + "_decompressed", errors[0]], name)
+                XCTAssertEqual(kept.last?.tint, .malformed, name)
+                XCTAssertEqual(keeping.errorCount, 1, name)
+                let decompressed = try Data(contentsOf: URL(fileURLWithPath: file.path + "_decompressed"))
+                let original = try Data(contentsOf: unsigned)
+                XCTAssertEqual(decompressed.count, original.count, name)
+                XCTAssertEqual(decompressed == original, suffix == "_header", name)
             }
         }
     }
@@ -749,7 +762,9 @@ final class PackMachTests: XCTestCase {
     /**
      The pack header's `u_adler`, the Adler-32 of the original, is the word on an unpacked image, which upx -d does
      not check for Mach-O: one that fails it under every key is refused in red, both sums and the packer named, hashed
-     nowhere and written nowhere, like packed bytes that fail theirs.
+     nowhere and written nowhere, like packed bytes that fail theirs. Under --keep, thinr and unpack write what
+     decompressed as it is, `_decompressed`, which is the original here, since only the header lies, and report the
+     refusal all the same.
      */
     func testAnUnpackedImageThatFailsThePackersChecksumIsRefused() throws {
         let directory = try self.directory("checksum")
@@ -771,6 +786,23 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(lines.map(\.tint), [.malformed], name)
             XCTAssertEqual(reporter.errorCount, 1, name)
             XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_decompressed"), name)
+
+            let artifact = file.path + "_decompressed"
+            for kept in [
+                Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, keep: true, reporter: reporter),
+                Unpacker.lines(for: file.path, write: false, keep: true, reporter: reporter),
+            ] {
+                XCTAssertEqual(kept.map(\.text), [artifact, errors[0]], name)
+                XCTAssertEqual(kept.last?.tint, .malformed, name)
+                XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: artifact)), try Data(contentsOf: unsigned), name)
+            }
+            XCTAssertEqual(reporter.errorCount, 3, name)
+            try FileManager.default.removeItem(atPath: artifact)
+            let (kept, said) = try runFashion(["thinr", "--unpack", "--keep", file.path])
+            XCTAssertEqual(kept, 2, name)
+            XCTAssertEqual(said, errors, name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: artifact)), try Data(contentsOf: unsigned), name)
         }
     }
 
