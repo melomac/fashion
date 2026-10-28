@@ -21,6 +21,10 @@ enum Universal {
         /// Where the architecture lies in its file, which `parseFat` has checked it fits.
         let offset: Int
         let length: Int
+        /// The entry's alignment, as a power of two, which `lipo` writes and Security bounds the padding before a slice by.
+        let align: UInt32
+        /// Whether the entry lies past the table's count: the arm64 slice `lipo -hideARM64` hides (see `parseFat`).
+        let hidden: Bool
 
         /// Its name, as `codesign --arch` spells it (see `archName`), like Security's `Architecture::name`.
         var name: String {
@@ -34,7 +38,8 @@ enum Universal {
      Open a Mach-O and reject an incomplete header, load-command table, or fat architecture table.
 
      A fat architecture is checked to lie inside the file; what it contains is left to each consumer,
-     since a universal static library carries `ar` archives rather than Mach-O slices.
+     since a universal static library carries `ar` archives rather than Mach-O slices. A 32-bit table is read one
+     entry past its count, as Security's `Universal` reads it, and that entry is an architecture when it names arm64.
      */
     static func open(_ file: File) throws -> Universal {
         // MachORep::candidate reads a 32-bit mach_header before it considers a file Mach-O code at all, so a magic-only
@@ -155,40 +160,59 @@ enum Universal {
             throw ParserError.invalidFatArchitectureTable(count: nfatArch, fileSize: file.size)
         }
 
-        let table = tableSize <= head.count ? head : try file.read(at: 0, count: tableSize)
+        // Security's `Universal` reads a 32-bit table one entry past its count, and counts that entry when it names
+        // arm64 (its "Hack alert", 15001604): the layout `lipo -hideARM64` wrote, whose arm64 slice dyld loads too
+        // ("Look for one more slice") where the kernel, `file` and most tools read the count alone.
+        let extra = !is64 && tableSize + entrySize <= file.size
+        let read = tableSize + (extra ? entrySize : 0)
+        let table = read <= head.count ? head : try file.read(at: 0, count: read)
         return try table.withUnsafeBytes { ptr in
             var archs: [Architecture] = []
 
-            for architectureIndex in 0 ..< Int(nfatArch) {
+            for architectureIndex in 0 ..< Int(nfatArch) + (extra ? 1 : 0) {
+                let hidden = architectureIndex == Int(nfatArch)
                 let entry = 8 + architectureIndex * entrySize
+                let cpuType = cpu_type_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry, as: cpu_type_t.self))
+                if hidden, cpuType != CPU_TYPE_ARM64 {
+                    break
+                }
                 let sliceOffset: UInt64
                 let sliceSize: UInt64
+                let align: UInt32
                 if is64 {
                     sliceOffset = UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 8, as: UInt64.self))
                     sliceSize = UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 16, as: UInt64.self))
+                    align = UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 24, as: UInt32.self))
                 } else {
                     sliceOffset = UInt64(UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 8, as: UInt32.self)))
                     sliceSize = UInt64(UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 12, as: UInt32.self)))
+                    align = UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 16, as: UInt32.self))
                 }
 
                 // Every slice must start after the table and end inside the file. Int(exactly:) and the
-                // subtraction keep a crafted 64-bit fat from trapping on conversion or overflow.
+                // subtraction keep a crafted 64-bit fat from trapping on conversion or overflow. A hidden entry that
+                // does not is no slice, as dyld leaves it.
                 guard
                     let start = Int(exactly: sliceOffset),
                     let size = Int(exactly: sliceSize),
-                    start >= tableSize,
+                    start >= (hidden ? read : tableSize),
                     size > 0,
                     start <= file.size,
                     size <= file.size - start
                 else {
+                    if hidden {
+                        break
+                    }
                     throw ParserError.invalidFatArchitectureRange(offset: sliceOffset, size: sliceSize, fileSize: file.size)
                 }
 
                 archs.append(Architecture(
-                    cpuType: cpu_type_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry, as: cpu_type_t.self)),
+                    cpuType: cpuType,
                     cpuSubtype: cpu_subtype_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 4, as: cpu_subtype_t.self)),
                     offset: start,
                     length: size,
+                    align: align,
+                    hidden: hidden,
                 ))
             }
 

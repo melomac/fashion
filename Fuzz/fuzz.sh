@@ -161,7 +161,7 @@ build() {
             "${swift[@]}" "${sanitize[@]}" ${define[@]+"${define[@]}"} -c -wmo -enable-testing -module-name fashion \
                 -Xfrontend -entry-point-function-name -Xfrontend fashion_main "${includes[@]}" \
                 -emit-module -emit-module-path "$out/fashion.swiftmodule" \
-                "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/Algorithms/*.swift "$root"/Sources/fashion/Bridges/*.swift "$root"/Sources/fashion/Commands/*.swift -o "$out/fashion.o"
+                "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/Algorithms/*.swift "$root"/Sources/fashion/Bridges/*.swift "$root"/Sources/fashion/Commands/*.swift "$root"/Sources/fashion/MachO/*.swift -o "$out/fashion.o"
         fi
     done
 
@@ -249,7 +249,7 @@ PYTHON
     local fashion digests first second algorithm
     fashion=$(xcrun swift build --package-path "$root" --scratch-path "$swiftpm" --show-bin-path)/fashion
     for algorithm in tlsh ssdeep; do
-        digests=$("$fashion" -q -a "$algorithm" /bin/ls "$root/Sources/fashion/MachO.swift")
+        digests=$("$fashion" -q -a "$algorithm" /bin/ls "$root/Sources/fashion/MachO/MachO.swift")
         first=$(echo "$digests" | sed -n 1p)
         second=$(echo "$digests" | sed -n 2p)
         printf '%s\0%s' "$first" "$second" > "$corpus/diff/$algorithm-pair"

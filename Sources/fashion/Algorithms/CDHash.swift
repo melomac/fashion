@@ -157,8 +157,8 @@ extension MachO {
         if let signature {
             let directories = try Self.loadCodeDirectories(self.signingData(signature))
                 .sorted { $0.hashType.rank > $1.hashType.rank }
-            let hashes = try zip(directories, self.validateExecutables(directories)).map { cd, valid in
-                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !valid)
+            let hashes = try zip(directories, self.validateExecutables(directories)).map { cd, checked in
+                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !checked.valid)
             }
             if !hashes.isEmpty {
                 return (hashes, nil)
@@ -174,9 +174,9 @@ extension MachO {
      The superblob `LC_CODE_SIGNATURE` points at, read like `MachORep::signingData`: `BlobCore::readBlob` requires its
      magic and, unless the command's size is zero, a length within that size; then `EmbeddedSignatureBlob::specific`
      requires every blob it indexes to lie inside it. fashion also requires the length to fit the slice, where
-     `codesign -d` reads on into the next slice of a universal file. Throws otherwise.
+     `codesign -d` reads on into the next slice of a universal file. Throws otherwise. `MachOVerifier` reads it too.
      */
-    private func signingData(_ signature: (offset: Int, size: Int)) throws -> Data {
+    func signingData(_ signature: (offset: Int, size: Int)) throws -> Data {
         let (offset, size) = signature
         guard offset <= self.length - 8 else {
             throw CDHashError.invalidCodeSignatureRange(offset: UInt32(offset), size: UInt32(size), fileSize: self.length)
@@ -234,7 +234,7 @@ extension MachO {
      alternates' from 0x1000 up to the first one missing. Empty, so that the slice counts as unsigned, when the primary
      is missing, when any of them fails the checks of `EmbeddedCodeDirectory`, or when two share a hash type.
      */
-    private static func loadCodeDirectories(_ superblob: Data) -> [EmbeddedCodeDirectory] {
+    static func loadCodeDirectories(_ superblob: Data) -> [EmbeddedCodeDirectory] {
         var directories: [EmbeddedCodeDirectory] = []
         for slot in [self.csslotCodeDirectory] + Array(self.csslotAlternateBase ..< self.csslotAlternateLimit) {
             guard let blob = self.component(slot, of: superblob) else {
@@ -256,7 +256,7 @@ extension MachO {
      The blob a superblob holds in `slot`, like `SuperBlob::find`: the first index entry of that type, nil when there is
      none or its offset is zero. `signingData` has checked that the blob lies inside the superblob.
      */
-    private static func component(_ slot: UInt32, of superblob: Data) -> Data? {
+    static func component(_ slot: UInt32, of superblob: Data) -> Data? {
         for entry in 0 ..< Int(superblob.bigEndianUInt32(at: 8)) where superblob.bigEndianUInt32(at: 12 + 8 * entry) == slot {
             let offset = Int(superblob.bigEndianUInt32(at: 12 + 8 * entry + 4))
             return offset == 0 ? nil : superblob.bytes(in: offset ..< offset + Int(superblob.bigEndianUInt32(at: offset + 4)))
@@ -272,7 +272,7 @@ extension MachO {
      the directory declares its pages, and no further than the last slot still to check. A scattered directory, whose
      slots map to the pages its scatter vector places, is not checked.
      */
-    private func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [Bool] {
+    func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [(valid: Bool, failedSlot: Int?)] {
         var validators = directories.map { SlotValidator($0, length: self.length) }
         let limit = validators.filter(\.checking).map(\.limit).max() ?? 0
         do {
@@ -285,7 +285,7 @@ extension MachO {
                 }
             }
         } catch is SlotValidator.Done {}
-        return validators.map(\.valid)
+        return validators.map { ($0.valid, $0.failedSlot) }
     }
 
     // MARK: - Ad-hoc synthesis
@@ -346,9 +346,9 @@ extension MachO {
     /**
      log2 of the page size `codesign` signs with, like `MachORep::pageSize`: 16 KiB for the arm64 family, except
      4 KiB on tvOS, iOS before 16 and watchOS before 9 (the declared minimum OS, not the SDK); 4 KiB for every other
-     architecture.
+     architecture. The page the kernel maps the image on too, which `MachOVerifier` holds the segments to.
      */
-    private func pageSizeLog() throws -> UInt8 {
+    func pageSizeLog() throws -> UInt8 {
         guard [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(self.cpuType) else {
             return 12
         }
@@ -462,7 +462,7 @@ extension MachO {
     private static let csslotAlternateLimit: UInt32 = 0x1005
 
     /// Filetypes codesign signs as Mach-O code; it signs any other one as a generic file (`Format=generic`).
-    private static let codeFiletypes = [
+    static let codeFiletypes = [
         MH_EXECUTE,
         MH_PRELOAD,
         MH_DYLIB,
@@ -474,7 +474,7 @@ extension MachO {
 
 // MARK: -
 
-private struct EmbeddedCodeDirectory {
+struct EmbeddedCodeDirectory {
     let data: Data
     let hashType: HashType
     /// Where code slot 0 starts.
@@ -485,6 +485,11 @@ private struct EmbeddedCodeDirectory {
     let pageSize: UInt64
     /// Whether a scatter vector places the pages its code slots cover.
     let scattered: Bool
+    /// The directory's flags: `CS_ADHOC` among them.
+    let flags: UInt32
+    let nSpecialSlots: Int
+    /// log2 of the page size, zero for a directory that is not paged.
+    let pageSizeLog: UInt8
 
     /**
      A code directory Security accepts, with the checks `SecStaticCode::loadCodeDirectories` makes: its header holds
@@ -589,6 +594,18 @@ private struct EmbeddedCodeDirectory {
         self.codeLimit = codeLimit
         self.pageSize = pageSizeLog != 0 ? 1 &<< UInt64(pageSizeLog) : codeLimit
         self.scattered = scatterOffset != 0
+        self.flags = blob.bigEndianUInt32(at: 12)
+        self.nSpecialSlots = nSpecialSlots
+        self.pageSizeLog = pageSizeLog
+    }
+
+    /// Special slot `-slot`'s hash, nil when the directory has fewer special slots than that.
+    func specialSlot(_ slot: Int) -> Data? {
+        guard slot >= 1, slot <= self.nSpecialSlots else {
+            return nil
+        }
+        let size = self.hashType.slotSize
+        return self.data.bytes(in: self.hashOffset - slot * size ..< self.hashOffset - (slot - 1) * size)
     }
 
     /**
@@ -621,6 +638,8 @@ private struct SlotValidator {
     private var offset = 0
     private var filled = 0
     private(set) var valid: Bool
+    /// The first code slot the code did not hash to, when one did not.
+    private(set) var failedSlot: Int?
 
     init(_ directory: EmbeddedCodeDirectory, length: Int) {
         let valid = directory.codeLimit <= UInt64(length)
@@ -648,6 +667,9 @@ private struct SlotValidator {
             self.filled += count
             if self.filled == page {
                 self.valid = self.directory.validateSlot(Data(self.hasher.finalize()), self.slot)
+                if !self.valid {
+                    self.failedSlot = self.slot
+                }
                 self.hasher = self.directory.hashType.hasher()
                 self.slot += 1
                 self.filled = 0
@@ -765,7 +787,7 @@ private struct CodeDirectoryBuilder {
  `CodeDirectory::hashFor` knows them: the directory's slots are hashes of that type, and its cdhash is the directory
  digested under it.
  */
-private enum HashType: UInt8 {
+enum HashType: UInt8 {
     case sha1 = 1
     case sha256 = 2
     case sha256Truncated = 3

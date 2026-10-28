@@ -63,7 +63,12 @@ struct MachO {
     let cpuSubtype: cpu_subtype_t
 
     let filetype: UInt32
+    /// The count the header declares, which the kernel and dyld walk, where Security and this parser walk the table.
+    let ncmds: Int
     let sizeofcmds: Int
+    let flags: UInt32
+    /// The 64-bit header's last field, which no loader reads; zero in a 32-bit header.
+    let reserved: UInt32
     /// The most bytes one read takes for a header and its load commands (4 KiB), which hold both for most images.
     static let headSize = 4096
     let loadCommands: [LoadCommand]
@@ -100,7 +105,10 @@ struct MachO {
         self.cpuType = swapped(header.cputype)
         self.cpuSubtype = swapped(header.cpusubtype)
         self.filetype = swapped(header.filetype)
+        self.ncmds = Int(swapped(header.ncmds))
         self.sizeofcmds = Int(swapped(header.sizeofcmds))
+        self.flags = swapped(header.flags)
+        self.reserved = layout.is64 ? swapped(head.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: MemoryLayout<mach_header>.size, as: UInt32.self) }) : 0
 
         // The header and the load commands in one buffer, as `MachO::MachO` reads them, when the image holds them.
         let end = layout.headerSize + self.sizeofcmds
@@ -203,20 +211,22 @@ struct MachO {
     }
 
     /**
-     The platform and minimum OS version the slice declares, like `MachOBase::version`: the first `LC_BUILD_VERSION`
-     (even one naming platform 0), else the first `LC_VERSION_MIN_*`. Nil when it declares neither, and throws when the
-     command it reads is too short for its structure. `minOS` is encoded like the load commands: X.Y.Z as `0xXXXXYYZZ`.
+     The platform, minimum OS version and SDK the slice declares, like `MachOBase::version`: the first
+     `LC_BUILD_VERSION` (even one naming platform 0), else the first `LC_VERSION_MIN_*`. Nil when it declares neither,
+     and throws when the command it reads is too short for its structure. `minOS` and `sdk` are encoded like the load
+     commands: X.Y.Z as `0xXXXXYYZZ`.
      */
-    func version() throws -> (platform: Int32, minOS: UInt32)? {
+    func version() throws -> (platform: Int32, minOS: UInt32, sdk: UInt32)? {
         if let command = self.findCommand(UInt32(LC_BUILD_VERSION)) {
             let build = try command.load(build_version_command.self)
-            return (Int32(bitPattern: self.sw(build.platform)), self.sw(build.minos))
+            return (Int32(bitPattern: self.sw(build.platform)), self.sw(build.minos), self.sw(build.sdk))
         }
 
         let platforms = [LC_VERSION_MIN_MACOSX: PLATFORM_MACOS, LC_VERSION_MIN_IPHONEOS: PLATFORM_IOS, LC_VERSION_MIN_TVOS: PLATFORM_TVOS, LC_VERSION_MIN_WATCHOS: PLATFORM_WATCHOS]
         for command in self.loadCommands {
             if let platform = platforms[Int32(bitPattern: command.cmd)] {
-                return try (platform, self.sw(command.load(version_min_command.self).version))
+                let versionMin = try command.load(version_min_command.self)
+                return (platform, self.sw(versionMin.version), self.sw(versionMin.sdk))
             }
         }
         return nil
@@ -299,52 +309,61 @@ struct MachO {
         return end
     }
 
+#endif
+
+    /// A range of the file a load command references, named as dyld's `isValidLinkeditLayout` names its blobs.
+    struct FileRange {
+        let name: String
+        let offset: UInt64
+        let size: UInt64
+    }
+
     /**
-     The file ranges a load command references: none for a command whose data is inline, nil for one too short for its
-     structure or that might reference bytes not modeled here.
+     The file ranges a load command references, each named: none for a command whose data is inline, nil for one too
+     short for its structure or that might reference bytes not modeled here.
      */
-    private func fileRanges(of command: LoadCommand) -> [(offset: UInt64, size: UInt64)]? {
+    func fileRanges(of command: LoadCommand) -> [FileRange]? {
         // `count` entries of `stride` bytes at `offset`: a 32-bit count times a structure size fits in 64 bits.
-        func range(_ offset: some FixedWidthInteger, _ count: some FixedWidthInteger, stride: Int = 1) -> (offset: UInt64, size: UInt64) {
-            (UInt64(self.sw(offset)), UInt64(self.sw(count)) * UInt64(stride))
+        func range(_ name: String, _ offset: some FixedWidthInteger, _ count: some FixedWidthInteger, stride: Int = 1) -> FileRange {
+            FileRange(name: name, offset: UInt64(self.sw(offset)), size: UInt64(self.sw(count)) * UInt64(stride))
         }
 
         switch command.cmd {
         case UInt32(LC_SEGMENT):
-            return command.payload(as: segment_command.self).map { [range($0.fileoff, $0.filesize)] }
+            return command.payload(as: segment_command.self).map { [range("segment \(command.segmentName)", $0.fileoff, $0.filesize)] }
         case UInt32(LC_SEGMENT_64):
-            return command.payload(as: segment_command_64.self).map { [range($0.fileoff, $0.filesize)] }
+            return command.payload(as: segment_command_64.self).map { [range("segment \(command.segmentName)", $0.fileoff, $0.filesize)] }
         case UInt32(LC_SYMTAB):
             let entry = self.is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size
-            return command.payload(as: symtab_command.self).map { [range($0.symoff, $0.nsyms, stride: entry), range($0.stroff, $0.strsize)] }
+            return command.payload(as: symtab_command.self).map { [range("symbol table", $0.symoff, $0.nsyms, stride: entry), range("string table", $0.stroff, $0.strsize)] }
         case UInt32(LC_DYSYMTAB):
             let module = self.is64 ? MemoryLayout<dylib_module_64>.size : MemoryLayout<dylib_module>.size
             return command.payload(as: dysymtab_command.self).map { [
-                range($0.tocoff, $0.ntoc, stride: MemoryLayout<dylib_table_of_contents>.size),
-                range($0.modtaboff, $0.nmodtab, stride: module),
-                range($0.extrefsymoff, $0.nextrefsyms, stride: MemoryLayout<dylib_reference>.size),
-                range($0.indirectsymoff, $0.nindirectsyms, stride: MemoryLayout<UInt32>.size),
-                range($0.extreloff, $0.nextrel, stride: MemoryLayout<relocation_info>.size),
-                range($0.locreloff, $0.nlocrel, stride: MemoryLayout<relocation_info>.size),
+                range("table of contents", $0.tocoff, $0.ntoc, stride: MemoryLayout<dylib_table_of_contents>.size),
+                range("module table", $0.modtaboff, $0.nmodtab, stride: module),
+                range("referenced symbol table", $0.extrefsymoff, $0.nextrefsyms, stride: MemoryLayout<dylib_reference>.size),
+                range("indirect symbol table", $0.indirectsymoff, $0.nindirectsyms, stride: MemoryLayout<UInt32>.size),
+                range("external relocations", $0.extreloff, $0.nextrel, stride: MemoryLayout<relocation_info>.size),
+                range("local relocations", $0.locreloff, $0.nlocrel, stride: MemoryLayout<relocation_info>.size),
             ] }
         case UInt32(LC_DYLD_INFO), UInt32(LC_DYLD_INFO_ONLY):
             return command.payload(as: dyld_info_command.self).map { [
-                range($0.rebase_off, $0.rebase_size),
-                range($0.bind_off, $0.bind_size),
-                range($0.weak_bind_off, $0.weak_bind_size),
-                range($0.lazy_bind_off, $0.lazy_bind_size),
-                range($0.export_off, $0.export_size),
+                range("rebase opcodes", $0.rebase_off, $0.rebase_size),
+                range("bind opcodes", $0.bind_off, $0.bind_size),
+                range("weak bind opcodes", $0.weak_bind_off, $0.weak_bind_size),
+                range("lazy bind opcodes", $0.lazy_bind_off, $0.lazy_bind_size),
+                range("exports trie", $0.export_off, $0.export_size),
             ] }
         case UInt32(LC_CODE_SIGNATURE), UInt32(LC_SEGMENT_SPLIT_INFO), UInt32(LC_FUNCTION_STARTS), UInt32(LC_DATA_IN_CODE),
              UInt32(LC_DYLIB_CODE_SIGN_DRS), UInt32(LC_LINKER_OPTIMIZATION_HINT), UInt32(LC_DYLD_EXPORTS_TRIE),
              UInt32(LC_DYLD_CHAINED_FIXUPS), UInt32(LC_ATOM_INFO), UInt32(LC_FUNCTION_VARIANTS),
              UInt32(LC_FUNCTION_VARIANT_FIXUPS), UInt32(LC_LAZY_LOAD_DYLIB_INFO):
-            return command.payload(as: linkedit_data_command.self).map { [range($0.dataoff, $0.datasize)] }
+            return command.payload(as: linkedit_data_command.self).map { [range(command.name, $0.dataoff, $0.datasize)] }
         case UInt32(LC_ENCRYPTION_INFO), UInt32(LC_ENCRYPTION_INFO_64):
             // Both layouts place cryptoff and cryptsize at the same offsets.
-            return command.payload(as: encryption_info_command.self).map { [range($0.cryptoff, $0.cryptsize)] }
+            return command.payload(as: encryption_info_command.self).map { [range("encrypted range", $0.cryptoff, $0.cryptsize)] }
         case UInt32(LC_NOTE):
-            return command.payload(as: note_command.self).map { [range($0.offset, $0.size)] }
+            return command.payload(as: note_command.self).map { [range("note", $0.offset, $0.size)] }
         default:
             return Self.inlineCommands.contains(command.cmd) ? [] : nil
         }
@@ -354,7 +373,7 @@ struct MachO {
      The load commands whose data is inline, or lies in a segment measured anyway. Commands that reference data not
      modeled here, like `LC_TWOLEVEL_HINTS`, `LC_SYMSEG` or `LC_FILESET_ENTRY`, are left out so the slice stays whole.
      */
-    private static let inlineCommands = Set([
+    static let inlineCommands = Set([
         LC_THREAD,
         LC_UNIXTHREAD,
         LC_LOAD_DYLIB,
@@ -387,7 +406,6 @@ struct MachO {
         LC_RPATH,
         LC_MAIN,
     ])
-#endif
 
     // MARK: - Filetype
 
@@ -532,4 +550,91 @@ extension MachO.LoadCommand {
     func isSegment(named name: String) -> Bool {
         [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(self.cmd) && MachO.field(self.data.dropFirst(8).prefix(16), is: name)
     }
+
+    /// A segment command's name, up to its first NUL.
+    var segmentName: String {
+        String(decoding: self.data.dropFirst(8).prefix(16).prefix { $0 != 0 }, as: UTF8.self)
+    }
+
+    /// The `lc_str` a dylib, dylinker, rpath or environment command carries, its offset byte-swapped when `swap`:
+    /// nil unless it starts past the command's fixed fields and ends inside the command, as dyld requires ("string
+    /// start offset too small", "string extends beyond end of load command").
+    func string(swap: Bool) -> String? {
+        guard self.data.count >= 12 else {
+            return nil
+        }
+        let raw = self.data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) }
+        let offset = Int(swap ? raw.byteSwapped : raw)
+        guard offset >= 12, offset < self.data.count, let end = self.data.dropFirst(offset).firstIndex(of: 0) else {
+            return nil
+        }
+        return String(decoding: self.data.dropFirst(offset).prefix(upTo: end), as: UTF8.self)
+    }
+
+    /// The command's name, as `<mach-o/loader.h>` spells it, or its number.
+    var name: String {
+        Self.name(self.cmd)
+    }
+
+    static func name(_ cmd: UInt32) -> String {
+        self.names[cmd] ?? "load command \(cmd.hex)"
+    }
+
+    private static let names: [UInt32: String] = Dictionary(uniqueKeysWithValues: [
+        (LC_SEGMENT, "LC_SEGMENT"),
+        (LC_SYMTAB, "LC_SYMTAB"),
+        (LC_SYMSEG, "LC_SYMSEG"),
+        (LC_THREAD, "LC_THREAD"),
+        (LC_UNIXTHREAD, "LC_UNIXTHREAD"),
+        (LC_DYSYMTAB, "LC_DYSYMTAB"),
+        (LC_LOAD_DYLIB, "LC_LOAD_DYLIB"),
+        (LC_ID_DYLIB, "LC_ID_DYLIB"),
+        (LC_LOAD_DYLINKER, "LC_LOAD_DYLINKER"),
+        (LC_ID_DYLINKER, "LC_ID_DYLINKER"),
+        (LC_PREBOUND_DYLIB, "LC_PREBOUND_DYLIB"),
+        (LC_ROUTINES, "LC_ROUTINES"),
+        (LC_SUB_FRAMEWORK, "LC_SUB_FRAMEWORK"),
+        (LC_SUB_UMBRELLA, "LC_SUB_UMBRELLA"),
+        (LC_SUB_CLIENT, "LC_SUB_CLIENT"),
+        (LC_SUB_LIBRARY, "LC_SUB_LIBRARY"),
+        (LC_TWOLEVEL_HINTS, "LC_TWOLEVEL_HINTS"),
+        (LC_PREBIND_CKSUM, "LC_PREBIND_CKSUM"),
+        (LC_SEGMENT_64, "LC_SEGMENT_64"),
+        (LC_ROUTINES_64, "LC_ROUTINES_64"),
+        (LC_UUID, "LC_UUID"),
+        (LC_CODE_SIGNATURE, "LC_CODE_SIGNATURE"),
+        (LC_SEGMENT_SPLIT_INFO, "LC_SEGMENT_SPLIT_INFO"),
+        (LC_LAZY_LOAD_DYLIB, "LC_LAZY_LOAD_DYLIB"),
+        (LC_ENCRYPTION_INFO, "LC_ENCRYPTION_INFO"),
+        (LC_DYLD_INFO, "LC_DYLD_INFO"),
+        (LC_VERSION_MIN_MACOSX, "LC_VERSION_MIN_MACOSX"),
+        (LC_VERSION_MIN_IPHONEOS, "LC_VERSION_MIN_IPHONEOS"),
+        (LC_FUNCTION_STARTS, "LC_FUNCTION_STARTS"),
+        (LC_DYLD_ENVIRONMENT, "LC_DYLD_ENVIRONMENT"),
+        (LC_DATA_IN_CODE, "LC_DATA_IN_CODE"),
+        (LC_SOURCE_VERSION, "LC_SOURCE_VERSION"),
+        (LC_DYLIB_CODE_SIGN_DRS, "LC_DYLIB_CODE_SIGN_DRS"),
+        (LC_ENCRYPTION_INFO_64, "LC_ENCRYPTION_INFO_64"),
+        (LC_LINKER_OPTION, "LC_LINKER_OPTION"),
+        (LC_LINKER_OPTIMIZATION_HINT, "LC_LINKER_OPTIMIZATION_HINT"),
+        (LC_VERSION_MIN_TVOS, "LC_VERSION_MIN_TVOS"),
+        (LC_VERSION_MIN_WATCHOS, "LC_VERSION_MIN_WATCHOS"),
+        (LC_NOTE, "LC_NOTE"),
+        (LC_BUILD_VERSION, "LC_BUILD_VERSION"),
+        (LC_ATOM_INFO, "LC_ATOM_INFO"),
+        (LC_FUNCTION_VARIANTS, "LC_FUNCTION_VARIANTS"),
+        (LC_FUNCTION_VARIANT_FIXUPS, "LC_FUNCTION_VARIANT_FIXUPS"),
+        (LC_TARGET_TRIPLE, "LC_TARGET_TRIPLE"),
+        (LC_LAZY_LOAD_DYLIB_INFO, "LC_LAZY_LOAD_DYLIB_INFO"),
+    ].map { (UInt32(bitPattern: $0.0), $0.1) } + [
+        (LC_LOAD_WEAK_DYLIB, "LC_LOAD_WEAK_DYLIB"),
+        (LC_RPATH, "LC_RPATH"),
+        (LC_REEXPORT_DYLIB, "LC_REEXPORT_DYLIB"),
+        (LC_DYLD_INFO_ONLY, "LC_DYLD_INFO_ONLY"),
+        (LC_LOAD_UPWARD_DYLIB, "LC_LOAD_UPWARD_DYLIB"),
+        (LC_MAIN, "LC_MAIN"),
+        (LC_DYLD_EXPORTS_TRIE, "LC_DYLD_EXPORTS_TRIE"),
+        (LC_DYLD_CHAINED_FIXUPS, "LC_DYLD_CHAINED_FIXUPS"),
+        (LC_FILESET_ENTRY, "LC_FILESET_ENTRY"),
+    ])
 }

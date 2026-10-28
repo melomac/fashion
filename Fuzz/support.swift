@@ -55,9 +55,10 @@ enum Fuzz {
         } catch {}
     }
 
-    /// Every accessor the scan reads from a `MachO`, and the logical end of each ending.
+    /// Every accessor the scan reads from a `MachO`, the logical end of each ending, and what `verify` names.
     static func exercise(_ image: MachO) {
         _ = image.logicalEnd()
+        _ = MachOVerifier(image, in: image.file).anomalies()
         _ = image.filetypeName
         _ = try? image.findCodeSignature()
         _ = try? image.version()
