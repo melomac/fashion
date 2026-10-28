@@ -21,12 +21,12 @@ logs=$build/logs
 jobs=${FUZZ_JOBS:-2}
 
 # The harnesses: each is Fuzz/<name>.swift, with an LLVMFuzzerTestOneInput, and fuzzes corpus/<name>.
-harnesses="macho cdhash xar symhash diff bytehash unpack decompress"
+harnesses="macho cdhash xar symhash diff bytehash unpack decompress verify signer"
 
 # The --exact endings a harness is built with (see Package.swift): both for those that read a Mach-O's logical end.
 endings() {
     case $1 in
-        macho | cdhash | unpack) echo "strict segments" ;;
+        macho | cdhash | unpack | verify) echo "strict segments" ;;
         *) echo strict ;;
     esac
 }
@@ -45,10 +45,10 @@ binaries() {
     done
 }
 
-# The longest input a harness takes: a signed /bin/ls slice, a XAR, two digests.
+# The longest input a harness takes: a signed /bin/ls slice, a XAR, two digests, a superblob.
 max_len() {
     case $1 in
-        macho | cdhash | symhash | unpack) echo 262144 ;;
+        macho | cdhash | symhash | unpack | verify) echo 262144 ;;
         diff) echo 512 ;;
         *) echo 65536 ;;
     esac
@@ -209,7 +209,7 @@ seed() {
     for file in "$build"/fixtures/*; do
         case $(od -An -tx1 -N4 "$file" | tr -d ' ') in
             cffaedfe | feedfacf | cefaedfe | feedface | cafebabe | cafebabf)
-                for harness in macho cdhash symhash unpack; do
+                for harness in macho cdhash symhash unpack verify; do
                     cp "$file" "$corpus/$harness/"
                 done
                 ;;
@@ -242,6 +242,56 @@ while at + 12 <= len(data):
     block = bytes([method]) + min(size, 1 << 20).to_bytes(3, "little") + bytes([filter, cto]) + data[at + 12 : at + 12 + packed]
     open(f"{out}/{hashlib.sha256(block).hexdigest()}", "wb").write(block)
     at += 12 + packed
+PYTHON
+    done
+
+    # The embedded signatures of the Mach-O fixtures, each slice's superblob as LC_CODE_SIGNATURE points at it, for
+    # the signer harness: the code directory and the CMS blob that signs it, together.
+    local image
+    for image in "$corpus"/verify/*; do
+        xcrun python3 -I - "$image" "$corpus/signer" <<'PYTHON'
+import hashlib, struct, sys
+data, out = open(sys.argv[1], "rb").read(), sys.argv[2]
+
+def superblob(base, end):
+    """The superblob of the image at base, cut to the length its header declares, when it has one that fits."""
+    if base + 32 > end:
+        return
+    magic = struct.unpack_from(">I", data, base)[0]
+    little, bits = {0xCFFAEDFE: ("<", 64), 0xCEFAEDFE: ("<", 32), 0xFEEDFACF: (">", 64), 0xFEEDFACE: (">", 32)}.get(magic, (None, 0))
+    if not little:
+        return
+    ncmds = struct.unpack_from(little + "I", data, base + 16)[0]
+    at = base + (32 if bits == 64 else 28)
+    for _ in range(ncmds):
+        if at + 8 > end:
+            return
+        cmd, cmdsize = struct.unpack_from(little + "II", data, at)
+        if cmdsize < 8 or at + cmdsize > end:
+            return
+        if cmd == 0x1D and cmdsize >= 16:  # LC_CODE_SIGNATURE
+            dataoff, datasize = struct.unpack_from(little + "II", data, at + 8)
+            blob = data[base + dataoff : base + dataoff + datasize]
+            if len(blob) >= 12 and blob[:4] == b"\xfa\xde\x0c\xc0":
+                blob = blob[: struct.unpack_from(">I", blob, 4)[0]]
+                open(f"{out}/{hashlib.sha256(blob).hexdigest()}", "wb").write(blob)
+            return
+        at += cmdsize
+
+if len(data) < 8:
+    sys.exit()
+if data[:4] in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+    wide = data[:4] == b"\xca\xfe\xba\xbf"
+    count = struct.unpack_from(">I", data, 4)[0]
+    for index in range(min(count, 64)):
+        entry = 8 + index * (32 if wide else 20)
+        if entry + (32 if wide else 20) > len(data):
+            break
+        offset, size = struct.unpack_from(">QQ" if wide else ">II", data, entry + 8)
+        if offset + size <= len(data):
+            superblob(offset, offset + size)
+else:
+    superblob(0, len(data))
 PYTHON
     done
 

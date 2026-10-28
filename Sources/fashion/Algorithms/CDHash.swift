@@ -199,6 +199,17 @@ extension MachO {
         }
 
         let superblob = Int(length) <= probe.count ? probe.prefix(Int(length)) : try self.dataAt(offset, count: Int(length))
+        try Self.checkIndex(of: superblob)
+        return superblob
+    }
+
+    /**
+     `EmbeddedSignatureBlob::specific`'s check of a superblob's index, `superblob` being its magic and length's worth
+     of bytes: the index fits, and every blob it points at lies inside, header included. Throws otherwise. The fuzzer's
+     `signer` harness makes the same check of its input.
+     */
+    static func checkIndex(of superblob: Data) throws {
+        let length = UInt32(superblob.count)
         let count = superblob.bigEndianUInt32(at: 8)
         let indexEnd = 12 + 8 * Int(count)
         guard indexEnd <= superblob.count else {
@@ -225,8 +236,6 @@ extension MachO {
                 throw CDHashError.invalidCodeSignatureBlobRange(offset: blobOffset, size: blobLength, signatureSize: superblob.count)
             }
         }
-
-        return superblob
     }
 
     /**

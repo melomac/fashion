@@ -4,21 +4,24 @@ Every parser in fashion takes attacker-controlled bytes: a scan walks whatever t
 here feed libFuzzer's inputs through those parsers under AddressSanitizer, one entry point per surface, each an
 `LLVMFuzzerTestOneInput` in its own file:
 
-| Harness    | What it fuzzes                                                                                          |
-| ---------- | ------------------------------------------------------------------------------------------------------- |
-| `macho`    | `Universal.open`, the fat table, `MachO`'s load commands and every accessor the scan reads, both logical ends |
-| `cdhash`   | `CDHash.hash`: the superblob, the code directories, the slot validator, ad-hoc synthesis, whole and `--exact` |
-| `xar`      | `XARParser.hashToc`: the header, the table of contents as stored and inflated, under SHA-1, ssdeep and TLSH |
-| `symhash`  | `SymHash.compute`: the symbol and string tables, the names windowed out of them, sorted and in table order |
-| `diff`     | the digests `--match` is given: their shape, which names their algorithm, their typing into `Targets`, `TLSHBridge.diff` and `SSDeepBridge.compare` |
-| `bytehash` | ssdeep's, TLSH's and git's hashers over the bytes, streamed from a file and whole in memory              |
-| `unpack`   | `MachOEditor.edit`: UPX's pack header, with its marker and without, UCL's and LZMA's decoders, the unfilters, signature removal, the universal rebuild; then the edit read as the scan reads it, walked, cdhashed and symhashed across its pieces |
-| `decompress` | one block of UPX's packed data, fed straight to `UCLBridge.decompress` and `LZMABridge.decompress` by its method, with the slack UCL's decoders may read past a block, up to 1 MiB out, then `PackMach.unfilter` over what came out, where `unpack` reaches them behind a whole packed Mach-O |
+| Harness      | What it fuzzes                                                                                                                                                                                                                                                                                                                            |
+|--------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `macho`      | `Universal.open`, the fat table, `MachO`'s load commands and every accessor the scan reads, both logical ends                                                                                                                                                                                                                             |
+| `cdhash`     | `CDHash.hash`: the superblob, the code directories, the slot validator, ad-hoc synthesis, whole and `--exact`                                                                                                                                                                                                                             |
+| `xar`        | `XARParser.hashToc`: the header, the table of contents as stored and inflated, under SHA-1, ssdeep and TLSH                                                                                                                                                                                                                               |
+| `symhash`    | `SymHash.compute`: the symbol and string tables, the names windowed out of them, sorted and in table order                                                                                                                                                                                                                                |
+| `diff`       | the digests `--match` is given: their shape, which names their algorithm, their typing into `Targets`, `TLSHBridge.diff` and `SSDeepBridge.compare`                                                                                                                                                                                       |
+| `bytehash`   | ssdeep's, TLSH's and git's hashers over the bytes, streamed from a file and whole in memory                                                                                                                                                                                                                                               |
+| `unpack`     | `MachOEditor.edit`: UPX's pack header, with its marker and without, UCL's and LZMA's decoders, the unfilters, signature removal, the universal rebuild; then the edit read as the scan reads it, walked, cdhashed and symhashed across its pieces                                                                                         |
+| `decompress` | one block of UPX's packed data, fed straight to `UCLBridge.decompress` and `LZMABridge.decompress` by its method, with the slack UCL's decoders may read past a block, up to 1 MiB out, then `PackMach.unfilter` over what came out, where `unpack` reaches them behind a whole packed Mach-O                                             |
+| `verify`     | `fashion verify` over the input: `MachOVerifier` over the universal file, each slice against its table entry and each image, every rule, the padding and the signature's pages read, the superblob's blobs against their slots, `Signer` over the CMS blob through Security's decoder and trustd, and what the parser or Security refuses |
+| `signer`     | `Signer` over a superblob alone, as `LC_CODE_SIGNATURE` points at one: checked as `signingData` checks it, its directories loaded, the CMS blob verified over the primary one and its chain built and read, the certificates rewritten by the fuzzer where the CMS signature does not cover them                                          |
 
 An input reaches a parser as a `File`, the way a test fixture does: written over one scratch file per process and
-opened from there (`support.swift`); `decompress` takes its bytes as they are, a block's `b_info` then its data. `macho`, `cdhash` and `unpack` are built with both `--exact` endings (see
-Package.swift): `fuzz-macho`, `fuzz-cdhash` and `fuzz-unpack` with `SECURITY_STRICT_VALIDATION`, the `-segments` ones
-without.
+opened from there (`support.swift`); `decompress` and `signer` take their bytes as they are, a block's `b_info` then
+its data, a superblob. `macho`, `cdhash`, `unpack` and `verify` are built with both `--exact` endings (see
+Package.swift): `fuzz-macho`, `fuzz-cdhash`, `fuzz-unpack` and `fuzz-verify` with `SECURITY_STRICT_VALIDATION`, the
+`-segments` ones without.
 
 ## Running
 
@@ -38,8 +41,10 @@ oversubscribed machine a slow unit passes for a hung one; the script warns past 
 
 The corpora are seeded with every fixture the tests build (hand-made, compiled or codesigned: `FASHION_FIXTURES` in
 TestHelpers.swift keeps them while `swift test` runs), with `/bin/ls` whole and by slice, with a XAR of this directory,
-and with TLSH and ssdeep digests of real files, and `decompress` with every block of the packed images, cut out by
-`b_info`. The packed images among them come from the `upx` installed; one packed
+and with TLSH and ssdeep digests of real files, `decompress` with every block of the packed images, cut out by
+`b_info`, and `signer` with every embedded signature of the Mach-O fixtures, cut out by `LC_CODE_SIGNATURE`: Apple's
+own, codesign's ad-hoc ones, and the self-signed, altered and ad-hoc-with-a-CMS-blob ones the verifier tests make.
+The files those tests craft, one condition each, are seeds too. The packed images among them come from the `upx` installed; one packed
 with filter 0x53 for arm64 needs a UPX newer than 5.2.1, which packs with 0x52. The `.dict` files give libFuzzer the
 magics, load commands, segment names and code-signature versions it would otherwise have to guess, and `unpack.dict`
 UPX's: its marker, versions, formats, methods, filters and LZMA's properties.

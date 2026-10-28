@@ -19,15 +19,20 @@ enum Fuzz {
         return fd
     }()
 
-    /// The input as a file, nil when the scratch file cannot hold it.
-    static func file(_ start: UnsafeRawPointer, _ count: Int) -> File? {
+    /// The input written over the scratch file, as its path; nil when the scratch file cannot hold it.
+    static func written(_ start: UnsafeRawPointer, _ count: Int) -> String? {
         guard
             pwrite(self.scratch, start, count, 0) == count,
             ftruncate(self.scratch, off_t(count)) == 0
         else {
             return nil
         }
-        return try? File(path: self.path)
+        return self.path
+    }
+
+    /// The input as a file, nil when the scratch file cannot hold it.
+    static func file(_ start: UnsafeRawPointer, _ count: Int) -> File? {
+        self.written(start, count).flatMap { try? File(path: $0) }
     }
 
     /// The input in memory.
@@ -55,10 +60,10 @@ enum Fuzz {
         } catch {}
     }
 
-    /// Every accessor the scan reads from a `MachO`, the logical end of each ending, and what `verify` names.
+    /// Every accessor the scan reads from a `MachO`, and the logical end of each ending. What `verify` names of the
+    /// image is the `verify` harness's.
     static func exercise(_ image: MachO) {
         _ = image.logicalEnd()
-        _ = MachOVerifier(image, in: image.file).anomalies()
         _ = image.filetypeName
         _ = try? image.findCodeSignature()
         _ = try? image.version()

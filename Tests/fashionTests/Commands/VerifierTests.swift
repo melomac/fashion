@@ -25,8 +25,9 @@ final class VerifierTests: XCTestCase {
         return url
     }
 
-    /// What `verify` says of `path`, and the errors it counted.
+    /// What `verify` says of `path`, and the errors it counted. The file seeds the fuzzer's corpora.
     private func verify(_ path: String) -> (lines: [String], errors: Int) {
+        saveFixture(path: path)
         let reporter = Reporter(console: Console())
         return (Verify.lines(for: path, reporter: reporter).map(\.text), reporter.errorCount)
     }

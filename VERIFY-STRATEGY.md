@@ -312,9 +312,13 @@ x86_64 and i386); five Ableton Live libraries whose Developer ID signatures are 
 Gatekeeper's `legacy` rule runs without a ticket; and ten ad-hoc slices of jtool2 and Geekbench entitled to
 `platform-application` and `com.apple.private.*`.
 
-**The fuzzer.** The Mach-O harness runs the verifier's rules on every input (`Fuzz/support.swift`). It found one trap
-in an older line, `Int32(self.filetype)` on a filetype past `Int32`, fixed and covered by a test; 2.9 million runs
-over both `--exact` endings found nothing after it.
+**The fuzzer.** Two harnesses of its own (`Fuzz/README.md`): `verify` runs the command's walk over the input as a
+file, every rule, the universal file's and the signer's; `signer` takes a superblob alone, so that the fuzzer's
+rewrites land in the CMS blob and its certificates, which the CMS signature does not cover, and trustd and
+`SecCertificateCopyValues` read them as they come. Their seeds are the Mach-O fixtures of every test, the files the
+verifier tests craft, and the superblobs cut out of them. An earlier run of the rules inside the Mach-O harness found
+one trap in an older line, `Int32(self.filetype)` on a filetype past `Int32`, fixed and covered by a test; 2.9
+million runs over both `--exact` endings found nothing after it.
 
 ### 7.1 The malware corpus
 
