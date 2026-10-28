@@ -44,11 +44,12 @@ extension ArtifactError: LocalizedError {
  signature. `unsign` cuts the bytes off and writes `sample_exact_unsigned`; `unpack` cuts them off and unpacks. A
  file cut short of its last page is padded to be read, when an edit comes of it.
 
- An artifact already in place, byte for byte, is left as it is and only noted in the unified log, so a second run
- over a tree is as quiet on the terminal as the first. A different file under an artifact's name is left alone and
- reported, with its size and SHA-256 and the artifact's, unless `write` replaces it; the unified log records that
- too. A symbolic link, or anything that is not a regular file, is never followed nor replaced: it is reported and
- left alone, a safety rule for analysis.
+ An artifact written is noted in the unified log with its size and SHA-256, a record of what a run left behind. One
+ already in place, byte for byte, is left as it is and only noted there, so a second run over a tree is as quiet on
+ the terminal as the first. A different file under an artifact's name is left alone and reported, with its size and
+ SHA-256 and the artifact's, unless `write` replaces it; the unified log records that too. A symbolic link, or
+ anything that is not a regular file, is never followed nor replaced: it is reported and left alone, a safety rule
+ for analysis.
  */
 struct ArtifactWriter {
     let exact: Bool
@@ -89,7 +90,8 @@ struct ArtifactWriter {
             }
             do {
                 switch try Self.write(bytes, to: artifact, overwrite: self.write) {
-                case .written:
+                case let .written(identity):
+                    logger.info("\(artifact, privacy: .public): written, \(identity.description, privacy: .public)")
                     return [Line(text: OutputFormatter.formatPath(artifact))]
                 case let .identical(identity):
                     logger.info("\(artifact, privacy: .public): already in place, \(identity.description, privacy: .public)")
@@ -179,8 +181,8 @@ struct ArtifactWriter {
 
     /// What became of an artifact's path.
     private enum Outcome {
-        /// A new file.
-        case written
+        /// A new file: what it is.
+        case written(Identity)
         /// The same bytes were there already: what they are.
         case identical(Identity)
         /// Another file was there and was replaced: what it was, and what it is now.
@@ -189,7 +191,8 @@ struct ArtifactWriter {
         case differs(before: Identity, after: Identity)
     }
 
-    /// A file's size and SHA-256, as the overwrite line names what was replaced and by what: "10 bytes, sha256 c1…".
+    /// A file's size and SHA-256, as the log names an artifact written, and the overwrite line what was replaced and by
+    /// what: "10 bytes, sha256 c1…".
     private struct Identity: CustomStringConvertible {
         let size: Int
         let digest: String
@@ -241,7 +244,7 @@ struct ArtifactWriter {
         do {
             let fd = try FileDescriptor.open(path, .writeOnly, options: [.create, .exclusiveCreate], permissions: Self.permissions)
             try Self.copy(file, to: fd, at: path)
-            return .written
+            return try .written(Self.identity(of: file))
         } catch let error as Errno where error == .fileExists {
             // What is there decides.
         }
