@@ -19,23 +19,8 @@ struct Thinner: ParsableCommand {
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(help: "Write an exact Mach-O image, dropping appended bytes.")
-    var exact = false
-
-    @Flag(help: "Write and restore a Mach-O image, removing the code signature.")
-    var unsign = false
-
-    @Flag(help: "Write and restore a UPX-packed Mach-O image, unpacked without UPX.")
-    var unpack = false
-
-    @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
-    var write = false
-
-    @Flag(help: "Log what is odd about each Mach-O, as verify names it, to the unified log.")
-    var verify = false
-
-    @Flag(help: "Keep unpacked data as _decompressed, for further investigation.")
-    var keep = false
+    @OptionGroup(title: "Thin mode")
+    var thin: ThinnerOptions
 
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
@@ -43,6 +28,26 @@ struct Thinner: ParsableCommand {
             throw ExitCode(code)
         }
     }
+}
+
+struct ThinnerOptions: ParsableArguments {
+    @Flag(name: .shortAndLong, help: "Write an exact Mach-O image, dropping appended bytes.")
+    var exact = false
+
+    @Flag(name: [.customShort("i"), .long], help: "Write and restore a Mach-O image, removing the code signature.")
+    var unsign = false
+
+    @Flag(name: [.customShort("p"), .long], help: "Write and restore a UPX-packed Mach-O image, unpacked without UPX.")
+    var unpack = false
+
+    @Flag(name: .shortAndLong, help: "Verify Mach-O files for anomalies")
+    var verify = false
+
+    @Flag(name: .shortAndLong, help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
+    var write = false
+
+    @Flag(name: .shortAndLong, help: "Keep unpacked data as _decompressed, for further investigation.")
+    var keep = false
 }
 
 /**
@@ -81,9 +86,9 @@ extension Thinner {
      or written. `trapSignals` as `Hasher.scan(trapSignals:)`.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public)\(self.unpack ? " unpack" : "", privacy: .public)\(self.keep ? " keep" : "", privacy: .public)\(self.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.thin.exact ? " exact" : "", privacy: .public)\(self.thin.unsign ? " unsign" : "", privacy: .public)\(self.thin.unpack ? " unpack" : "", privacy: .public)\(self.thin.keep ? " keep" : "", privacy: .public)\(self.thin.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, unsign, unpack, write, keep, verify) = (self.exact, self.unsign, self.unpack, self.write, self.keep, self.verify)
+        let (exact, unsign, unpack, write, keep, verify) = (self.thin.exact, self.thin.unsign, self.thin.unpack, self.thin.write, self.thin.keep, self.thin.verify)
         let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { path, reporter in
             let lines = Self.lines(for: path, exact: exact, unsign: unsign, unpack: unpack, write: write, keep: keep, reporter: reporter)
             if verify {

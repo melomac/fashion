@@ -892,15 +892,15 @@ struct Digester {
     let xlen: Bool
 
     init(_ command: Hasher) {
-        self.targets = Targets(command.matchOptions.match, algorithm: command.algo)
+        self.targets = Targets(command.matchOptions.match, algorithm: command.hash.algo)
         // The algorithms the targets name or, without any, --algo's or the mode's default.
         self.algorithms = self.targets.algorithms.isEmpty ? [command.resolvedAlgorithm] : self.targets.algorithms
         self.score = command.resolvedScore
         self.negate = command.matchOptions.negate
-        self.quiet = command.quiet
-        self.exact = command.exact
-        self.unsign = command.unsign
-        self.unpack = command.unpack
+        self.quiet = command.hash.quiet
+        self.exact = command.hash.exact
+        self.unsign = command.hash.unsign
+        self.unpack = command.hash.unpack
         self.xlen = command.matchOptions.xlen
 
         // --algo cdhash is a mode of its own: validate() refuses it with --symhash, --xar-toc or --slices.
@@ -913,7 +913,7 @@ struct Digester {
             .symhash(hashes, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.sortSymbols)
         } else if command.xarOptions.xarToc {
             .xarToc(hashes, decompress: command.xarOptions.decompress)
-        } else if command.slices {
+        } else if command.hash.slices {
             .slices(hashes)
         } else {
             .file(hashes)

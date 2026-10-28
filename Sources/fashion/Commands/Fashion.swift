@@ -71,7 +71,7 @@ struct Fashion: ParsableCommand {
  What every subcommand takes: the paths to walk and how, the workers that take the files, and the order they come out in.
  */
 struct ScanOptions: ParsableArguments {
-    @Argument(help: "Paths to scan (default: current directory).", completion: .file())
+    @Argument(help: "Paths to scan.", completion: .file())
     var paths: [String] = ["."]
 
     @Option(name: .shortAndLong, help: "Number of concurrent workers (default: 1, 0 = all CPUs).")

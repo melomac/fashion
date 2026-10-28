@@ -12,14 +12,14 @@ struct Unsigner: ParsableCommand {
         commandName: "unsign",
         abstract: "Write and restore a Mach-O image, removing the code signature.",
         helpNames: .shortAndLong,
-        aliases: ["s"],
+        aliases: ["i"],
     )
 
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
-    var write = false
+    @OptionGroup(title: "Unsign mode")
+    var unsign: UnsignerOptions
 
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
@@ -27,6 +27,11 @@ struct Unsigner: ParsableCommand {
             throw ExitCode(code)
         }
     }
+}
+
+struct UnsignerOptions: ParsableArguments {
+    @Flag(name: .shortAndLong, help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
+    var write = false
 }
 
 /**
@@ -52,7 +57,7 @@ extension Unsigner {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Unsign\(self.scan.sort ? " sorted" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let write = self.write
+        let write = self.unsign.write
         let run = self.scan.run(trapSignals: trapSignals, activity: "unsigning") { Self.lines(for: $0, write: write, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }

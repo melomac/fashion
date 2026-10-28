@@ -93,31 +93,11 @@ struct Hasher: ParsableCommand {
 
     // MARK: - Options
 
-    @Option(name: .shortAndLong, help: "Hash algorithm")
-    var algo: Algorithm?
-
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(name: .shortAndLong, help: "Quiet output: digests alone, or matched paths.")
-    var quiet = false
-
-    @Flag(help: "Hash individual Mach-O architectures.")
-    var slices = false
-
-    @Flag(help: "Hash an exact Mach-O image, dropping appended bytes.")
-    var exact = false
-
-    @Flag(help: "Hash a Mach-O image, removing the code signature.")
-    var unsign = false
-
-    @Flag(help: "Hash a UPX-packed Mach-O image, unpacked without UPX.")
-    var unpack = false
-
-    @Flag(help: "Log what is odd about each Mach-O, as verify names it, to the unified log.")
-    var verify = false
-
-    // MARK: - Grouped Options
+    @OptionGroup(title: "Hash mode")
+    var hash: HasherOptions
 
     @OptionGroup(title: "Match mode")
     var matchOptions: MatchOptions
@@ -131,7 +111,7 @@ struct Hasher: ParsableCommand {
     // MARK: - Resolved Properties
 
     var resolvedAlgorithm: Algorithm {
-        if let algo = self.algo {
+        if let algo = self.hash.algo {
             algo
         } else if self.symbolOptions.symhash {
             .md5
@@ -159,32 +139,32 @@ struct Hasher: ParsableCommand {
     mutating func validate() throws {
         // The pipeline routes each item to exactly one of these modes, so combining them silently
         // discards all but the highest-priority one. Reject the ambiguity up front.
-        let modeCount = [self.symbolOptions.symhash, self.xarOptions.xarToc, self.slices].count(where: { $0 })
+        let modeCount = [self.symbolOptions.symhash, self.xarOptions.xarToc, self.hash.slices].count(where: { $0 })
         if modeCount > 1 {
             throw ValidationError(HashOptionError.conflictingModes)
         }
 
         // Reject algorithms a mode cannot compute; otherwise the mode silently emits nothing.
-        if let algo = self.algo {
+        if let algo = self.hash.algo {
             if self.symbolOptions.symhash, [.git, .git256, .cdhash].contains(algo) {
                 throw ValidationError(HashOptionError.unsupportedSymHashAlgorithm(algo))
             }
             if self.xarOptions.xarToc, algo == .cdhash {
                 throw ValidationError(HashOptionError.unsupportedXarCDHash)
             }
-            if self.slices, algo == .cdhash {
+            if self.hash.slices, algo == .cdhash {
                 throw ValidationError(HashOptionError.unsupportedSlicesCDHash)
             }
         }
 
         // Flags that are silently ignored outside the mode they belong to.
-        if self.exact, self.symbolOptions.symhash || self.xarOptions.xarToc {
+        if self.hash.exact, self.symbolOptions.symhash || self.xarOptions.xarToc {
             throw ValidationError(HashOptionError.exactWithIncompatibleMode)
         }
-        if self.unsign, self.symbolOptions.symhash || self.xarOptions.xarToc {
+        if self.hash.unsign, self.symbolOptions.symhash || self.xarOptions.xarToc {
             throw ValidationError(HashOptionError.unsignWithIncompatibleMode)
         }
-        if self.unpack, self.xarOptions.xarToc {
+        if self.hash.unpack, self.xarOptions.xarToc {
             throw ValidationError(HashOptionError.unpackWithXarToc)
         }
         if self.xarOptions.decompress, !self.xarOptions.xarToc {
@@ -192,10 +172,10 @@ struct Hasher: ParsableCommand {
         }
         // A target is compared with --algo, whose digests it must be shaped like, or without --algo with the algorithm
         // its shape names: one shaped like none would scan everything and match nothing.
-        for target in self.matchOptions.match where !Targets.fits(target, self.algo) {
-            throw ValidationError(self.algo.map { HashOptionError.targetNotOfAlgorithm(target, $0) } ?? .targetOfNoShape(target))
+        for target in self.matchOptions.match where !Targets.fits(target, self.hash.algo) {
+            throw ValidationError(self.hash.algo.map { HashOptionError.targetNotOfAlgorithm(target, $0) } ?? .targetOfNoShape(target))
         }
-        if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.algo).algorithms.contains(.tlsh) {
+        if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.tlsh) {
             throw ValidationError(HashOptionError.xlenWithoutTLSHTarget)
         }
         if self.matchOptions.score < 0 {
@@ -232,13 +212,13 @@ extension Hasher {
         let digester = Digester(self)
 
         let algorithms = digester.algorithms.map(\.defaultValueDescription).joined(separator: ", ")
-        logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public)\(self.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public)\(self.hash.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
         if !digester.targets.isEmpty {
             logger.info("Match mode\(self.matchOptions.negate ? ", negated," : "", privacy: .public) with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
         }
 
-        let verify = self.verify
+        let verify = self.hash.verify
         let run = self.scan.run(trapSignals: trapSignals, activity: "hashing") { path, reporter in
             let lines = digester.lines(for: path, reporter: reporter)
             if verify {
@@ -258,14 +238,37 @@ extension Hasher {
 
 // MARK: - Option Groups
 
+struct HasherOptions: ParsableArguments {
+    @Option(name: .shortAndLong, help: "Hash algorithm")
+    var algo: Algorithm?
+
+    @Flag(name: .shortAndLong, help: "Quiet mode: digest(s) or matched path(s) only.")
+    var quiet = false
+
+    @Flag(help: "Hash individual Mach-O architectures.")
+    var slices = false
+
+    @Flag(name: .shortAndLong, help: "Hash an exact Mach-O image, dropping appended bytes.")
+    var exact = false
+
+    @Flag(name: [.customShort("i"), .long], help: "Hash a Mach-O image, removing the code signature.")
+    var unsign = false
+
+    @Flag(name: [.customShort("p"), .long], help: "Hash a UPX-packed Mach-O image, unpacked without UPX.")
+    var unpack = false
+
+    @Flag(name: .shortAndLong, help: "Verify Mach-O files for anomalies")
+    var verify = false
+}
+
 struct MatchOptions: ParsableArguments {
-    @Option(name: .shortAndLong, help: "Digests to match against.")
+    @Option(name: .shortAndLong, help: "Digests to match.")
     var match: [String] = []
 
     @Option(name: .shortAndLong, help: "Minimum similarity (ssdeep) or maximum distance (TLSH) threshold.")
     var score: Int = 40
 
-    @Flag(help: "Compare TLSH digests without the file length they record, like the tlsh tool's -xlen.")
+    @Flag(name: .shortAndLong, help: "Compare TLSH digests without the recorded file length.")
     var xlen = false
 
     @Flag(name: .shortAndLong, help: "Print only not matched files.")
@@ -273,10 +276,10 @@ struct MatchOptions: ParsableArguments {
 }
 
 struct SymbolOptions: ParsableArguments {
-    @Flag(help: "Compute SymHash (external symbol hash) for Mach-O files.")
+    @Flag(name: [.long, .customLong("sym")], help: "Compute SymHash (external symbol hash) for Mach-O slices.")
     var symhash = false
 
-    @Option(help: ArgumentHelp("Symbol separator.", valueName: "char"))
+    @Option(name: [.long, .customLong("sep")], help: ArgumentHelp("Symbol separator.", valueName: "char"))
     var separator: String = ","
 
     @Flag(inversion: .prefixedNo, help: "Sort symbols before hashing.")
@@ -284,9 +287,9 @@ struct SymbolOptions: ParsableArguments {
 }
 
 struct XAROptions: ParsableArguments {
-    @Flag(help: "Hash XAR table of contents.")
+    @Flag(name: [.long, .customLong("xar")], help: "Hash XAR table of contents.")
     var xarToc = false
 
-    @Flag(help: "Decompress table of contents before hashing.")
+    @Flag(name: .shortAndLong, help: "Decompress table of contents before hashing.")
     var decompress = false
 }

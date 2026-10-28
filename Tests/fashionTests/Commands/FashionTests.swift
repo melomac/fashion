@@ -49,7 +49,7 @@ final class FashionTests: XCTestCase {
     func testHashIsTheDefaultSubcommand() throws {
         for arguments in [["--algo", "md5", "-J", "x"], ["hash", "--algo", "md5", "-J", "x"]] {
             let command = try XCTUnwrap(Fashion.parseAsRoot(arguments) as? Hasher)
-            XCTAssertEqual(command.algo, .md5)
+            XCTAssertEqual(command.hash.algo, .md5)
             XCTAssertEqual(command.scan.paths, ["x"])
             XCTAssertTrue(command.scan.allJobs)
         }

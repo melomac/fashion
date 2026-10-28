@@ -12,17 +12,14 @@ struct Unpacker: ParsableCommand {
         commandName: "unpack",
         abstract: "Write and restore a UPX-packed Mach-O image, unpacked without UPX.",
         helpNames: .shortAndLong,
-        aliases: ["u", "p", "x", "upx"],
+        aliases: ["p", "upx"],
     )
 
     @OptionGroup
     var scan: ScanOptions
 
-    @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
-    var write = false
-
-    @Flag(help: "Keep unpacked data as _decompressed, for further investigation.")
-    var keep = false
+    @OptionGroup(title: "Unpack mode")
+    var unpack: UnpackerOptions
 
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
@@ -30,6 +27,14 @@ struct Unpacker: ParsableCommand {
             throw ExitCode(code)
         }
     }
+}
+
+struct UnpackerOptions: ParsableArguments {
+    @Flag(name: .shortAndLong, help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
+    var write = false
+
+    @Flag(name: .shortAndLong, help: "Keep unpacked data as _decompressed, for further investigation.")
+    var keep = false
 }
 
 /**
@@ -63,7 +68,7 @@ extension Unpacker {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Unpack\(self.scan.sort ? " sorted" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (write, keep) = (self.write, self.keep)
+        let (write, keep) = (self.unpack.write, self.unpack.keep)
         let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, write: write, keep: keep, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
