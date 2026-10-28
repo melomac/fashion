@@ -51,7 +51,8 @@ final class File {
 
     /// The size when the file was opened: every range read from it is checked against this size.
     let size: Int
-    private let path: String
+    /// The path opened, which an edit keeps: what a diagnostic or the log names the file by.
+    let path: String
     private let fd: FileDescriptor
     /// The device and inode opened, which the path may no longer name by the time a read comes up short.
     private let identity: (dev_t, ino_t)
