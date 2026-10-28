@@ -4,6 +4,22 @@ import MachO
 import MachO.dyld.utils // macho_arch_name_for_cpu_type
 
 /**
+ What is wrong with one architecture of a universal file, and which: the error its Mach-O, its edit or its read threw,
+ which a diagnostic names after the architecture, as verify names what it refuses, where the file alone would not say
+ which slice is at fault. It describes itself as the error does.
+ */
+struct SliceError: Error {
+    let arch: String
+    let error: Error
+}
+
+extension SliceError: LocalizedError {
+    var errorDescription: String? {
+        File.message(for: self.error)
+    }
+}
+
+/**
  A Mach-O file as Security's `Universal` reads it: a thin image, or a universal file's architectures. Anything else,
  including a file too short for a Mach-O header, is not Mach-O.
  */

@@ -927,8 +927,8 @@ struct Digester {
      once, and so does a symhash search, which reports files rather than slices (the slices of one binary usually share
      a symhash). A match is green, a fuzzy one by its distance. Negated, match mode prints a file no digest of which
      matched as plain hash mode prints it, the path alone when quiet, and nothing for one that matched. The file's
-     diagnostics come first: a file that cannot be hashed is reported, in red when it is malformed, and prints nothing
-     else.
+     diagnostics come first: a file that cannot be hashed is reported, in red when it is malformed, after the
+     architecture of the slice at fault in a universal file, and prints nothing else.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
         var diagnostics: [Line] = []
@@ -936,7 +936,7 @@ struct Digester {
         do {
             results = try self.digests(path, reporter: reporter) { diagnostics.append($0) }
         } catch {
-            return diagnostics + [reporter.report(path: path, message: File.message(for: error), tint: Self.tint(for: error))]
+            return diagnostics + [reporter.report(path: Self.subject(path, of: error), message: File.message(for: error), tint: Self.tint(for: error))]
         }
 
         var lines: [Line] = []
@@ -1002,7 +1002,15 @@ struct Digester {
      a crafted file reaches. Yellow for any other failure: the file could not be read, or changed while it was hashed.
      */
     static func tint(for error: Error) -> Tint {
-        error is ParserError || error is CDHashError || error is XARParser.XARError || error is UnpackError ? .malformed : .error
+        if let slice = error as? SliceError {
+            return self.tint(for: slice.error)
+        }
+        return error is ParserError || error is CDHashError || error is XARParser.XARError || error is UnpackError ? .malformed : .error
+    }
+
+    /// What a diagnostic about `error` names: the file, or the architecture of the slice at fault in a universal one.
+    static func subject(_ path: String, of error: Error) -> String {
+        (error as? SliceError).map { "\(path) (\($0.arch))" } ?? path
     }
 
     // MARK: - Digests
@@ -1079,8 +1087,12 @@ struct Digester {
 
         var results = try self.fileDigests(file, hashes: hashes, caveat: { caveat(nil, $0) })
         for slice in slices {
-            for (hash, digest) in try ByteHash.digests(hashes, file, range: slice.range, caveat: { caveat(slice.arch, $0) }) {
-                results.append(DigestResult(digest: digest, algorithm: hash.algorithm, label: slice.arch))
+            do {
+                for (hash, digest) in try ByteHash.digests(hashes, file, range: slice.range, caveat: { caveat(slice.arch, $0) }) {
+                    results.append(DigestResult(digest: digest, algorithm: hash.algorithm, label: slice.arch))
+                }
+            } catch {
+                throw SliceError(arch: slice.arch, error: error)
             }
         }
         return results
@@ -1089,7 +1101,8 @@ struct Digester {
     /**
      Where each architecture of a universal binary lies in the file, as Security's `Universal` places a `MachO` at its
      offset; none for any other file. Each slice is validated as a thin Mach-O, so a malformed slice is rejected like a
-     malformed thin file, and trimmed to its logical end when --exact is set. Only the headers are read.
+     malformed thin file, after its architecture, and trimmed to its logical end when --exact is set. Only the headers
+     are read.
      */
     private func sliceRanges(_ file: File) throws -> [(range: Range<Int>, arch: String)] {
         guard case let .fat(archs) = try Universal.open(file) else {
@@ -1099,7 +1112,12 @@ struct Digester {
         return try archs.map { arch in
             // Parse even without --exact: a malformed slice is an error either way. A slice that is not Mach-O at
             // all is hashed whole.
-            let image = try MachO(file, offset: arch.offset, length: arch.length)
+            let image: MachO?
+            do {
+                image = try MachO(file, offset: arch.offset, length: arch.length)
+            } catch {
+                throw SliceError(arch: arch.name, error: error)
+            }
             let length = image.map { self.exact ? $0.logicalEnd() : arch.length } ?? arch.length
             return (arch.offset ..< arch.offset + length, arch.name)
         }

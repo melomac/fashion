@@ -83,9 +83,10 @@ enum MachOEditor {
      too; one the edits leave alone is left as it is, appended bytes included, since the cut alone is no edit. As
      needed, the cut and the padding come where a stage needs them alone, the padding held back until an edit comes of
      it. Throws for a Mach-O that does not parse, with `unsign` for a signature that does not end its image and that no
-     cut frees, which `unpack` alone leaves in, the image looked at as it is, and for packed data, or the image unpacked from it, that does not hold.
-     `caveat` hears what an edit has to say about an image, named after its architecture in a universal file: that a
-     modified UPX packed it, and how.
+     cut frees, which `unpack` alone leaves in, the image looked at as it is, and for packed data, or the image
+     unpacked from it, that does not hold: a `SliceError` naming the architecture, in a universal file. `caveat` hears
+     what an edit has to say about an image, named after its architecture in a universal file: that a modified UPX
+     packed it, and how.
      */
     static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> (file: File, states: [[State]], source: File)? {
         let read = file
@@ -109,14 +110,18 @@ enum MachOEditor {
         case let .fat(archs):
             let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
-                guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
-                    // An archive, aligned by lipo for its members' symbols.
-                    return (arch, whole, arch.cpuType & CPU_ARCH_ABI64 != 0 ? 3 : 2, [])
+                do {
+                    guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
+                        // An archive, aligned by lipo for its members' symbols.
+                        return (arch, whole, arch.cpuType & CPU_ARCH_ABI64 != 0 ? 3 : 2, [])
+                    }
+                    guard let edit = try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(arch.name, $0) }) else {
+                        return (arch, whole, image.universalAlignment, [])
+                    }
+                    return (arch, edit.states.last!.pieces, edit.align, edit.states)
+                } catch {
+                    throw SliceError(arch: arch.name, error: error)
                 }
-                guard let edit = try self.edit(image, of: file, exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(arch.name, $0) }) else {
-                    return (arch, whole, image.universalAlignment, [])
-                }
-                return (arch, edit.states.last!.pieces, edit.align, edit.states)
             }
             guard slices.contains(where: { !$0.states.isEmpty }) else {
                 return nil

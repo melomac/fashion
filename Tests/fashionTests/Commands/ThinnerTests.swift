@@ -256,7 +256,7 @@ final class ThinnerTests: XCTestCase {
     /**
      A slice whose Mach-O does not parse, its sizeofcmds past the slice, is written as the fat table places it,
      as lipo -thin writes it: the table alone decides the bytes. With --exact, which reads the slice as a Mach-O
-     to cut it, the file is reported red, and nothing is written.
+     to cut it, the file is reported red after the slice's architecture, and nothing is written.
      */
     func testMalformedSliceIsWrittenAsTheFatTablePlacesIt() throws {
         let directory = try self.directory("malformed-slice")
@@ -278,6 +278,7 @@ final class ThinnerTests: XCTestCase {
 
         let lines = Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: false, reporter: reporter)
         XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(try XCTUnwrap(lines.first).text.hasPrefix("fashion: \(file.path) (x86_64): Invalid Mach-O: sizeofcmds 4294967295 does not hold"))
         XCTAssertEqual(lines.first?.tint, .malformed)
         XCTAssertEqual(reporter.errorCount, 1)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["fat"])
@@ -719,7 +720,7 @@ final class ThinnerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: (directory / "eight_x86_64_unsigned").path))
         let (status, errors) = try runFashion(["--unsign", file.path])
         XCTAssertEqual(status, 2)
-        XCTAssertEqual(errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"])
+        XCTAssertEqual(errors, ["fashion: \(file.path) (x86_64): LC_CODE_SIGNATURE does not point to end of file"])
         XCTAssertEqual(try runFashion(["thinr", "--unsign", file.path]).status, 0)
 
         // The same states with the flag, found in place; the whole file as unsign writes it, named for its slice.

@@ -863,7 +863,8 @@ final class PackMachTests: XCTestCase {
 
     /**
      A universal file whose first slice a modified UPX packed and whose second slice's packed data does not hold:
-     the warning about the first is printed, then the error about the second, as hash mode prints them.
+     the warning about the first is printed, then the error about the second, each after its architecture, as hash
+     mode prints them.
      */
     func testACaveatOutlivesALaterSlicesError() throws {
         let directory = try self.directory("caveat-then-error")
@@ -883,11 +884,14 @@ final class PackMachTests: XCTestCase {
         try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", swapped.path, corrupt.path, "-output", file.path]), "cannot run lipo")
 
         let warning = "fashion: \(file.path) (\(slices[0].name)): packed by a modified UPX, its marker \"VQY\\\"\" in place of \"UPX!\""
+        let error = "fashion: \(file.path) (\(slices[1].name)): Invalid UPX data: "
         XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]).first, warning)
+        XCTAssertTrue(try XCTUnwrap(self.hashLines(file.path, ["--unpack"]).last).hasPrefix(error))
         let reporter = Reporter(console: Console())
         for lines in [Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter), Unpacker.lines(for: file.path, write: false, reporter: reporter)] {
             XCTAssertEqual(lines.map(\.diagnostic), [true, true])
             XCTAssertEqual(lines.first?.text, warning)
+            XCTAssertTrue(try XCTUnwrap(lines.last).text.hasPrefix(error))
             XCTAssertEqual(lines.last?.tint, .malformed)
         }
         XCTAssertEqual(reporter.errorCount, 2)

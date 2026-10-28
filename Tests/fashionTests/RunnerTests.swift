@@ -119,7 +119,7 @@ final class RunnerTests: XCTestCase {
     }
 
     /**
-     --slices is a Mach-O-aware mode: a broken slice is reported whether or not --exact is set.
+     --slices is a Mach-O-aware mode: a broken slice is reported whether or not --exact is set, after its architecture.
      */
     func testSlicesRejectsMalformedSliceInsideFat() throws {
         let bad = try self.write(self.fat(wrapping: self.machO(padding: 8)), name: "fat-bad")
@@ -131,6 +131,11 @@ final class RunnerTests: XCTestCase {
 
         let rejected = try self.run(bad, slices: true)
         XCTAssertEqual(rejected, 2)
+        let (status, errors) = try runFashion(["--slices", bad.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(try XCTUnwrap(errors.first).hasPrefix("fashion: \(bad.path) ("), errors.first ?? "")
+        XCTAssertTrue(try XCTUnwrap(errors.first).contains("): Invalid Mach-O: "), errors.first ?? "")
         let accepted = try self.run(good, slices: true)
         XCTAssertEqual(accepted, 0)
     }

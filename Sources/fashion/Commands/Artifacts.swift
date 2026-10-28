@@ -61,8 +61,9 @@ struct ArtifactWriter {
     /**
      The lines to print for one file: the path of each artifact written or found in place, or a diagnostic for each
      that could not be written, or that a different file stands for without `write`. A file that cannot be read,
-     whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead, and
-     nothing is written. An image a modified UPX packed is warned about before its artifacts, which are written.
+     whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead,
+     after the architecture of the slice at fault in a universal file, and nothing is written. An image a modified UPX
+     packed is warned about before its artifacts, which are written.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
         let artifacts: [(suffix: String, bytes: File)]
@@ -77,7 +78,7 @@ struct ArtifactWriter {
             artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
         } catch {
             // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
-            return caveats + [reporter.report(path: path, message: File.message(for: error), tint: Digester.tint(for: error))]
+            return caveats + [reporter.report(path: Digester.subject(path, of: error), message: File.message(for: error), tint: Digester.tint(for: error))]
         }
 
         return caveats + artifacts.flatMap { suffix, bytes -> [Line] in
@@ -118,7 +119,7 @@ struct ArtifactWriter {
      took it through, `states`, for what was done to it. A slice the editor left alone, or a thin image, gets the
      `exact` cut here, which takes the bytes appended to an image off, when it shortens it; a thin file's artifacts
      are named by what was done to it alone, since one nothing was done to would be the file. Throws for a Mach-O
-     that does not parse.
+     that does not parse, a `SliceError` naming the architecture of a universal file's.
      */
     private static func slices(of file: File, exact: Bool, states: [[MachOEditor.State]]?) throws -> [(suffix: String, bytes: File)] {
         /// The cut alone, as a state of an image the editor left alone, when it shortens the image.
@@ -135,8 +136,14 @@ struct ArtifactWriter {
             return try archs.enumerated().flatMap { index, arch -> [(suffix: String, bytes: File)] in
                 var chain = states?[index] ?? []
                 // The fat table alone decides a slice's bytes, as for lipo -thin: it is read as a Mach-O only to cut it.
-                if chain.isEmpty, exact, let image = try MachO(file, offset: arch.offset, length: arch.length), let cut = cut(image) {
-                    chain = [cut]
+                if chain.isEmpty, exact {
+                    do {
+                        if let image = try MachO(file, offset: arch.offset, length: arch.length), let cut = cut(image) {
+                            chain = [cut]
+                        }
+                    } catch {
+                        throw SliceError(arch: arch.name, error: error)
+                    }
                 }
                 let whole = (suffix: "_\(arch.name)", bytes: File(editing: file, pieces: [.range(arch.offset ..< arch.offset + arch.length)]))
                 return [whole] + chain.map { ("_\(arch.name)" + Self.suffix($0.edits), File(editing: file, pieces: $0.pieces)) }
