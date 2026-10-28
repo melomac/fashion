@@ -6,12 +6,14 @@ import MachO
  image, which reads the image's layout once and names what is odd about it, one line each, in the order the headers
  are read.
 
- Four readers decide what a Mach-O is, and they disagree. The kernel maps an executable and its dylinker
+ Five readers decide what a Mach-O is, and they disagree. The kernel maps an executable and its dylinker
  (`parse_machfile`, `load_segment`, `load_dylinker`, `pie_required`); dyld maps everything else (`forEachLoadCommand`,
  `validSegments`, `validMain`, `validEmbeddedPaths`, `isValidLinkeditLayout`); Security signs and verifies
- (`Universal`, `MachO::validateStructure`, `SecStaticCode::validateExecutable`); Rosetta has rules of its own. A fifth
- reader is every static tool, this one included. What the kernel refuses, the parser refuses in red before this
- verifier sees the image. What another loader refuses and the parser does not is a line here, in that loader's words.
+ (`Universal`, `MachO::validateStructure`, `SecStaticCode::validateExecutable`, `verifySignature`); Gatekeeper and AMFI
+ decide whose signature may run (syspolicyd's `PolicyScanner`, libmis's `AMFIPathValidator`, which `Signer` mirrors);
+ Rosetta has rules of its own. A sixth reader is every static tool, this one included. What the kernel refuses, the
+ parser refuses in red before this verifier sees the image. What another loader refuses and the parser does not is a
+ line here, in that loader's words.
  What no loader refuses but a researcher wants named is a line too: what this tool's other flags undo, bytes appended,
  a signature that came out, UPX; and what one reader of the file believes that another does not, `ncmds` against the
  table, a section's file offset against its address, a name a prefix reads one way and a `strncmp` another, bytes no
@@ -46,7 +48,7 @@ import MachO
    extentAnomalies      headers             bytes appended, a signature's residue, UPX (PackMach, MachOEditor)
    linkeditAnomalies    reads the padding   tables inside __LINKEDIT, overlapping, bytes no table references
    paddingAnomalies     reads the padding   bytes no section covers, bytes between segments
-   signatureAnomalies   reads the pages     pages against slots, code limit, special slots, CMS, entitlements
+   signatureAnomalies   reads the pages     pages against slots, code limit, special slots, the signer, entitlements
      -> (found: [String], refused: Error?)  what Security refuses of the superblob, red after the lines
  ```
  */
@@ -900,8 +902,12 @@ struct MachOVerifier {
      it unsigned (the kernel's `csb_end_offset`), or past it, a scatter vector, which is not checked here, a page size
      the kernel refuses; no CMS blob behind a directory not flagged ad hoc; a special slot that does not seal the blob
      it should, `__TEXT,__info_plist`, the requirements, the entitlements and their DER form, which the kernel checks
-     for the last two and Security for all; and entitlements that opt out of hardening. The Info.plist slot is not
-     checked: for a bundle's executable it seals the bundle's Info.plist, not the section's.
+     for the last two and Security for all; entitlements that opt out of hardening; and who signed, as `Signer` has
+     it: a CMS blob that does not verify over the directory, a chain that ends outside Apple's roots, which codesign
+     and the kernel take and Gatekeeper refuses, a development or submission certificate, a Developer ID signature old
+     enough to run without a ticket, a team identifier the developer's certificate does not bear, a CMS blob Security
+     ignores behind an ad-hoc directory, and entitlements AMFI reserves to Apple's own signature. The Info.plist slot is not checked: for a
+     bundle's executable it seals the bundle's Info.plist, not the section's.
 
      Bytes past the superblob inside `LC_CODE_SIGNATURE`'s range are not named: Apple's own arm64e slices keep a stale
      signature's hashes there, where the x86_64 slice's larger signature sized the range. Nor are an ad-hoc or a
@@ -944,10 +950,6 @@ struct MachOVerifier {
             }
         }
 
-        if primary.flags & Self.csAdhoc == 0, (MachO.component(Self.csslotSignature, of: superblob)?.count ?? 0) <= 8 {
-            found.append("no CMS signature behind a code directory not flagged ad hoc")
-        }
-
         let sealed: [(slot: UInt32, what: String, blob: Data?)] = [
             (Self.csslotRequirements, "the requirements blob", MachO.component(Self.csslotRequirements, of: superblob)),
             (Self.csslotEntitlements, "the entitlements blob", MachO.component(Self.csslotEntitlements, of: superblob)),
@@ -971,8 +973,10 @@ struct MachOVerifier {
             }
         }
 
+        var entitled: [String: Any]?
         if let entitlements = MachO.component(Self.csslotEntitlements, of: superblob) {
             if let plist = try? PropertyListSerialization.propertyList(from: Data(entitlements.dropFirst(8)), format: nil) as? [String: Any] {
+                entitled = plist
                 let weakening = Self.weakeningEntitlements.filter { (plist[$0] as? Bool) == true }
                 if !weakening.isEmpty {
                     found.append("entitled to opt out of hardening: \(weakening.joined(separator: ", "))")
@@ -981,7 +985,92 @@ struct MachOVerifier {
                 found.append("entitlements that do not parse as a plist")
             }
         }
+
+        // The CMS blob, past its 8-byte header; Security reads it only behind a directory not flagged ad hoc.
+        let cms = MachO.component(Self.csslotSignature, of: superblob).map { Data($0.dropFirst(8)) } ?? Data()
+        if primary.flags & Self.csAdhoc != 0 {
+            if !cms.isEmpty {
+                found.append("a CMS signature behind a code directory flagged ad hoc, which Security ignores")
+            }
+            found += self.restrictedEntitlements(entitled, signedBy: nil)
+        } else if cms.isEmpty {
+            found.append("no CMS signature behind a code directory not flagged ad hoc")
+            found += self.restrictedEntitlements(entitled, signedBy: nil)
+        } else {
+            found += self.signerAnomalies(cms, over: primary, entitled: entitled)
+        }
         return found
+    }
+
+    /**
+     Who signed, as `Signer` verifies and classes the CMS blob over `primary`: what fails to verify, in one line, else
+     the chain Gatekeeper refuses or runs without a ticket, and a team identifier the certificate does not bear, which
+     Security refuses (`errSecCSBadTeamIdentifier`); then the entitlements AMFI reserves, given who signed.
+     */
+    private func signerAnomalies(_ cms: Data, over primary: EmbeddedCodeDirectory, entitled: [String: Any]?) -> [String] {
+        let type = "the \(primary.hashType.name) code directory"
+        let signer: Signer
+        do {
+            signer = try Signer(cms: cms, over: primary.data)
+        } catch {
+            let line = switch error {
+            case .undecodable: "a CMS signature Security cannot decode"
+            case .unsigned: "a CMS signature with no signer"
+            case .invalidSignature: "the CMS signature does not verify over \(type)"
+            case let .chain(reason): "the signer's certificate chain does not build: \(reason)"
+            }
+            return [line] + self.restrictedEntitlements(entitled, signedBy: nil)
+        }
+
+        var found: [String] = []
+        switch signer.kind {
+        case .apple, .appStore:
+            break
+        case .developerID:
+            if signer.isLegacyDeveloperID, let timestamp = signer.timestamp {
+                found.append("a Developer ID signature by \(signer.summary) timestamped \(timestamp.formatted(.iso8601.year().month().day())), before notarization: Gatekeeper runs it without a ticket")
+            }
+        case .development:
+            found.append("signed with a development or App Store submission certificate, \(signer.summary), which Gatekeeper refuses")
+        case .otherApple:
+            found.append("signed with an Apple-issued certificate not for code, \(signer.summary), which AMFI refuses")
+        case .outsideApple:
+            found.append("signed outside Apple's chains by \(signer.summary), which Gatekeeper refuses")
+        }
+        // Security checks the team only behind the certificates Apple issues to developers (`isAppleDeveloperCert`).
+        if [.developerID, .development].contains(signer.kind), let team = primary.teamID, let unit = signer.teamID, team != unit {
+            found.append("team identifier \(team) in \(type) is not the certificate's \(unit), which Security refuses")
+        }
+        return found + self.restrictedEntitlements(entitled, signedBy: signer.kind)
+    }
+
+    /**
+     The entitlements AMFI lets any signer claim (libmis's `unrestrictedEntitlements` and `softRestrictedEntitlements`
+     lists): every other one it validates against `anchor apple`, or the provisioning profile of a bundle signed under
+     Apple's developer CAs, and refuses the code otherwise, whatever the kernel would make of it.
+     */
+    private static let unrestrictedEntitlements = ["com.apple.private.signing-identifier", "com.apple.developer.hardened-process", "com.apple.application-identifier"]
+    private static let unrestrictedEntitlementPrefixes = ["com.apple.security.", "com.apple.developer.hardened-process."]
+
+    /**
+     The entitlements AMFI reserves among `entitled`: all the restricted ones when no provisioning profile can grant
+     them, the signature being ad hoc, absent, failed or outside Apple's chains; under Apple's developer CAs, where a
+     profile in the bundle may, only the private ones, which Apple provisions no developer. None under Apple's own
+     signature, nor the App Store's: Apple's own apps come through it with private entitlements (Keynote, Final Cut
+     Pro, Apple Configurator), provisioned by Apple.
+     */
+    private func restrictedEntitlements(_ entitled: [String: Any]?, signedBy kind: Signer.Kind?) -> [String] {
+        guard let entitled, kind != .apple, kind != .appStore else {
+            return []
+        }
+        var restricted = entitled.keys.filter { key in !Self.unrestrictedEntitlements.contains(key) && !Self.unrestrictedEntitlementPrefixes.contains { key.hasPrefix($0) } }
+        if let kind, [.developerID, .development].contains(kind) {
+            restricted = restricted.filter { $0.hasPrefix("com.apple.private.") }
+        }
+        guard !restricted.isEmpty else {
+            return []
+        }
+        return ["entitled to \(restricted.sorted().joined(separator: ", ")), which AMFI reserves to Apple-signed code"]
     }
 
     // MARK: - Universal files

@@ -490,6 +490,8 @@ struct EmbeddedCodeDirectory {
     let nSpecialSlots: Int
     /// log2 of the page size, zero for a directory that is not paged.
     let pageSizeLog: UInt8
+    /// The team identifier the signer wrote, nil when none or before version 0x20200 held one.
+    let teamID: String?
 
     /**
      A code directory Security accepts, with the checks `SecStaticCode::loadCodeDirectories` makes: its header holds
@@ -597,6 +599,8 @@ struct EmbeddedCodeDirectory {
         self.flags = blob.bigEndianUInt32(at: 12)
         self.nSpecialSlots = nSpecialSlots
         self.pageSizeLog = pageSizeLog
+        let teamOffset = version >= 0x20200 ? Int(blob.bigEndianUInt32(at: 48)) : 0
+        self.teamID = teamOffset == 0 ? nil : String(decoding: blob.bytes(in: teamOffset ..< length).prefix { $0 != 0 }, as: UTF8.self)
     }
 
     /// Special slot `-slot`'s hash, nil when the directory has fewer special slots than that.

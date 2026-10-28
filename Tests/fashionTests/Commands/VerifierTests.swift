@@ -689,6 +689,67 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try self.verify(tampered, "tampered", in: directory).lines, [": the entitlements blob does not hash to its slot in the sha256 code directory", ": entitlements that do not parse as a plist"])
     }
 
+    /**
+     Who signed, as `Signer` has it: a certificate outside Apple's chains, which codesign and the kernel take and
+     Gatekeeper refuses; a code directory altered after signing; a CMS blob behind a directory flagged ad hoc; and
+     entitlements AMFI reserves, under an ad-hoc signature. The certificate and the CMS blob come from the system's
+     openssl, over the code directory `codesign -s -` wrote with its ad-hoc flag cleared, in the room `--signature-size`
+     left for them.
+     */
+    func testTheSignerIsNamed() throws {
+        let directory = try self.directory("signer")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let adhoc = try Data(XCTUnwrap(MachO.component(0, of: superblob))) // reindexed from 0
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+        var directoryBlob = adhoc
+        directoryBlob.store((UInt32(bigEndian: adhoc.load(UInt32.self, at: 12)) & ~UInt32(2)).bigEndian, at: 12) // CS_ADHOC out
+        let (configuration, key, certificate, content, cms) = (directory / "certificate.cnf", directory / "key.pem", directory / "certificate.pem", directory / "directory.bin", directory / "cms.der")
+        try directoryBlob.write(to: content)
+        try "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n[dn]\nCN = Fashion Self\nOU = SELFTEAM00\n[ext]\nextendedKeyUsage = codeSigning\nkeyUsage = digitalSignature\nbasicConstraints = CA:FALSE\n".write(to: configuration, atomically: true, encoding: .utf8)
+        try XCTSkipUnless(execute("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key.path, "-out", certificate.path, "-config", configuration.path, "-days", "30"]), "cannot make a certificate")
+        try XCTSkipUnless(execute("/usr/bin/openssl", ["cms", "-sign", "-binary", "-in", content.path, "-signer", certificate.path, "-inkey", key.path, "-outform", "DER", "-out", cms.path]), "cannot sign")
+        let signatureBlob = try Data(contentsOf: cms)
+
+        /// The program with a superblob holding `directory` in slot 0, the requirements it seals, and `cms` wrapped.
+        func embedded(_ directory: Data, _ cms: Data) -> Data {
+            var wrapped = Data()
+            [0xfade_0b01, UInt32(8 + cms.count)].forEach { wrapped.appendUInt32BE($0) }
+            wrapped += cms
+            var blob = Data()
+            let (first, second) = (36 + directory.count, 36 + directory.count + requirements.count)
+            [0xfade_0cc0, UInt32(second + wrapped.count), 3, 0, 36, 2, UInt32(first), 0x10000, UInt32(second)].forEach { blob.appendUInt32BE($0) }
+            blob += directory + requirements + wrapped
+            XCTAssertLessThanOrEqual(blob.count, signature.size)
+            var signed = program
+            signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
+            return signed
+        }
+        XCTAssertEqual(try self.verify(embedded(directoryBlob, signatureBlob), "self-signed", in: directory).lines, [": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
+
+        var altered = directoryBlob
+        altered[Int(UInt32(bigEndian: adhoc.load(UInt32.self, at: 20)))] ^= 0x20 // the identifier's first byte
+        XCTAssertEqual(try self.verify(embedded(altered, signatureBlob), "altered", in: directory).lines, [": the CMS signature does not verify over the sha256 code directory"])
+
+        XCTAssertEqual(try self.verify(embedded(adhoc, signatureBlob), "ad hoc", in: directory).lines, [": a CMS signature behind a code directory flagged ad hoc, which Security ignores"])
+
+        let plist = directory / "entitlements.plist"
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict><key>com.apple.private.fashion</key><true/><key>aps-environment</key><string>production</string><key>com.apple.application-identifier</key><string>SELFTEAM00.fashion</string><key>com.apple.security.application-groups</key><array><string>SELFTEAM00.fashion</string></array></dict></plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+        let entitled = directory / "entitled"
+        try self.program("x86_64", in: directory).write(to: entitled)
+        _ = try codesign(["-s", "-", "--entitlements", plist.path, entitled.path])
+        XCTAssertEqual(try self.verify(Data(contentsOf: entitled), "reserved", in: directory).lines, [": entitled to aps-environment, com.apple.private.fashion, which AMFI reserves to Apple-signed code"])
+    }
+
     /// A universal file of `slices`, each at the next multiple of its 2^align, the padding `gap` bytes; the last
     /// slice's entry past the table's count with `hideLast`.
     private func universal(_ slices: [(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t, data: Data, align: Int)], magic: UInt32 = FAT_MAGIC, hideLast: Bool = false, gap: UInt8 = 0) -> Data {
