@@ -35,6 +35,8 @@ import System
                                                       |   artifacts written -> lines   |
                                                       |   verify: MachOVerifier per    |
                                                       |   image, anomalies -> lines    |
+                                                      |   --verify: the same findings  |
+                                                      |   to the log alone (hash, thin)|
                                                       |   diagnostics: Reporter, lines |
                                                       | reporter.fileProcessed()       |
                                                       | output.finished(index, lines)  |

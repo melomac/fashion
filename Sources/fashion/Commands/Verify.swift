@@ -49,47 +49,78 @@ extension Verify {
         return run.errorCount > 0 ? 2 : 0
     }
 
-    /// The lines to print for one file.
+    /**
+     The lines to print for one file: each finding, which the unified log gets as a notice too, as `log(_:)` leaves it,
+     and each refusal, which the reporter logs as an error.
+     */
     static func lines(for path: String, reporter: Reporter) -> [Line] {
-        func line(_ finding: String, arch: String? = nil) -> Line {
-            Line(text: "\(OutputFormatter.formatPath(path))\(arch.map { " (\($0))" } ?? ""): \(finding)")
+        var lines: [Line] = []
+        self.verify(path) { finding, arch in
+            logger.notice("\(arch.map { "\(path) (\($0))" } ?? path, privacy: .public): \(finding, privacy: .public)")
+            lines.append(Line(text: "\(OutputFormatter.formatPath(path))\(arch.map { " (\($0))" } ?? ""): \(finding)"))
+        } refused: { error, arch in
+            lines.append(reporter.report(path: "\(path)\(arch.map { " (\($0))" } ?? "")", message: File.message(for: error), tint: Digester.tint(for: error)))
         }
-        func refused(_ error: Error, arch: String? = nil) -> Line {
-            reporter.report(path: "\(path)\(arch.map { " (\($0))" } ?? "")", message: File.message(for: error), tint: Digester.tint(for: error))
+        return lines
+    }
+
+    /**
+     What `verify` would print of one file, in the unified log alone: each finding as a notice, each refusal as an
+     error, under the `verify` category, as `lines(for:reporter:)` logs them beside its lines. `hash --verify` and
+     `thinr --verify` call it for each file they work on, so that a scan for another purpose leaves what is odd about
+     its files in the log, and prints nothing more.
+     */
+    static func log(_ path: String) {
+        self.verify(path) { finding, arch in
+            let subject = arch.map { "\(path) (\($0))" } ?? path
+            logger.notice("\(subject, privacy: .public): \(finding, privacy: .public)")
+        } refused: { error, arch in
+            let subject = arch.map { "\(path) (\($0))" } ?? path
+            logger.error("\(subject, privacy: .public): \(File.message(for: error), privacy: .public)")
         }
+    }
+
+    /**
+     What `MachOVerifier` finds about one file, as it is found: `found` gets each finding with the architecture of the
+     slice it is about, nil for the file or a universal file's table; `refused` gets what the parser refuses of a file
+     or a slice, and a signature Security cannot read, the same way.
+     */
+    private static func verify(_ path: String, found: (_ finding: String, _ arch: String?) -> Void, refused: (_ error: Error, _ arch: String?) -> Void) {
         do {
             let file = try File(path: path)
             switch try Universal.open(file) {
             case let .thin(image):
-                let (found, error) = MachOVerifier(image, in: file).anomalies()
-                return found.map { line($0) } + (error.map { [refused($0)] } ?? [])
+                let (findings, error) = MachOVerifier(image, in: file).anomalies()
+                findings.forEach { found($0, nil) }
+                if let error {
+                    refused(error, nil)
+                }
             case let .fat(archs):
-                var lines = MachOVerifier.anomalies(universal: file, archs).map { line($0) }
+                MachOVerifier.anomalies(universal: file, archs).forEach { found($0, nil) }
                 for arch in archs {
                     do {
                         guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                             if let odd = try MachOVerifier.anomaly(slice: arch, in: file) {
-                                lines.append(line(odd))
+                                found(odd, nil)
                             }
                             continue
                         }
                         let verifier = MachOVerifier(image, in: file)
-                        lines += verifier.anomalies(slice: arch).map { line($0) }
-                        let (found, error) = verifier.anomalies()
-                        lines += found.map { line($0, arch: arch.name) }
+                        verifier.anomalies(slice: arch).forEach { found($0, nil) }
+                        let (findings, error) = verifier.anomalies()
+                        findings.forEach { found($0, arch.name) }
                         if let error {
-                            lines.append(refused(error, arch: arch.name))
+                            refused(error, arch.name)
                         }
                     } catch {
-                        lines.append(refused(error, arch: arch.name))
+                        refused(error, arch.name)
                     }
                 }
-                return lines
             case .notMachO:
-                return []
+                break
             }
         } catch {
-            return [refused(error)]
+            refused(error, nil)
         }
     }
 }

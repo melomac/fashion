@@ -114,6 +114,9 @@ struct Hasher: ParsableCommand {
     @Flag(help: "Hash a UPX-packed Mach-O image, unpacked without UPX.")
     var unpack = false
 
+    @Flag(help: "Log what is odd about each Mach-O, as verify names it, to the unified log.")
+    var verify = false
+
     // MARK: - Grouped Options
 
     @OptionGroup(title: "Match mode")
@@ -229,13 +232,20 @@ extension Hasher {
         let digester = Digester(self)
 
         let algorithms = digester.algorithms.map(\.defaultValueDescription).joined(separator: ", ")
-        logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("\(self.scan.sort ? "Run sorted" : "Run", privacy: .public)\(self.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) and \(algorithms, privacy: .public) \(digester.algorithms.count == 1 ? "algorithm" : "algorithms", privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
         if !digester.targets.isEmpty {
             logger.info("Match mode\(self.matchOptions.negate ? ", negated," : "", privacy: .public) with \(String(digester.targets.count, pluralizing: "digest"), privacy: .public): \(self.matchOptions.match.joined(separator: ", "), privacy: .public)")
         }
 
-        let run = self.scan.run(trapSignals: trapSignals, activity: "hashing") { digester.lines(for: $0, reporter: $1) }
+        let verify = self.verify
+        let run = self.scan.run(trapSignals: trapSignals, activity: "hashing") { path, reporter in
+            let lines = digester.lines(for: path, reporter: reporter)
+            if verify {
+                Verify.log(path)
+            }
+            return lines
+        }
         if run.errorCount > 0 {
             return 2
         }

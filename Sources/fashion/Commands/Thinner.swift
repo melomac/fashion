@@ -31,6 +31,9 @@ struct Thinner: ParsableCommand {
     @Flag(help: "Replace a different file found under the artifact's name; otherwise it is reported and left alone.")
     var write = false
 
+    @Flag(help: "Log what is odd about each Mach-O, as verify names it, to the unified log.")
+    var verify = false
+
     mutating func run() throws {
         let code = self.scan(trapSignals: true)
         if code != 0 {
@@ -72,10 +75,16 @@ extension Thinner {
      or written. `trapSignals` as `Hasher.scan(trapSignals:)`.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public)\(self.unpack ? " unpack" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.exact ? " exact" : "", privacy: .public)\(self.unsign ? " unsign" : "", privacy: .public)\(self.unpack ? " unpack" : "", privacy: .public)\(self.verify ? " verifying" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, unsign, unpack, write) = (self.exact, self.unsign, self.unpack, self.write)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { Self.lines(for: $0, exact: exact, unsign: unsign, unpack: unpack, write: write, reporter: $1) }
+        let (exact, unsign, unpack, write, verify) = (self.exact, self.unsign, self.unpack, self.write, self.verify)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { path, reporter in
+            let lines = Self.lines(for: path, exact: exact, unsign: unsign, unpack: unpack, write: write, reporter: reporter)
+            if verify {
+                Verify.log(path)
+            }
+            return lines
+        }
         return run.errorCount > 0 ? 2 : 0
     }
 

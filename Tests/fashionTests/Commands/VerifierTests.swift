@@ -750,6 +750,21 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try self.verify(Data(contentsOf: entitled), "reserved", in: directory).lines, [": entitled to aps-environment, com.apple.private.fashion, which AMFI reserves to Apple-signed code"])
     }
 
+    /**
+     `hash --verify` and `thinr --verify` leave what `verify` would say of a file in the unified log alone: a finding
+     prints no line and counts no error, so a file `verify` has a line for exits as it would without the flag.
+     */
+    func testVerifyLogsAloneUnderHashAndThinr() throws {
+        let directory = try self.directory("logging")
+        var program = try self.program("x86_64", in: directory)
+        program.store(UInt32(0xdead_beef), at: 28) // the 64-bit header's reserved field
+        let odd = directory / "odd"
+        try program.write(to: odd)
+        XCTAssertEqual(self.verify(odd.path).lines.count, 1)
+        XCTAssertEqual(try Hasher.parse([odd.path, "--verify", "--quiet"]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse([odd.path, "--verify"]).scan(), 0)
+    }
+
     /// A universal file of `slices`, each at the next multiple of its 2^align, the padding `gap` bytes; the last
     /// slice's entry past the table's count with `hideLast`.
     private func universal(_ slices: [(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t, data: Data, align: Int)], magic: UInt32 = FAT_MAGIC, hideLast: Bool = false, gap: UInt8 = 0) -> Data {
