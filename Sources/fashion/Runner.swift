@@ -885,7 +885,8 @@ struct Digester {
     let negate: Bool
     let quiet: Bool
     let exact: Bool
-    /// Whether a Mach-O is hashed without its code signatures, and what UPX packed unpacked, as `MachOEditor` edits it.
+    /// Whether a Mach-O is hashed without its code signatures, and what UPX packed unpacked, as `MachOEditor` edits it;
+    /// a file whose packed data does not hold is hashed packed, with a warning, since --unpack hashes every file.
     let unsign: Bool
     let unpack: Bool
     /// Whether TLSH digests are compared without the file length they record.
@@ -1008,6 +1009,11 @@ struct Digester {
         return error is ParserError || error is CDHashError || error is XARParser.XARError || error is UnpackError ? .malformed : .error
     }
 
+    /// Whether `error` is UPX data that does not hold, in the file or in a slice of a universal one.
+    static func isUnpackError(_ error: Error) -> Bool {
+        error is UnpackError || (error as? SliceError)?.error is UnpackError
+    }
+
     /// What a diagnostic about `error` names: the file, or the architecture of the slice at fault in a universal one.
     static func subject(_ path: String, of error: Error) -> String {
         (error as? SliceError).map { "\(path) (\($0.arch))" } ?? path
@@ -1025,9 +1031,20 @@ struct Digester {
         // A modified UPX packed it, or the file is cut short of its last page: a second look, whatever --quiet keeps
         // off, like a signature that does not hold.
         let opened = try self.exact ? MachOEditor.padded(read, caveat: { note(reporter.warn(path: path, message: $0)) }) : read
-        let file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
+        let warned = { (arch: String?, message: String) in
             note(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
-        })?.file ?? opened : opened
+        }
+        let file: File
+        do {
+            file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: self.unsign, unpack: self.unpack, caveat: warned)?.file ?? opened : opened
+        } catch where self.unpack && Self.isUnpackError(error) {
+            // Packed data that does not hold, or an image unpacked from it that does not, in the file or a slice of a
+            // universal one: --unpack hashes every file, so the file is hashed packed, as it is, the refusal said in a
+            // warning after the slice at fault; with --unsign, its signatures out. thinr and unpack refuse it in red
+            // instead, and write what decompressed under --keep.
+            note(reporter.warn(path: Self.subject(path, of: error), message: "\(File.message(for: error)), hashed packed"))
+            file = try self.unsign ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: true, unpack: false, caveat: warned)?.file ?? opened : opened
+        }
         // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless
         // --quiet keeps the lines alone.
         let caveat = { (arch: String?, message: String) in

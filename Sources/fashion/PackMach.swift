@@ -31,7 +31,9 @@ extension UnpackError: LocalizedError {
  emulates the stub's entry code and scans for the packed data, is not ported: such an image is not packed either.
  A packer modified to write another marker than "UPX!" everywhere it goes, whose files `upx -d` calls not packed, is
  seen through: the pack header is found by its structure and checksum where UPX looks for it, and the `l_info` before
- the packed data must vouch for it.
+ the packed data must vouch for it. Packed data that does not hold, or an image unpacked from it that does not, is
+ refused in red by `thinr` and `unpack`, which write what decompressed under --keep; hash mode, which hashes every
+ file, hashes the file packed, the refusal said in a warning.
 
  The packed file, with the offsets of an `x86_64` file UPX 3.91 packed:
 

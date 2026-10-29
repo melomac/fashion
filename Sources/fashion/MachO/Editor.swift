@@ -234,6 +234,8 @@ enum MachOEditor {
                     logger.info("\(subject, privacy: .public): unpacked, \(note, privacy: .public)")
                 }
 
+                // The unpacked image must parse: one that does not is refused as the sums are, with what decompressed
+                // kept as it is for --keep.
                 let unpacked: MachO
                 do {
                     guard let parsed = try MachO(File(editing: file, pieces: [.bytes(data)])) else {
@@ -241,8 +243,9 @@ enum MachOEditor {
                     }
                     unpacked = parsed
                 } catch {
-                    hold(data, File.message(for: error))
-                    throw error
+                    let reason = error is UnpackError ? "file header corrupted" : "the unpacked image does not parse, \(File.message(for: error))"
+                    hold(data, reason)
+                    throw UnpackError.unverified(reason, decompressed: data)
                 }
                 align = unpacked.universalAlignment
                 // Its own cut, as needed for its own signature to come out.
