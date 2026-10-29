@@ -21,19 +21,27 @@ extension UnpackError: LocalizedError {
 }
 
 /**
- A Mach-O image UPX packed, named after UPX's `PackMachBase`, whose `canUnpack` and `unpack` it mirrors (`p_mach.cpp`,
- UPX 5.2.1, and its development branch for the arm64 filter 0x53): `init` finds the pack header UPX leaves before
- `__LINKEDIT`, and the offset of the packed data it records; `unpack()` decompresses the image UPX packed, block by
- block, as `upx -d` writes it.
+ A Mach-O image UPX packed, after UPX's `PackMachBase` (`p_mach.cpp`, UPX 5.2.1, and its development branch for the
+ arm64 filter 0x53). `init` mirrors `canUnpack`: it finds the pack header UPX leaves before `__LINKEDIT`, and reads the
+ offset of the packed data from it. `unpack()` mirrors `unpack`: it decompresses the image block by block, to the bytes
+ `upx -d` writes.
 
- Where UPX throws before it has found its pack header, for a header or load commands its packer would never write, the
- image is merely not packed: `unpack` meets every Mach-O. UPX's recovery of a pack header pirates overwrote, which
- emulates the stub's entry code and scans for the packed data, is not ported: such an image is not packed either.
- A packer modified to write another marker than "UPX!" everywhere it goes, whose files `upx -d` calls not packed, is
- seen through: the pack header is found by its structure and checksum where UPX looks for it, and the `l_info` before
- the packed data must vouch for it. Packed data that does not hold, or an image unpacked from it that does not, is
- refused in red by `thinr` and `unpack`, which write what decompressed under --keep; hash mode, which hashes every
- file, hashes the file packed, the refusal said in a warning.
+ `init` takes any Mach-O and returns nil for one UPX did not pack. That includes a file UPX would throw on before it
+ finds a pack header, for headers or load commands its packer never writes. It also includes a file whose pack header
+ pirates overwrote: UPX recovers one by emulating the stub's entry code and scanning for the packed data, which is not
+ ported.
+
+ Two tricks of a modified UPX make `upx -d` call the file not packed. Both are seen through, and named in a warning:
+
+ - The "UPX!" marker replaced everywhere it appears. The pack header is found by its structure and checksum where UPX
+   looks for it, and the `l_info` before the packed data must confirm it.
+ - The segments `canUnpack` goes by renamed: `__XHDR`, `UPX_DATA`, `__TEXT` or `__LINKEDIT`. The kernel loads the
+   packed file without dyld, by offsets, and neither it nor the stub reads a segment name, so the file runs as it is.
+   The pack header is looked for around the segment lying last in the file, and must confirm itself the same way.
+
+ Packed data that fails its checks, or an unpacked image that does, is refused in red by `thinr` and `unpack`, which
+ write what decompressed under --keep. Hash mode hashes every file, so it hashes the file as packed and reports the
+ refusal as a warning.
 
  The packed file, with the offsets of an `x86_64` file UPX 3.91 packed:
 
@@ -94,6 +102,9 @@ extension UnpackError: LocalizedError {
          |    __LINKEDIT of 16    -> style 395 (3.95 on)            |--------------> not packed
          |    three segments      -> style 392                      |
          |    offLINK: __LINKEDIT's fileoff, or what ends before it |
+         |    names that tell nothing, or a window with no header:  |  a modified UPX renamed them;
+         |    the segment lying last in the file stands in for      |  the header found is named
+         |    __LINKEDIT, the window before it, after it, the end   |  in a warning
          +----------------------------------------------------------+
                                            |
                                            v
@@ -147,9 +158,10 @@ struct PackMach {
     private let uAdler: UInt32
     /// The Adler-32 of the packed bytes, block by block as the packer summed them: the pack header's `c_adler`.
     private let cAdler: UInt32
-    /// What packed the image: UPX, or a modified UPX, the marker it bears in place of "UPX!" named.
+    /// What packed the image: UPX, or a modified UPX, the marker it bears in place of "UPX!" and the segment it
+    /// renamed named.
     let packer: String
-    /// Whether a modified UPX packed the image, by its marker.
+    /// Whether a modified UPX packed the image, by its marker or its segments' names.
     private let modified: Bool
 
     /// A packer class UPX unpacks Mach-O with: its CPU, filetype, format id and page.
@@ -184,7 +196,9 @@ struct PackMach {
     /**
      The image UPX packed, as `canUnpack` finds it: its segments tell where UPX put its pack header (UPX 3.91 before
      `__LINKEDIT`, 3.92 after the loader in it, 3.95 on before a 16-byte `__LINKEDIT`), whose checksum must hold and
-     whose format must be the image's. Nil when UPX did not pack it; throws for a pack header that does not hold.
+     whose format must be the image's. Where the segments' names tell nothing, a modified UPX having renamed them,
+     the pack header is looked for around the segment lying last in the file, and must vouch for itself. Nil when
+     UPX did not pack it; throws for a pack header that does not hold.
      */
     init?(_ image: MachO) throws {
         guard
@@ -213,6 +227,9 @@ struct PackMach {
         var posNext = 0
         var segments = 0
         var text: Segment?
+        // The segment lying last in the file, and where the one before it ends: UPX's __LINKEDIT, whatever a modified
+        // UPX named it.
+        var last: (segment: Segment, before: Int)?
         for command in image.loadCommands.prefix(ncmds) {
             guard let segment = Segment(command, in: image) else {
                 continue
@@ -240,6 +257,9 @@ struct PackMach {
             default:
                 break
             }
+            if last.map({ segment.fileoff >= $0.segment.fileoff }) ?? true {
+                last = (segment, posNext)
+            }
             posNext = segment.fileoff + segment.filesize
         }
         if segments == 3, style != 395 {
@@ -247,9 +267,6 @@ struct PackMach {
         }
         if style == 391, offLINK == 0, ncmds == 2, let text {
             offLINK = text.fileoff + text.filesize
-        }
-        guard style != 0, offLINK != 0 else {
-            return nil
         }
 
         // A page and the pack header after it, then the overlay offset, read back from where UPX left them, in the
@@ -260,71 +277,115 @@ struct PackMach {
         // less 3 bytes of zeros followed, which `upx -d` unpacks. UPX reads before the file's start for a __TEXT
         // shorter than that, and gives up, where the window starts there instead.
         let small = 32 + 4
-        var count = (1 << format.pageShift) + 208 + 4
-        var start: Int
-        if style == 392 {
+        let count = (1 << format.pageShift) + 208 + 4
+
+        // A window to read the pack header back from, and where it lies for the warning when no segment name said.
+        typealias Window = (start: Int, count: Int, found: String?)
+        var windows: [Window] = []
+
+        func before(_ offLINK: Int, found: String?) -> Window {
+            let start = offLINK - count
+            return start < 0 ? (0, count + start, found) : (start, count, found)
+        }
+
+        func after(_ offLINK: Int, found: String?) -> Window? {
+            // UPX gives up here ("bad offLINK"); a __LINKEDIT this short is a linker's, in an image it never packed.
+            let count = min(count, image.length - offLINK)
+            return count >= 12 ? (offLINK, count, found) : nil
+        }
+
+        // The window the segment names lead to, as canUnpack reads it.
+        if style != 0, offLINK != 0 {
+            if style != 392 {
+                windows.append(before(offLINK, found: nil))
+            } else if image.filetype == MH_DYLIB {
+                windows.append(before(image.length, found: nil))
+            } else if let window = after(offLINK, found: nil) {
+                windows.append(window)
+            }
+        }
+
+        // Where the names lead nowhere, or to a window without a pack header, as a modified UPX's do once it names
+        // its segments otherwise, whose files load and run as they are: the segment lying last in the file stands in
+        // for __LINKEDIT, and the pack header is looked for where each layout UPX has used puts it, before the
+        // segment, after it, and for a dylib at the file's end. The header's structure and checksum, then the l_info
+        // before the packed data, vouch for what is found, as they do for a header without its marker. Not in an
+        // image signed after packing, whose signature grew the 16-byte __LINKEDIT and so moved the named window off
+        // the header: the callers look at such an image without its signature, where the names tell again.
+        if let last, image.findCommand(UInt32(LC_CODE_SIGNATURE)) == nil {
+            let name = Self.quoted(Array(last.segment.name.utf8))
+            let offLINK = max(last.segment.fileoff, last.before)
+            var candidates = [before(offLINK, found: "before its last segment \(name)")]
+            if let window = after(offLINK, found: "after its last segment \(name)") {
+                candidates.append(window)
+            }
             if image.filetype == MH_DYLIB {
-                start = image.length - count
-            } else {
-                start = offLINK
-                count = min(count, image.length - offLINK)
-                // UPX gives up here ("bad offLINK"); a __LINKEDIT this short is a linker's, in an image it never packed.
-                guard count >= 12 else {
-                    return nil
+                candidates.append(before(image.length, found: "at the file's end"))
+            }
+            windows += candidates.filter { candidate in !windows.contains { $0.start == candidate.start && $0.count == candidate.count } }
+        }
+
+        var found: (header: PackHeader, offset: Int, overlayOffset: Int, where: String?)?
+        for window in windows where found == nil && window.count > small {
+            let data = try image.dataAt(window.start, count: window.count)
+            // The pack header ends where the zeros that pad __TEXT to its page begin.
+            var i = data.count
+            while i > small {
+                i -= 1
+                if data[data.startIndex + i] != 0 {
+                    break
                 }
             }
-        } else {
-            start = offLINK - count
-        }
-        if start < 0 {
-            count += start
-            start = 0
-        }
-        let window = try image.dataAt(start, count: count)
-
-        // The pack header ends where the zeros that pad __TEXT to its page begin.
-        var i = window.count
-        while i > small {
-            i -= 1
-            if window[window.startIndex + i] != 0 {
-                break
+            i -= small
+            guard
+                i >= 1,
+                let packHeader = try PackHeader(data.dropFirst(i), fileSize: image.length, format: format.format),
+                packHeader.format == format.format
+            else {
+                continue
             }
+
+            let at = i + packHeader.offset + packHeader.size
+            let overlayOffset = at + 4 <= data.count ? Int(image.word(data, at: at)) : 0
+            if packHeader.magic != PackHeader.magic {
+                // Found without its marker, the pack header needs the word of UPX's `l_info`, the 12 bytes before the
+                // packed data: its marker, version and format must be the header's, as the packer wrote them.
+                guard
+                    overlayOffset >= headerSize + headway + 12,
+                    let lInfo = try? image.dataAt(overlayOffset - 12, count: 12),
+                    lInfo.dropFirst(4).prefix(4).elementsEqual(packHeader.magic),
+                    lInfo[lInfo.startIndex + 10] == packHeader.version,
+                    lInfo[lInfo.startIndex + 11] == packHeader.format
+                else {
+                    continue
+                }
+            }
+            found = (packHeader, window.start + i + packHeader.offset, overlayOffset, window.found)
         }
-        i -= small
-        guard
-            i >= 1,
-            let packHeader = try PackHeader(window.dropFirst(i), fileSize: image.length, format: format.format),
-            packHeader.format == format.format
-        else {
+        guard let found else {
             return nil
         }
 
-        let at = i + packHeader.offset + packHeader.size
-        let overlayOffset = at + 4 <= window.count ? Int(image.word(window, at: at)) : 0
-        if packHeader.magic != PackHeader.magic {
-            // Found without its marker, the pack header needs the word of UPX's `l_info`, the 12 bytes before the
-            // packed data: its marker, version and format must be the header's, as the packer wrote them.
-            guard
-                overlayOffset >= headerSize + headway + 12,
-                let lInfo = try? image.dataAt(overlayOffset - 12, count: 12),
-                lInfo.dropFirst(4).prefix(4).elementsEqual(packHeader.magic),
-                lInfo[lInfo.startIndex + 10] == packHeader.version,
-                lInfo[lInfo.startIndex + 11] == packHeader.format
-            else {
-                return nil
-            }
-        }
+        let (packHeader, overlayOffset) = (found.header, found.overlayOffset)
         guard (headerSize + headway) ..< image.length ~= overlayOffset else {
             throw UnpackError.cantUnpack("file corrupted")
         }
 
-        let modified = packHeader.magic != PackHeader.magic
-        let packer = modified ? "packed by a modified UPX, its marker \(Self.quoted(packHeader.magic)) in place of \"UPX!\"" : "packed by UPX"
+        var signs: [String] = []
+        if packHeader.magic != PackHeader.magic {
+            signs.append("its marker \(Self.quoted(packHeader.magic)) in place of \"UPX!\"")
+        }
+        if let renamed = found.where {
+            signs.append("a segment renamed, its pack header found \(renamed)")
+        }
+        let modified = !signs.isEmpty
+        let packer = modified ? "packed by a modified UPX, " + signs.joined(separator: " and ") : "packed by UPX"
+
         self.image = image
         self.format = format
         self.overlayOffset = overlayOffset
         self.header = packHeader
-        self.headerOffset = start + i + packHeader.offset
+        self.headerOffset = found.offset
         self.uAdler = packHeader.uAdler
         self.cAdler = packHeader.cAdler
         self.packer = packer

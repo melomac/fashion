@@ -654,6 +654,48 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
+     A UPX modified to name its segments otherwise, `__XHDR`, `UPX_DATA`, `__TEXT` or `__LINKEDIT`, which upx -d goes
+     by to find the pack header, writes a file that runs as it is: the stub reads no segment name. upx -d calls the
+     file not packed; unpack looks for the pack header around the segment lying last in the file, and names the
+     renaming in a warning, with the marker when that is replaced too.
+     */
+    func testUnpackFindsThePackHeaderWithTheSegmentsRenamed() throws {
+        let directory = try self.directory("renamed")
+        for (name, unsigned, original) in try self.unsignedLs(in: directory) {
+            let packed = try Data(contentsOf: self.packed(unsigned))
+            let image = try XCTUnwrap(MachO(File(data: packed)))
+            func renamed(_ segment: String, to other: String, in data: Data) throws -> Data {
+                let command = try XCTUnwrap(image.findSegment(segment))
+                var data = data
+                data.replaceSubrange(command.data.startIndex + 8 ..< command.data.startIndex + 24, with: Data(other.utf8) + Data(count: 16 - other.utf8.count))
+                return data
+            }
+            let found = "a segment renamed, its pack header found before its last segment \"__LINKEDYT\""
+            let marker = "its marker \"VQY\\\"\" in place of \"UPX!\""
+            for (suffix, data, modified) in try [
+                ("_linkedit", renamed("__LINKEDIT", to: "__LINKEDYT", in: packed), found),
+                ("_text_linkedit", renamed("__TEXT", to: "__TEXU", in: renamed("__LINKEDIT", to: "__LINKEDYT", in: packed)), found),
+                ("_marker_linkedit", renamed("__LINKEDIT", to: "__LINKEDYT", in: packed.replacing(Data("UPX!".utf8), with: Data("VQY\"".utf8))), "\(marker) and \(found)"),
+            ] {
+                let file = directory / "\(name)\(suffix)"
+                try data.write(to: file)
+                saveFixture(path: file.path)
+                let warning = "fashion: \(file.path): packed by a modified UPX, \(modified)"
+                XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [warning, XCTUnwrap(ByteHash.sha256.digest(original))], name + suffix)
+                let (status, errors) = try runFashion(["--unpack", file.path])
+                XCTAssertEqual(status, 0, name + suffix)
+                XCTAssertEqual(errors, [warning], name + suffix)
+                let reporter = Reporter(console: Console())
+                let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
+                XCTAssertEqual(lines.map(\.text), [warning, file.path + "_unpacked"], name + suffix)
+                XCTAssertEqual(reporter.errorCount, 0, name + suffix)
+                XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), original, name + suffix)
+                XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", file.path + "_upx-d", file.path]), name + suffix)
+            }
+        }
+    }
+
+    /**
      Test the UPX 3.91 XOR behind OSX/Keydnap's backdoor.
 
      ```text
