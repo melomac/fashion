@@ -1101,16 +1101,12 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(MachO.logicalEnd(data: data), original)
     }
 
-    func testMachOEndNonMachOReturnsFullLength() {
-        let data = Data("not a mach-o, just some text".utf8)
-
-        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
-    }
-
-    func testMachOEndTruncatedReturnsFullLength() {
-        let data = Data([0xcf, 0xfa, 0xed]) // truncated MH_MAGIC_64
-
-        XCTAssertEqual(MachO.logicalEnd(data: data), data.count)
+    /// Text and three bytes of a magic parse as no image, lenient or not: there is no end to read from them.
+    func testNonMachOAndTruncatedMagicParseAsNoImage() throws {
+        for data in [Data("not a mach-o, just some text".utf8), Data([0xcf, 0xfa, 0xed])] {
+            XCTAssertNil(try MachO(lenient: File(data: data)))
+            XCTAssertNil(try MachO(File(data: data)))
+        }
     }
 
     func testMachOEndRealBinaryWithinBounds() throws {

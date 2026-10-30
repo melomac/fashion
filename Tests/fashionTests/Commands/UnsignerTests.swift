@@ -199,6 +199,8 @@ final class UnsignerTests: XCTestCase {
         }
         let file = directory / "fat"
         try makeUniversal([(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, Data(contentsOf: x86), 12), (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, Data(contentsOf: arm), 14)], hideLast: true).write(to: file)
+        // Security finds the hidden slice: codesign lists it with the other.
+        XCTAssertEqual(try codesignArchs(file.path), ["x86_64", "arm64"])
         let reporter = Reporter(console: Console())
         let artifact = directory / "fat_unsigned"
         XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [artifact.path])

@@ -395,6 +395,7 @@ final class RunnerTests: XCTestCase {
     func testSlicesHashInPlace() throws {
         let before = try XCTUnwrap(Reporter.peakFootprint())
         let size = Int(before) + 64 << 20
+        try XCTSkipIf(size > Int(UInt32.max), "the process's peak footprint does not fit a fat entry")
         let url = try self.write(self.fat(wrapping: self.machO(), size: size), name: "fat-big")
         defer {
             try? FileManager.default.removeItem(at: url)

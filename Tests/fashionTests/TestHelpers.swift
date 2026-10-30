@@ -464,9 +464,9 @@ func codesign(_ arguments: [String]) throws -> String {
     process.standardError = pipe
 
     try process.run()
-    process.waitUntilExit()
-
+    // Read before waiting: codesign writing more than the pipe holds would otherwise block on a test blocked on it.
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
     let output = String(decoding: data, as: UTF8.self)
 
     guard process.terminationStatus == 0 else {

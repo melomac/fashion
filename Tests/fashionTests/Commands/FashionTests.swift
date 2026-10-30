@@ -78,8 +78,9 @@ final class FashionTests: XCTestCase {
     }
 
     /**
-     Each subcommand answers to its first letter as well, `h` for `hash`, the default still, `t` for `thinr`, which
-     answers to `thin` too, `s` for `unsign` and `p` for `unpack`, which `fashion help` lists beside the names.
+     Each subcommand answers to one letter as well, `h` for `hash`, the default still, `t` for `thinr`, which
+     answers to `thin` too, `i` for `unsign`, `p` for `unpack`, which answers to `upx` too, and `v` for `verify`,
+     which `fashion help` lists beside the names.
      */
     func testSubcommandsAnswerToOneLetter() throws {
         XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot(["h", "--algo", "md5", "x"]) as? Hasher).scan.paths, ["x"])
@@ -96,6 +97,9 @@ final class FashionTests: XCTestCase {
             XCTAssertNotNil(try Fashion.parseAsRoot([alias, "x"]) as? Verify, alias)
         }
         XCTAssertTrue(Thinner.configuration.aliases.contains("t") && Thinner.configuration.aliases.contains("thin"))
+        XCTAssertEqual(Unsigner.configuration.aliases, ["i"])
+        XCTAssertEqual(Unpacker.configuration.aliases, ["p", "upx"])
+        XCTAssertEqual(Verify.configuration.aliases, ["v"])
         XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot([]) as? Hasher).scan.paths, ["."], "hash stays the default")
         XCTAssertEqual(try runFashion(["h", "--algo", "md5", "-q", "/bin/ls"]).status, 0)
         let process = Process()
