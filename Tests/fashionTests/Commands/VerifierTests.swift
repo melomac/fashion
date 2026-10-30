@@ -1171,6 +1171,7 @@ final class VerifierTests: XCTestCase {
         }
         let signature = try XCTUnwrap(Signer.signature(in: cms))
         let stamped = try Self.timestamped(cms, with: token(over: signature, "signature"))
+        saveFixture(stamped)
         XCTAssertNotNil(Signer.signatureAndToken(in: stamped))
         XCTAssertNil(Signer.timestamp(in: stamped), "the authority is no anchor of the system's")
         let date = try XCTUnwrap(Signer.timestamp(in: stamped, anchors: [authority]))

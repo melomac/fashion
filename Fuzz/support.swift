@@ -35,6 +35,36 @@ enum Fuzz {
         Data(bytes: start, count: count)
     }
 
+    /// A thread with a 512 KiB stack, a sixteenth of the main thread's 8 MiB, for the readers that recurse: a
+    /// recursion shows there within the inputs the fuzzer makes, where the product reaches the same depth with a
+    /// larger file. It waits for each input, reads it, and signals the main thread back.
+    private nonisolated(unsafe) static var job: (() -> Void)?
+    private static let handed = DispatchSemaphore(value: 0)
+    private static let finished = DispatchSemaphore(value: 0)
+    private nonisolated(unsafe) static let smallStack: Thread = {
+        let thread = Thread {
+            while true {
+                Fuzz.handed.wait()
+                Fuzz.job?()
+                Fuzz.finished.signal()
+            }
+        }
+        thread.stackSize = 512 << 10
+        thread.start()
+        return thread
+    }()
+
+    /// `body`, run on the small stack and waited for.
+    static func onSmallStack(_ body: () -> Void) {
+        withoutActuallyEscaping(body) { body in
+            _ = self.smallStack
+            self.job = body
+            self.handed.signal()
+            self.finished.wait()
+            self.job = nil
+        }
+    }
+
     /// `Universal.open` on `file`, then what the scan reads from each image it holds.
     static func walk(_ file: File) {
         do {

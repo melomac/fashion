@@ -25,7 +25,7 @@ jobs=${FUZZ_JOBS:-2}
 cores=${FUZZ_CORES:-$(sysctl -n hw.ncpu)}
 
 # The harnesses: each is Fuzz/<name>.swift, with an LLVMFuzzerTestOneInput, and fuzzes corpus/<name>.
-harnesses="macho cdhash xar symhash diff bytehash unpack decompress verify signer"
+harnesses="macho cdhash xar symhash diff bytehash unpack decompress verify signer der"
 
 # The --exact endings a harness is built with (see Package.swift): both for those that read a Mach-O's logical end.
 endings() {
@@ -220,6 +220,10 @@ seed() {
             78617221)
                 cp "$file" "$corpus/xar/"
                 ;;
+            30* | 70*)
+                # DER as it is: a SEQUENCE, a CMS signature the verifier tests made, or a DER property list.
+                cp "$file" "$corpus/der/"
+                ;;
         esac
         cp "$file" "$corpus/bytehash/"
     done
@@ -296,6 +300,26 @@ if data[:4] in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
             superblob(offset, offset + size)
 else:
     superblob(0, len(data))
+PYTHON
+    done
+
+    # The DER each superblob carries, for the der harness: its CMS blob and its DER entitlements, without their blob
+    # headers, as `Signer` and `DEREntitlements` take them.
+    local superblob
+    for superblob in "$corpus"/signer/*; do
+        xcrun python3 -I - "$superblob" "$corpus/der" <<'PYTHON'
+import hashlib, struct, sys
+data, out = open(sys.argv[1], "rb").read(), sys.argv[2]
+count = struct.unpack_from(">I", data, 8)[0] if len(data) >= 12 else 0
+for index in range(min(count, 64)):
+    if 20 + index * 8 > len(data):
+        break
+    slot, offset = struct.unpack_from(">II", data, 12 + index * 8)
+    if slot not in (0x10000, 7) or offset + 8 > len(data):  # the CMS blob, the DER entitlements
+        continue
+    blob = data[offset + 8 : offset + struct.unpack_from(">I", data, offset + 4)[0]]
+    if blob:
+        open(f"{out}/{hashlib.sha256(blob).hexdigest()}", "wb").write(blob)
 PYTHON
     done
 

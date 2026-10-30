@@ -16,11 +16,12 @@ here feed libFuzzer's inputs through those parsers under AddressSanitizer, one e
 | `decompress` | one block of UPX's packed data, fed straight to `UCLBridge.decompress` and `LZMABridge.decompress` by its method, with the slack UCL's decoders may read past a block, up to 1 MiB out, then `PackMach.unfilter` over what came out, where `unpack` reaches them behind a whole packed Mach-O                                             |
 | `verify`     | `fashion verify` over the input: `MachOVerifier` over the universal file, each slice against its table entry and each image, every rule, the padding and the signature's pages read, the superblob's blobs against their slots, `Signer` over the CMS blob through Security's decoder and trustd, and what the parser or Security refuses |
 | `signer`     | `Signer` over a superblob alone, as `LC_CODE_SIGNATURE` points at one: checked as `signingData` checks it, its directories loaded, the CMS blob verified over the primary one and its chain built and read, the certificates rewritten by the fuzzer where the CMS signature does not cover them                                          |
+| `der`        | the DER readers over the bytes as they are: `DER.elements`, the walk of a CMS signature to its signer's signature and timestamp token, the token decoded and its chain built when there is one, the DER entitlements decoder, and a GeneralizedTime; read on a thread with a 512 KiB stack, a sixteenth of the main thread's, so that a recursion shows within the inputs the fuzzer makes |
 
 An input reaches a parser as a `File` read from memory, an edit of one piece over an empty scratch file opened once
 per process (`support.swift`): written over the scratch file and opened from there instead, the way a test fixture
-is, the inputs kept the kernel busier than the parsers. `decompress` and `signer` take their bytes as they are, a
-block's `b_info` then its data, a superblob. `macho`, `cdhash`, `unpack` and `verify` are built with both `--exact` endings (see
+is, the inputs kept the kernel busier than the parsers. `decompress`, `signer` and `der` take their bytes as they are, a
+block's `b_info` then its data, a superblob, DER. `macho`, `cdhash`, `unpack` and `verify` are built with both `--exact` endings (see
 Package.swift): `fuzz-macho`, `fuzz-cdhash`, `fuzz-unpack` and `fuzz-verify` with `SECURITY_STRICT_VALIDATION`, the
 `-segments` ones without.
 
@@ -47,7 +48,9 @@ The corpora are seeded with every fixture the tests build (hand-made, compiled o
 TestHelpers.swift keeps them while `swift test` runs), with `/bin/ls` whole and by slice, with a XAR of this directory,
 and with TLSH and ssdeep digests of real files, `decompress` with every block of the packed images, cut out by
 `b_info`, and `signer` with every embedded signature of the Mach-O fixtures, cut out by `LC_CODE_SIGNATURE`: Apple's
-own, codesign's ad-hoc ones, and the self-signed, altered and ad-hoc-with-a-CMS-blob ones the verifier tests make.
+own, codesign's ad-hoc ones, and the self-signed, altered and ad-hoc-with-a-CMS-blob ones the verifier tests make;
+`der` with the CMS blob and the DER entitlements of each of those superblobs, and the timestamped CMS the verifier
+tests make.
 The files those tests craft, one condition each, are seeds too. The packed images among them come from the `upx` installed; one packed
 with filter 0x53 for arm64 needs a UPX newer than 5.2.1, which packs with 0x52. The `.dict` files give libFuzzer the
 magics, load commands, segment names and code-signature versions it would otherwise have to guess, and `unpack.dict`
