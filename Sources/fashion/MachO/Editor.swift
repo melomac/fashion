@@ -129,8 +129,8 @@ enum MachOEditor {
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
-                        // An archive, aligned by lipo for its members' symbols.
-                        return (arch, whole, arch.cpuType & CPU_ARCH_ABI64 != 0 ? 3 : 2, [])
+                        // An archive, which lipo aligns to 2^3 whatever its architecture.
+                        return (arch, whole, 3, [])
                     }
                     guard let edit = try self.edit(image, of: file, subject: "\(file.path) (\(arch.name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(arch.name, $0) }, keep: keep.map { held in { held(arch.name, $0, $1) } }) else {
                         return (arch, whole, image.universalAlignment, [])
@@ -589,24 +589,24 @@ extension MachO {
     }
 
     /**
-     The alignment `lipo` gives the image in a universal file, as a power of two (`get_seg_align`): the largest that
-     every segment's address allows, from 2^3, 2^2 in a 32-bit image, up to 2^15, which an address of zero allows.
+     The alignment `lipo` gives the image in a universal file it creates, as a power of two
+     (`Universal::defaultAlignment`): 2^14 for an image mapped on 16 KiB pages, the arm64 family and armv7k, and for
+     an arm image dyld manages, a dylib, a bundle or a dynamically linked executable; 2^12 for `x86_64`, `i386` and any
+     other; 2^3 for an object and 2^5 for a dSYM. The segments' addresses do not enter into it.
      */
     var universalAlignment: Int {
-        var align = 15
-        for command in self.loadCommands {
-            let vmaddr: UInt64? = switch command.cmd {
-            case UInt32(LC_SEGMENT):
-                command.payload(as: segment_command.self).map { UInt64(self.sw($0.vmaddr)) }
-            case UInt32(LC_SEGMENT_64):
-                command.payload(as: segment_command_64.self).map { self.sw($0.vmaddr) }
-            default:
-                nil
-            }
-            if let vmaddr, vmaddr != 0 {
-                align = min(align, max(self.is64 ? 3 : 2, vmaddr.trailingZeroBitCount))
-            }
+        switch self.filetype {
+        case UInt32(MH_OBJECT):
+            return 3
+        case UInt32(MH_DSYM):
+            return 5
+        default:
+            break
         }
-        return align
+        if self.uses16KPages {
+            return 14
+        }
+        let managed = [UInt32(MH_DYLIB), UInt32(MH_BUNDLE)].contains(self.filetype) || self.filetype == UInt32(MH_EXECUTE) && self.flags & UInt32(MH_DYLDLINK) != 0
+        return self.cpuType == CPU_TYPE_ARM && managed ? 14 : 12
     }
 }

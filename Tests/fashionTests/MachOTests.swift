@@ -503,6 +503,55 @@ final class MachOTests: XCTestCase {
     }
 
     /**
+     The alignment a slice gets in a universal file is `lipo`'s default for its architecture and file type, whatever
+     its segments' addresses: 2^14 for the arm64 family, armv7k and an arm image dyld manages, 2^12 for the rest,
+     2^3 for an object and 2^5 for a dSYM.
+     */
+    func testUniversalAlignmentIsLipos() throws {
+        func image(_ cpuType: cpu_type_t, _ cpuSubtype: cpu_subtype_t, filetype: UInt32 = UInt32(MH_EXECUTE), flags: UInt32 = 0, vmaddr: UInt64) throws -> MachO {
+            let is64 = cpuType & CPU_ARCH_ABI64 != 0
+            var data = Data()
+            data.appendUInt32(is64 ? MH_MAGIC_64 : MH_MAGIC)
+            data.appendInt32(cpuType)
+            data.appendInt32(cpuSubtype)
+            data.appendUInt32(filetype)
+            data.appendUInt32(1)
+            data.appendUInt32(is64 ? 72 : 56)
+            data.appendUInt32(flags)
+            if is64 {
+                data.appendUInt32(0)
+            }
+            data.appendUInt32(is64 ? UInt32(LC_SEGMENT_64) : UInt32(LC_SEGMENT))
+            data.appendUInt32(is64 ? 72 : 56)
+            try data.append(XCTUnwrap("__TEXT".data(using: .utf8)) + Data(count: 10))
+            for value in [vmaddr, 0x1000, 0, 0x100] { // vmaddr, vmsize, fileoff, filesize
+                if is64 {
+                    data.appendUInt64(value)
+                } else {
+                    data.appendUInt32(UInt32(value))
+                }
+            }
+            for value in [5, 5, 0, 0] as [UInt32] { // maxprot, initprot, nsects, flags
+                data.appendUInt32(value)
+            }
+            data.append(Data(count: 0x100 - data.count))
+            return try XCTUnwrap(MachO(File(data: data)))
+        }
+        // Where the old rule read the segment's address: 2^15 for one at 0x100000000, 2^14 at 0x100004000, 2^16 at 0x10000.
+        XCTAssertEqual(try image(CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, vmaddr: 0x1_0000_0000).universalAlignment, 14)
+        XCTAssertEqual(try image(CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E, filetype: UInt32(MH_DYLIB), vmaddr: 0x4000).universalAlignment, 14)
+        XCTAssertEqual(try image(CPU_TYPE_ARM64_32, 1, vmaddr: 0x4000).universalAlignment, 14)
+        XCTAssertEqual(try image(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, vmaddr: 0x1_0000_4000).universalAlignment, 12)
+        XCTAssertEqual(try image(CPU_TYPE_I386, 3, vmaddr: 0x10000).universalAlignment, 12)
+        XCTAssertEqual(try image(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7K, vmaddr: 0x4000).universalAlignment, 14)
+        XCTAssertEqual(try image(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, vmaddr: 0x4000).universalAlignment, 12)
+        XCTAssertEqual(try image(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, flags: UInt32(MH_DYLDLINK), vmaddr: 0x4000).universalAlignment, 14)
+        XCTAssertEqual(try image(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, filetype: UInt32(MH_BUNDLE), vmaddr: 0x4000).universalAlignment, 14)
+        XCTAssertEqual(try image(CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, filetype: UInt32(MH_OBJECT), vmaddr: 0).universalAlignment, 3)
+        XCTAssertEqual(try image(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, filetype: UInt32(MH_DSYM), vmaddr: 0x1_0000_0000).universalAlignment, 5)
+    }
+
+    /**
      A table that counts no entry is a universal file by an arm64 slice hidden past it alone, as Security and dyld
      read it, libdyld's `macho_for_each_slice` among them; with another entry there, or none, it is no Mach-O.
      */

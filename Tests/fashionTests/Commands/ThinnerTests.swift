@@ -478,6 +478,34 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
+     The universal file is laid out with the alignment `lipo` gives each architecture, not with what the segments'
+     addresses allow: an `x86_64` image linked with 16 KiB segments goes at 2^12 all the same, so the universal file
+     `unsign` restores is the one `lipo` makes of the slices it restores, byte for byte.
+     */
+    func testUnsignLaysTheUniversalFileOutAsLipoAlignsIt() throws {
+        let directory = try self.directory("unsign-alignment")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let x86 = try compile("x86_64", in: directory, ["-arch", "x86_64", "-Wl,-segalign,0x4000"])
+        let arm = try compile("arm64", in: directory, ["-arch", "arm64"])
+        let universal = directory / "universal"
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", x86.path, arm.path, "-output", universal.path]), "cannot run lipo")
+        guard case let .fat(archs) = try Universal.open(File(path: universal.path)) else {
+            return XCTFail("a universal file")
+        }
+        XCTAssertEqual(archs.map(\.align), [12, 14])
+        _ = try codesign(["-s", "-", universal.path])
+        let reporter = Reporter(console: Console())
+        let artifacts = Thinner.lines(for: universal.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text)
+        XCTAssertEqual(Set(artifacts), Set(["universal_x86_64", "universal_x86_64_unsigned", "universal_arm64", "universal_arm64_unsigned"].map { (directory / $0).path }))
+        XCTAssertEqual(reporter.errorCount, 0)
+        let expected = directory / "expected"
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", (directory / "universal_x86_64_unsigned").path, (directory / "universal_arm64_unsigned").path, "-output", expected.path]), "cannot run lipo")
+        XCTAssertEqual(try self.hashLines(universal.path, ["--unsign"]), try [ByteHash.sha256.digest(Data(contentsOf: expected))])
+    }
+
+    /**
      `__LINKEDIT`'s vmsize is restored as the tool that last wrote the segment left it, which signing rounds to 16 KiB
      and keeps nothing of: the page ld64 aligns segments to for an image with a local symbol; the segment's file size
      for one `strip` emptied of them, as `strip` wrote it through cctools 1009, here today's stripped image reshaped so
