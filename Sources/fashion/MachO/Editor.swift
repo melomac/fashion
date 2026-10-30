@@ -310,19 +310,26 @@ enum MachOEditor {
     }
 
     /**
-     A universal file of `slices`, in order, laid out as `lipo` lays them out (`create_fat`): each slice at the first
-     offset after the fat table, or after the slice before it, that its alignment allows, the gaps zeroed; the table
-     records each slice where it lies, and its alignment.
+     A universal file of `slices`, in order, laid out as `lipo` lays them out (`UniversalWriter`): each slice at the
+     first offset after the fat table, or after the slice before it, that its alignment allows, the gaps zeroed; the
+     table records each slice where it lies, and its alignment, and counts the slices as `lipo -hideARM64` counts
+     them, a hidden one lying past the count. The table is 32-bit unless the file was, or a slice lies or sizes past
+     4 GiB, which `lipo` writes a 64-bit table for too.
      */
-    private static func universal(_ slices: [(arch: Universal.Architecture, pieces: [File.Piece], align: Int)], is64: Bool) -> [File.Piece] {
+    static func universal(_ slices: [(arch: Universal.Architecture, pieces: [File.Piece], align: Int)], is64: Bool) -> [File.Piece] {
+        self.universal(slices, wide: is64) ?? self.universal(slices, wide: true)!
+    }
+
+    /// `universal(_:is64:)` with a table of 32-bit or `wide` entries; nil for a 32-bit table that cannot place a slice.
+    private static func universal(_ slices: [(arch: Universal.Architecture, pieces: [File.Piece], align: Int)], wide: Bool) -> [File.Piece]? {
         func append(_ value: some FixedWidthInteger, to data: inout Data) {
             withUnsafeBytes(of: value.bigEndian) { data.append(contentsOf: $0) }
         }
 
         var table = Data()
-        append(is64 ? FAT_MAGIC_64 : FAT_MAGIC, to: &table)
-        append(UInt32(slices.count), to: &table)
-        var offset = table.count + slices.count * (is64 ? MemoryLayout<fat_arch_64>.size : MemoryLayout<fat_arch>.size)
+        append(wide ? FAT_MAGIC_64 : FAT_MAGIC, to: &table)
+        append(UInt32(slices.count { !$0.arch.hidden }), to: &table)
+        var offset = table.count + slices.count * (wide ? MemoryLayout<fat_arch_64>.size : MemoryLayout<fat_arch>.size)
         var body: [File.Piece] = []
         for slice in slices {
             let start = (offset + (1 << slice.align) - 1) & ~((1 << slice.align) - 1)
@@ -333,14 +340,17 @@ enum MachOEditor {
 
             append(slice.arch.cpuType, to: &table)
             append(slice.arch.cpuSubtype, to: &table)
-            if is64 {
+            if wide {
                 append(UInt64(start), to: &table)
                 append(UInt64(size), to: &table)
                 append(UInt32(slice.align), to: &table)
                 append(UInt32(0), to: &table) // reserved
             } else {
-                append(UInt32(truncatingIfNeeded: start), to: &table)
-                append(UInt32(truncatingIfNeeded: size), to: &table)
+                guard let start = UInt32(exactly: start), let size = UInt32(exactly: size) else {
+                    return nil
+                }
+                append(start, to: &table)
+                append(size, to: &table)
                 append(UInt32(slice.align), to: &table)
             }
         }

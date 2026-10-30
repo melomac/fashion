@@ -182,4 +182,57 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(errors, [])
         XCTAssertEqual(try Data(contentsOf: artifact), data)
     }
+
+    /**
+     An arm64 slice `lipo -hideARM64` hid past the table's count stays hidden in the file written whole: the table
+     counts the slices as the kernel reads them, the hidden one lying last, where `Universal` and Security find it.
+     */
+    func testAHiddenSliceStaysHiddenInTheFileWrittenWhole() throws {
+        let directory = try self.directory("hidden")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let x86 = try compile("x86", in: directory, ["-arch", "x86_64"])
+        let arm = try compile("arm", in: directory, ["-arch", "arm64"])
+        for program in [x86, arm] {
+            _ = try codesign(["-s", "-", program.path])
+        }
+        let file = directory / "fat"
+        try makeUniversal([(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, Data(contentsOf: x86), 12), (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, Data(contentsOf: arm), 14)], hideLast: true).write(to: file)
+        let reporter = Reporter(console: Console())
+        let artifact = directory / "fat_unsigned"
+        XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [artifact.path])
+        let unsigned = try Data(contentsOf: artifact)
+        XCTAssertEqual(UInt32(bigEndian: unsigned.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }), 1, "nfat_arch counts the x86_64 slice alone")
+        guard case let .fat(archs) = try Universal.open(path: artifact.path) else {
+            return XCTFail("a universal file")
+        }
+        XCTAssertEqual(archs.map(\.name), ["x86_64", "arm64"])
+        XCTAssertEqual(archs.map(\.hidden), [false, true])
+        for arch in archs {
+            XCTAssertNil(try XCTUnwrap(MachO(File(path: artifact.path), offset: arch.offset, length: arch.length)).findCodeSignature(), arch.name)
+        }
+        XCTAssertEqual(reporter.errorCount, 0)
+    }
+
+    /**
+     A universal file past 4 GiB, which a 32-bit table cannot place, gets a 64-bit table, as `lipo` writes one for it,
+     where a smaller file keeps the 32-bit table it had.
+     */
+    func testAUniversalFilePast4GiBGetsA64BitTable() throws {
+        func table(_ pieces: [File.Piece]) throws -> (magic: UInt32, count: Int) {
+            guard case let .bytes(table)? = pieces.first else {
+                throw XCTSkip("no table")
+            }
+            return (UInt32(bigEndian: table.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }), table.count)
+        }
+        let arch = Universal.Architecture(cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_ALL, offset: 0x1000, length: 0x1_0000_0000, align: 12, hidden: false)
+        let large = MachOEditor.universal([(arch: arch, pieces: [File.Piece.range(0 ..< 0x1_0000_0000)], align: 12)], is64: false)
+        XCTAssertEqual(try table(large).magic, FAT_MAGIC_64)
+        XCTAssertEqual(try table(large).count, 8 + 32)
+        XCTAssertEqual(large.reduce(0) { $0 + $1.count }, 0x1000 + 0x1_0000_0000)
+        let small = MachOEditor.universal([(arch: arch, pieces: [File.Piece.range(0 ..< 0x1000)], align: 12)], is64: false)
+        XCTAssertEqual(try table(small).magic, FAT_MAGIC)
+        XCTAssertEqual(try table(small).count, 8 + 20)
+    }
 }
