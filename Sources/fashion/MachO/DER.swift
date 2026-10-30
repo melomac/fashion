@@ -7,6 +7,10 @@ import Foundation
  rather than DER, the content then running to an end-of-contents of two zero bytes. Multi-byte tags are refused.
  */
 enum DER {
+    /// How deep elements may nest, where a crafted blob nests one every two bytes and each level read is a stack
+    /// frame: Security's CMS and CoreFoundation's plists nest a dozen deep at most.
+    static let maxDepth = 32
+
     /// An element: its tag, its content, and the bytes of the whole, tag and length included.
     struct Element {
         let tag: UInt8
@@ -18,10 +22,17 @@ enum DER {
     struct Reader {
         private let data: Data
         private var offset: Int
+        /// How many indefinite-length elements enclose what is read.
+        private let depth: Int
 
         init(_ data: Data) {
+            self.init(data, depth: 0)
+        }
+
+        private init(_ data: Data, depth: Int) {
             self.data = data
             self.offset = data.startIndex
+            self.depth = depth
         }
 
         var atEnd: Bool {
@@ -29,7 +40,7 @@ enum DER {
         }
 
         /// The next element, its length definite, short or long form, or indefinite, the content then the elements
-        /// up to an end-of-contents; nil for anything else, or none left.
+        /// up to an end-of-contents, nested no deeper than `maxDepth`; nil for anything else, or none left.
         mutating func next() -> Element? {
             guard self.offset + 2 <= self.data.endIndex else {
                 return nil
@@ -42,7 +53,10 @@ enum DER {
             var length = Int(self.data[start + 1])
             var at = start + 2
             if length == 0x80 {
-                var inner = Reader(self.data[at...])
+                guard self.depth < DER.maxDepth else {
+                    return nil
+                }
+                var inner = Reader(self.data[at...], depth: self.depth + 1)
                 while true {
                     guard let element = inner.next() else {
                         return nil

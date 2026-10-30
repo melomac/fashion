@@ -1007,6 +1007,31 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     DER nested a level every two bytes, a megabyte of unclosed indefinite-length sequences for the CMS reader and
+     arrays within arrays for the entitlements decoder, is refused rather than recursed into: each level is a stack
+     frame, and a worker thread has 512 KiB of them.
+     */
+    func testDeeplyNestedDERIsRefused() {
+        let sequences = Data((0 ..< 1 << 20).map { $0 % 2 == 0 ? 0x30 : 0x80 })
+        var arrays = Data([0x30, 0x00])
+        for _ in 0 ..< 20000 {
+            arrays = DER.encode(0x30, arrays)
+        }
+        let plist = DER.encode(0x70, Data([0x02, 0x01, 0x01]) + arrays)
+        let read = self.expectation(description: "read on a worker's stack")
+        let worker = Thread {
+            var reader = DER.Reader(sequences)
+            XCTAssertNil(reader.next())
+            XCTAssertNil(Signer.signatureAndToken(in: sequences))
+            XCTAssertNil(DEREntitlements.decode(plist))
+            read.fulfill()
+        }
+        worker.stackSize = 512 << 10
+        worker.start()
+        self.wait(for: [read], timeout: 60)
+    }
+
+    /**
      Two code directories of one hash type are refused as Security refuses them, an invalid signature
      (`errSecCSSignatureInvalid`): red and counted under verify, and under hash mode's cdhash.
      */

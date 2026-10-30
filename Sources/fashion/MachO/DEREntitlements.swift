@@ -29,9 +29,13 @@ enum DEREntitlements {
 
     // MARK: - Private
 
-    /// The value `element` holds, as a property list holds it; nil for a tag or content a plist has no value for.
-    private static func value(of element: DER.Element) -> Any? {
-        switch element.tag {
+    /// The value `element` holds, as a property list holds it, `depth` levels down; nil for a tag or content a plist
+    /// has no value for, or a value nested past `DER.maxDepth`.
+    private static func value(of element: DER.Element, depth: Int = 0) -> Any? {
+        guard depth < DER.maxDepth else {
+            return nil
+        }
+        return switch element.tag {
         case 0x01: // BOOLEAN
             element.content.count == 1 ? element.content.first != 0 : nil
         case 0x02: // INTEGER
@@ -44,7 +48,7 @@ enum DEREntitlements {
             DER.generalizedTime(element.content)
         case 0x30: // SEQUENCE: an array
             DER.elements(of: element.content).flatMap { elements in
-                let values = elements.compactMap(Self.value)
+                let values = elements.compactMap { Self.value(of: $0, depth: depth + 1) }
                 return values.count == elements.count ? values : nil
             }
         case 0xb0, 0x31: // a dictionary of SEQUENCE pairs: context tag 16, constructed, as CoreFoundation writes it, or a SET
@@ -55,7 +59,7 @@ enum DEREntitlements {
                         pair.tag == 0x30,
                         let entry = DER.elements(of: pair.content), entry.count == 2,
                         entry[0].tag == 0x0c, let key = String(data: entry[0].content, encoding: .utf8),
-                        let value = Self.value(of: entry[1]),
+                        let value = Self.value(of: entry[1], depth: depth + 1),
                         dictionary.updateValue(value, forKey: key) == nil
                     else {
                         return nil
