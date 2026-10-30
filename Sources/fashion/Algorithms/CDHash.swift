@@ -15,6 +15,7 @@ enum CDHashError: Error, Equatable {
     case invalidCodeSignatureBlobOffset(offset: UInt32, signatureSize: Int)
     case invalidCodeSignatureBlobRange(offset: UInt32, size: UInt32, signatureSize: Int)
     case codeDirectoryTooLarge(length: Int)
+    case duplicateCodeDirectory(hashType: String)
 }
 
 extension CDHashError: LocalizedError {
@@ -36,6 +37,8 @@ extension CDHashError: LocalizedError {
             "Invalid Mach-O: code signature blob at offset \(offset.hex) with size \(size.hex) is outside the \(signatureSize.hex)-byte superblob"
         case let .codeDirectoryTooLarge(length):
             "Mach-O too large: its \(length)-byte ad-hoc CodeDirectory would overflow the 32-bit length field"
+        case let .duplicateCodeDirectory(hashType):
+            "Invalid Mach-O: two \(hashType) code directories, which Security refuses as an invalid signature"
         }
     }
 }
@@ -241,19 +244,21 @@ extension MachO {
     /**
      The code directories Security loads (`SecStaticCode::loadCodeDirectories`): the primary slot's, then the
      alternates' from 0x1000 up to the first one missing. Empty, so that the slice counts as unsigned, when the primary
-     is missing, when any of them fails the checks of `EmbeddedCodeDirectory`, or when two share a hash type.
+     is missing or when any of them fails the checks of `EmbeddedCodeDirectory`. Throws for two of one hash type, which
+     Security refuses as an invalid signature (`errSecCSSignatureInvalid`), where codesign says "invalid or
+     unsupported format for signature".
      */
-    static func loadCodeDirectories(_ superblob: Data) -> [EmbeddedCodeDirectory] {
+    static func loadCodeDirectories(_ superblob: Data) throws -> [EmbeddedCodeDirectory] {
         var directories: [EmbeddedCodeDirectory] = []
         for slot in [self.csslotCodeDirectory] + Array(self.csslotAlternateBase ..< self.csslotAlternateLimit) {
             guard let blob = self.component(slot, of: superblob) else {
                 break
             }
-            guard
-                let directory = EmbeddedCodeDirectory(blob),
-                !directories.contains(where: { $0.hashType == directory.hashType })
-            else {
+            guard let directory = EmbeddedCodeDirectory(blob) else {
                 return []
+            }
+            guard !directories.contains(where: { $0.hashType == directory.hashType }) else {
+                throw CDHashError.duplicateCodeDirectory(hashType: directory.hashType.name)
             }
             directories.append(directory)
         }

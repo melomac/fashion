@@ -349,7 +349,8 @@ final class AdhocCDHashTests: XCTestCase {
 
     /**
      Security calls a slice whose code directories it cannot load "not signed at all", and codesign signs it ad
-     hoc up to where the signature starts (`MachORep::signingLimit`).
+     hoc up to where the signature starts (`MachORep::signingLimit`). Two directories of one hash type are no such
+     slice: Security refuses the signature as invalid, and so does this, naming the hash type.
      */
     func testRejectedCodeDirectoriesMakeTheSliceUnsigned() throws {
         func field(_ directory: Data, at offset: Int, _ value: UInt32) -> Data {
@@ -377,7 +378,6 @@ final class AdhocCDHashTests: XCTestCase {
             ("code slots past the end", [(0, field(sha256, at: 28, 1))]),
             ("unpaged code limit without a slot", [(0, field(sha256, at: 32, 1))]),
             ("scatter vector past the end", [(0, field(sha256, at: 44, 40))]),
-            ("two directories of one hash type", [(0, sha256), (0x1000, sha256)]),
             ("one bad alternate", [(0, self.codeDirectory(hashType: 1)), (0x1000, self.codeDirectory(hashType: 9))]),
         ]
 
@@ -388,6 +388,11 @@ final class AdhocCDHashTests: XCTestCase {
             XCTAssertEqual(hashes.map(\.adhoc), [true, true], name)
             // Unlike an unsigned slice's, its ad-hoc cdhashes stand for a signature that does not hold.
             XCTAssertEqual(hashes.map(\.invalid), [true, true], name)
+        }
+
+        let twice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: [(0, sha256), (0x1000, sha256)]))))
+        XCTAssertThrowsError(try twice.codeDirectoryHashes(exact: false)) { error in
+            XCTAssertEqual(error as? CDHashError, .duplicateCodeDirectory(hashType: "sha256"))
         }
     }
 

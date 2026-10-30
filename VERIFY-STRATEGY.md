@@ -174,7 +174,7 @@ left out, with the reason.
 | `LC_CODE_SIGNATURE`'s `datasize` past its superblob's length | not named: Apple's own arm64e slices keep a stale signature's hashes there, where the x86_64 slice's larger signature sized the range (272 OS slices) | |
 | `LC_CODE_SIGNATURE`'s `datasize` not a multiple of 16 | Security `assure_signature_space` "signature size not a multiple of 16"; not named: ld64's linker signatures have any size (1,169 Homebrew slices) | |
 | A special slot not hashing its blob: requirements, entitlements, DER entitlements; not Info.plist, whose slot seals a bundle's plist as often as the `__info_plist` section's, and which a signer may leave at zero (Apple's own `fairplayd`) | kernel `csblob_find_special_slot_blob` for entitlements and DER (`EBADEXEC`); Security `validateComponent` for all | killed |
-| Two code directories of one hash type | kernel "multiple hash=%d CodeDirectories; rejecting"; Security loads none | |
+| Two code directories of one hash type: refused red, as hash mode refuses it | kernel "multiple hash=%d CodeDirectories; rejecting"; Security `loadCodeDirectories` throws `errSecCSSignatureInvalid` (26B118), codesign "invalid or unsupported format for signature" | |
 | A page size other than 4 KiB or 16 KiB | kernel `cs_validate_codedirectory` "disallowing unsupported code signature page shift" | |
 | A scattered code directory | Security only; not checked, named | |
 | Ad hoc (`CS_ADHOC`), linker signed (`CS_LINKER_SIGNED`), no hardened runtime | not named: every arm64 build has one, and Apple's own platform binaries lack the hardened-runtime flag | |

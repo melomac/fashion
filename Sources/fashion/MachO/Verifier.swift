@@ -976,7 +976,7 @@ struct MachOVerifier {
         }
         var found: [String] = []
         let superblob = try image.signingData(signature)
-        let directories = MachO.loadCodeDirectories(superblob)
+        let directories = try MachO.loadCodeDirectories(superblob)
         guard let primary = directories.first else {
             return found + ["a signature Security loads no code directory from"]
         }

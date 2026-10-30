@@ -24,7 +24,7 @@ public func fuzzSigner(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
     let superblob = data.prefix(length)
     guard
         (try? MachO.checkIndex(of: superblob)) != nil,
-        let primary = MachO.loadCodeDirectories(superblob).first,
+        let primary = (try? MachO.loadCodeDirectories(superblob))?.first,
         let cms = MachO.component(0x10000, of: superblob), cms.count > 8
     else {
         return 0

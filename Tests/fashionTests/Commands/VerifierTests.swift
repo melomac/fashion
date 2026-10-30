@@ -1002,6 +1002,42 @@ final class VerifierTests: XCTestCase {
         }
     }
 
+    /**
+     Two code directories of one hash type are refused as Security refuses them, an invalid signature
+     (`errSecCSSignatureInvalid`): red and counted under verify, and under hash mode's cdhash.
+     */
+    func testTwoCodeDirectoriesOfOneHashTypeAreRefused() throws {
+        let directory = try self.directory("twice-sha256")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let sha256 = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+        let blobs: [(slot: UInt32, blob: Data)] = [(0, sha256), (2, requirements), (0x1000, sha256)]
+        var blob = Data()
+        var offset = 12 + 8 * blobs.count
+        [0xfade_0cc0, UInt32(offset + blobs.reduce(0) { $0 + $1.blob.count }), UInt32(blobs.count)].forEach { blob.appendUInt32BE($0) }
+        for entry in blobs {
+            blob.appendUInt32BE(entry.slot); blob.appendUInt32BE(UInt32(offset))
+            offset += entry.blob.count
+        }
+        blobs.forEach { blob += $0.blob }
+        var twice = program
+        twice.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
+        let refusal = "Invalid Mach-O: two sha256 code directories, which Security refuses as an invalid signature"
+        let verified = try self.verify(twice, "twice", in: directory)
+        XCTAssertEqual(verified.lines, [": \(refusal)"])
+        XCTAssertEqual(verified.errors, 1)
+        let file = directory / "twice"
+        let (status, errors) = try runFashion(["--algo", "cdhash", file.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, ["fashion: \(file.path): \(refusal)"])
+    }
+
     /// `cms` with `token` as its signer's `id-aa-timeStampToken` unsigned attribute, the enclosing lengths rewritten.
     private static func timestamped(_ cms: Data, with token: Data) throws -> Data {
         func parts(_ data: Data) throws -> [DER.Element] {
