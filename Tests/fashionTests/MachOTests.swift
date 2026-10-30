@@ -739,6 +739,20 @@ final class MachOTests: XCTestCase {
     }
 
     /**
+     A table of more than 64 MiB of load commands, which no linker writes and this tool refuses before it reads it,
+     is refused red, its commands read as none.
+     */
+    func testSliceRejectsLoadCommandsPastTheLimit() throws {
+        let limit = MachO.maxLoadCommandsSize
+        let data = self.thinHeader(ncmds: 1, sizeofcmds: UInt32(limit + 8), commands: Data(count: limit + 8))
+
+        XCTAssertThrowsError(try MachO(data)) { error in
+            XCTAssertEqual(error as? ParserError, .loadCommandsTooLarge(size: limit + 8, limit: limit))
+        }
+        XCTAssertEqual(MachO.loadCommands(data: data).count, 0)
+    }
+
+    /**
      A command header declaring cmdsize 0 can never advance the parser; it must not count as a command.
      */
     func testSliceRejectsZeroSizeCommand() {

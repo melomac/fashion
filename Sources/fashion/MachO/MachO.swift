@@ -13,6 +13,7 @@ enum ParserError: Error, Equatable {
     case invalidStringTableIndex(index: UInt32, tableSize: UInt32)
     case invalidSegmentRange(name: String, offset: UInt64, size: UInt64, fileSize: Int)
     case symbolNamesTooLong(limit: Int)
+    case loadCommandsTooLarge(size: Int, limit: Int)
 }
 
 extension ParserError: LocalizedError {
@@ -34,6 +35,8 @@ extension ParserError: LocalizedError {
             "Invalid Mach-O: string table at offset \(offset.hex) with size \(size.hex) is outside the \(fileSize.hex)-byte slice"
         case let .symbolNamesTooLong(limit):
             "Mach-O too large: its external symbol names add up to more than \(limit) bytes"
+        case let .loadCommandsTooLarge(size, limit):
+            "Mach-O too large: its load commands add up to \(size) bytes, more than \(limit)"
         case let .invalidStringTableIndex(index, tableSize):
             "Invalid Mach-O: string table index \(index.hex) is outside the \(tableSize.hex)-byte table"
         case let .invalidSegmentRange(name, offset, size, fileSize):
@@ -71,6 +74,13 @@ struct MachO {
     let reserved: UInt32
     /// The most bytes one read takes for a header and its load commands (4 KiB), which hold both for most images.
     static let headSize = 4096
+    /**
+     The most bytes of load commands an image may declare (64 MiB), a limit of this tool's, as `maxSymbolNamesLength`
+     is: no loader has one, the kernel maps what `sizeofcmds` says, and the largest tables the toolchain writes are
+     some hundreds of kilobytes, where a crafted table of gigabytes would be read whole and walked into an array three
+     times its size.
+     */
+    static let maxLoadCommandsSize = 64 << 20
     let loadCommands: [LoadCommand]
     /// Whether the commands fill the table the way `MachOBase::nextCommand` requires.
     private let tableIsValid: Bool
@@ -110,9 +120,10 @@ struct MachO {
         self.flags = swapped(header.flags)
         self.reserved = layout.is64 ? swapped(head.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: MemoryLayout<mach_header>.size, as: UInt32.self) }) : 0
 
-        // The header and the load commands in one buffer, as `MachO::MachO` reads them, when the image holds them.
+        // The header and the load commands in one buffer, as `MachO::MachO` reads them, when the image holds them
+        // and they stay under the limit.
         let end = layout.headerSize + self.sizeofcmds
-        let table = try end <= length ? (end <= head.count ? head.prefix(end) : file.read(at: offset, count: end)) : head
+        let table = try self.sizeofcmds <= Self.maxLoadCommandsSize && end <= length ? (end <= head.count ? head.prefix(end) : file.read(at: offset, count: end)) : head
         (self.loadCommands, self.tableIsValid) = Self.parseLoadCommands(data: table, headerSize: layout.headerSize, sizeofcmds: self.sizeofcmds, swap: layout.swap)
     }
 
@@ -125,6 +136,11 @@ struct MachO {
     init?(_ file: File, offset: Int = 0, length: Int? = nil, head: Data? = nil) throws {
         guard let image = try MachO(lenient: file, offset: offset, length: length, head: head) else {
             return nil
+        }
+        // The limit is for a table the slice holds: one past the slice is a table it does not hold, whatever its size.
+        let headerSize = image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+        guard image.sizeofcmds <= Self.maxLoadCommandsSize || headerSize + image.sizeofcmds > image.length else {
+            throw ParserError.loadCommandsTooLarge(size: image.sizeofcmds, limit: Self.maxLoadCommandsSize)
         }
         guard image.tableIsValid else {
             throw ParserError.invalidLoadCommandTable(size: UInt32(image.sizeofcmds), fileSize: image.length)
