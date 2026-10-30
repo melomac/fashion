@@ -55,7 +55,8 @@ extension Fashion {
             functions -c __fashion_tokens __fashion_command_line_tokens
             function __fashion_tokens
                 set -l tokens (__fashion_command_line_tokens $argv)
-                if test "$argv" = -pc -a (count $tokens) -ge 2
+                # -pc for the conditions, -p for the words a custom completion hands back to fashion.
+                if string match -q -- '-p*' "$argv"; and test (count $tokens) -ge 2
                     switch $tokens[2]
             \(cases.joined())\
                     case \(names.joined(separator: " "))

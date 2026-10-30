@@ -911,7 +911,7 @@ struct Digester {
             return
         }
         self.mode = if command.symbolOptions.symhash {
-            .symhash(hashes, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.sortSymbols)
+            .symhash(hashes, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.order)
         } else if command.xarOptions.xarToc {
             .xarToc(hashes, decompress: command.xarOptions.decompress)
         } else if command.hash.slices {

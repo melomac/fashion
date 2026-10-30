@@ -64,16 +64,39 @@ extension Algorithm: ExpressibleByArgument {
 
     var defaultValueDescription: String {
         switch self {
-        case .md5: "MD5"
-        case .sha1: "SHA-1"
-        case .sha256: "SHA-256"
-        case .sha384: "SHA-384"
-        case .sha512: "SHA-512"
-        case .git: "Git blob (SHA-1)"
-        case .git256: "Git blob (SHA-256)"
-        case .ssdeep: "ssdeep fuzzy hash"
+        case .md5: "MD5 insecure hash"
+        case .sha1: "SHA-1 insecure hash"
+        case .sha256: "SHA-256 hash"
+        case .sha384: "SHA-384 hash"
+        case .sha512: "SHA-512 hash"
+        case .git: "Git blob SHA-1 hash"
+        case .git256: "Git blob SHA-256 hash"
+        case .ssdeep: "Spam Sum Deep fuzzy hash"
         case .tlsh: "Trend Micro Locality Sensitive Hash"
-        case .cdhash: "CodeDirectory hash (ADHOC for unsigned slices)"
+        case .cdhash: "CodeDirectory hash"
+        }
+    }
+
+    /**
+     Complete each algorithm with its own description rather than the option's.
+
+     The generated completion scripts run `fashion ---completion` and read one
+     candidate per line: fish takes a description after a tab, zsh after a
+     colon, and bash takes the bare value.
+     */
+    static var defaultCompletionKind: CompletionKind {
+        .custom { _, _, _ in
+            let separator: String? = switch ProcessInfo.processInfo.environment["SAP_SHELL"] {
+            case "fish": "\t"
+            case "zsh": ":"
+            default: nil
+            }
+            return allCases.map { algorithm in
+                guard let separator else {
+                    return algorithm.rawValue
+                }
+                return algorithm.rawValue + separator + algorithm.defaultValueDescription
+            }
         }
     }
 }
@@ -282,14 +305,14 @@ struct SymbolOptions: ParsableArguments {
     @Option(name: [.long, .customLong("sep")], help: ArgumentHelp("Symbol separator.", valueName: "char"))
     var separator: String = ","
 
-    @Flag(inversion: .prefixedNo, help: "Sort symbols before hashing.")
-    var sortSymbols = true
+    @Flag(name: .shortAndLong, inversion: .prefixedNo, help: "Sort symbols before hashing.")
+    var order = true
 }
 
 struct XAROptions: ParsableArguments {
     @Flag(name: [.long, .customLong("xar")], help: "Hash XAR table of contents.")
     var xarToc = false
 
-    @Flag(name: .shortAndLong, help: "Decompress table of contents before hashing.")
+    @Flag(name: [.short, .customLong("dec"), .long], help: "Decompress table of contents before hashing.")
     var decompress = false
 }
