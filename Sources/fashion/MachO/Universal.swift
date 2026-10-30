@@ -55,9 +55,12 @@ enum Universal {
 
      A fat architecture is checked to lie inside the file; what it contains is left to each consumer,
      since a universal static library carries `ar` archives rather than Mach-O slices. A 32-bit table is read one
-     entry past its count, as Security's `Universal` reads it, and that entry is an architecture when it names arm64.
+     entry past its count, as Security's `Universal` reads it, and that entry is an architecture when it names arm64,
+     the only one of a table that counts none. One that names arm64 but does not lie in the file is no slice here,
+     as hash mode takes the file, and `hiddenRefused` is told its name and what is wrong with it: dyld refuses the
+     file for it, which verify says.
      */
-    static func open(_ file: File) throws -> Universal {
+    static func open(_ file: File, hiddenRefused: ((_ name: String, _ error: ParserError) -> Void)? = nil) throws -> Universal {
         // MachORep::candidate reads a 32-bit mach_header before it considers a file Mach-O code at all, so a magic-only
         // stub (a truncated Java class, say) is an ordinary file, which codesign signs as such.
         guard file.size >= MemoryLayout<mach_header>.size else {
@@ -72,9 +75,9 @@ enum Universal {
 
         switch head.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
         case FAT_MAGIC, FAT_CIGAM:
-            return try self.parseFat(file, head: head, is64: false)
+            return try self.parseFat(file, head: head, is64: false, hiddenRefused: hiddenRefused)
         case FAT_MAGIC_64, FAT_CIGAM_64:
-            return try self.parseFat(file, head: head, is64: true)
+            return try self.parseFat(file, head: head, is64: true, hiddenRefused: hiddenRefused)
         default:
             return .notMachO
         }
@@ -197,7 +200,7 @@ enum Universal {
         }
     }
 
-    private static func parseFat(_ file: File, head: Data, is64: Bool, counting counts: ClosedRange<UInt32> = 1 ... Universal.maxSliceCount) throws -> Universal {
+    private static func parseFat(_ file: File, head: Data, is64: Bool, counting counts: ClosedRange<UInt32> = 0 ... Universal.maxSliceCount, hiddenRefused: ((_ name: String, _ error: ParserError) -> Void)? = nil) throws -> Universal {
         let nfatArch: UInt32 = head.withUnsafeBytes { ptr in
             UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
         }
@@ -214,7 +217,8 @@ enum Universal {
 
         // Security's `Universal` reads a 32-bit table one entry past its count, and counts that entry when it names
         // arm64 (its "Hack alert", 15001604): the layout `lipo -hideARM64` wrote, whose arm64 slice dyld loads too
-        // ("Look for one more slice") where the kernel, `file` and most tools read the count alone.
+        // ("Look for one more slice") where the kernel, `file` and most tools read the count alone. Neither has a
+        // count below which it looks: a table that counts no entry and hides an arm64 slice is that slice to both.
         let extra = !is64 && tableSize + entrySize <= file.size
         let read = tableSize + (extra ? entrySize : 0)
         let table = read <= head.count ? head : try file.read(at: 0, count: read)
@@ -243,7 +247,8 @@ enum Universal {
 
                 // Every slice must start after the table and end inside the file. Int(exactly:) and the
                 // subtraction keep a crafted 64-bit fat from trapping on conversion or overflow. A hidden entry that
-                // does not is no slice, as dyld leaves it.
+                // does not is no slice here, where the table's own are: dyld checks it as it checks them and refuses
+                // the file (`Universal::valid`), which the caller is told for verify to say.
                 guard
                     let start = Int(exactly: sliceOffset),
                     let size = Int(exactly: sliceSize),
@@ -252,10 +257,13 @@ enum Universal {
                     start <= file.size,
                     size <= file.size - start
                 else {
+                    let error = ParserError.invalidFatArchitectureRange(offset: sliceOffset, size: sliceSize, fileSize: file.size)
                     if hidden {
+                        let cpuSubtype = cpu_subtype_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 4, as: cpu_subtype_t.self))
+                        hiddenRefused?(self.archName(cpuType: cpuType, cpuSubtype: cpuSubtype), error)
                         break
                     }
-                    throw ParserError.invalidFatArchitectureRange(offset: sliceOffset, size: sliceSize, fileSize: file.size)
+                    throw error
                 }
 
                 archs.append(Architecture(
@@ -268,7 +276,8 @@ enum Universal {
                 ))
             }
 
-            return .fat(archs)
+            // A table that counts no entry is a universal file by its hidden slice alone.
+            return archs.isEmpty ? .notMachO : .fat(archs)
         }
     }
 }

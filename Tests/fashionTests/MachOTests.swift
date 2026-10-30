@@ -503,6 +503,39 @@ final class MachOTests: XCTestCase {
     }
 
     /**
+     A table that counts no entry is a universal file by an arm64 slice hidden past it alone, as Security and dyld
+     read it, libdyld's `macho_for_each_slice` among them; with another entry there, or none, it is no Mach-O.
+     */
+    func testAZeroCountTableIsAUniversalFileByItsHiddenSlice() throws {
+        let arm = (cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64_ALL, data: self.makeThin64(), align: 12)
+        let alone = makeUniversal([arm], hideLast: true)
+        guard case let .fat(archs) = try Universal.open(data: alone) else {
+            return XCTFail("a universal file")
+        }
+        XCTAssertEqual(archs.map(\.hidden), [true])
+        let url = FileManager.default.temporaryDirectory / "fashion-fat0-\(UUID())"
+        try alone.write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        var dyldSlices = 0
+        XCTAssertEqual(macho_for_each_slice(url.path()) { _, _, _, _ in dyldSlices += 1 }, 0)
+        XCTAssertEqual(dyldSlices, 1)
+
+        let x86 = (cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_ALL, data: self.makeThin64(cpuType: CPU_TYPE_X86_64), align: 12)
+        guard case .notMachO = try Universal.open(data: makeUniversal([x86], hideLast: true)) else {
+            return XCTFail("no Mach-O")
+        }
+        var empty = Data()
+        empty.appendUInt32BE(FAT_MAGIC)
+        empty.appendUInt32BE(0)
+        empty.append(Data(count: 64))
+        guard case .notMachO = try Universal.open(data: empty) else {
+            return XCTFail("no Mach-O")
+        }
+    }
+
+    /**
      0xCAFEBABE shared magic, but the big-endian u32 at offset 4 is a Java major version (52), not an arch count.
      */
     func testIsMachOFalseForJavaClass() throws {

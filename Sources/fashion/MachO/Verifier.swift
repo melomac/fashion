@@ -929,7 +929,8 @@ struct MachOVerifier {
     ].map { UInt32(bitPattern: $0) } + [
         LC_DYLD_INFO_ONLY,
         LC_DYLD_EXPORTS_TRIE,
-        LC_DYLD_CHAINED_FIXUPS]
+        LC_DYLD_CHAINED_FIXUPS,
+    ]
 
     /**
      The tables as dyld's `isValidLinkeditLayout` lays them: each inside `__LINKEDIT`, the first of that name as dyld
@@ -1251,8 +1252,9 @@ struct MachOVerifier {
 
     /**
      What is odd about a universal file itself: one the kernel runs no slice of (`FAT_MAGIC_64`); a slice hidden past
-     the table's count, which dyld and codesign find and the kernel does not; two slices of one architecture, which the
-     kernel refuses (`fatfile_validate_fatarches`); slices that overlap; a slice not aligned as its entry declares;
+     the table's count, which codesign finds and the kernel does not, and dyld finds when the entry names arm64 with
+     no subtype and the table counts fewer than 16 (`forEachSlice`, `Architecture::operator==`); two slices of one
+     architecture, which the kernel refuses (`fatfile_validate_fatarches`); slices that overlap; a slice not aligned as its entry declares;
      padding before a slice that is not zero, which Security calls suspicious (`Universal::Universal`); and bytes past
      the last slice.
      */
@@ -1265,7 +1267,8 @@ struct MachOVerifier {
         }
         let counted = archs.filter { !$0.hidden }.count
         for arch in archs where arch.hidden {
-            found.append("slice \(arch.name) is hidden past the table's \(String(counted, pluralizing: "entry", plural: "entries")): dyld and codesign find it, the kernel does not")
+            let dyld = arch.cpuSubtype == CPU_SUBTYPE_ARM64_ALL && counted < Universal.maxSliceCount
+            found.append("slice \(arch.name) is hidden past the table's \(String(counted, pluralizing: "entry", plural: "entries")): \(dyld ? "dyld and codesign find it, the kernel does not" : "codesign finds it, dyld and the kernel do not")")
         }
         // The kernel compares the entries' cputype and cpusubtype as they are, capability bits included.
         var slices: [String: (name: String, count: Int)] = [:]

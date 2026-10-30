@@ -81,7 +81,7 @@ left out, with the reason.
 
 | Rule | Authority | Launch |
 |:--|:--|:--|
-| An arm64 slice hidden past the table: `nfat_arch` entries plus one, when that one is `arm64`/`arm64 all` (`lipo -hideARM64`) | dyld `forEachSlice` "Look for one more slice"; Security `Universal::Universal` "Hack alert" 15001604, `mArchCount++`; the kernel reads `nfat_arch` only | ran: the kernel picked x86_64; dyld and codesign see two slices, `lipo -archs` prints both, `file` prints one |
+| An arm64 slice hidden past the table: `nfat_arch` entries plus one, when that one names arm64 (`lipo -hideARM64`), past a count of none too; the line says who finds it, and one whose range does not hold is refused red, as dyld refuses the file | dyld `forEachSlice` "Look for one more slice", an exact `arm64` entry below 16 entries, which `Universal::valid` checks like the others; Security `Universal::Universal` "Hack alert" 15001604, `mArchCount++`, any arm64 subtype; the kernel reads `nfat_arch` only | ran: the kernel picked x86_64; dyld and codesign see two slices, `lipo -archs` prints both, `file` prints one |
 | Two slices of one `cputype`/`cpusubtype` | kernel `fatfile_validate_fatarches` → `LOAD_BADMACHO` | `errno 88 Malformed Mach-o file` |
 | The table's `cputype`/`cpusubtype` not the slice header's | dyld `isValidSlice` "cpu type in slice does not match fat header"; kernel `exec_mach_imgact` `EBADARCH` | `errno 86 Bad CPU type` |
 | A slice not aligned to its own page: 16 KiB for arm64, 4 KiB otherwise | dyld `isValidSlice` "slice is not page aligned" (`uses16KPages`) | killed (unsigned arm64) |
@@ -266,8 +266,9 @@ marker under the Apple Code Signing CA), the App Store leaves, Developer ID unde
 submission leaves, anything else Apple issued, and chains that end outside Apple's three roots.
 
 The model carries what the rules need: `Universal` reads a 32-bit fat table one entry past its count, as Security's
-`Universal` does, and counts that entry when it names arm64 (`Architecture.hidden`), so hash mode, `thin` and
-`--exact` see the hidden slice too; `MachO` keeps `ncmds`, `flags` and the 64-bit header's `reserved`, and
+`Universal` does, and counts that entry when it names arm64 (`Architecture.hidden`), a count of none included, so hash
+mode, `thin` and `--exact` see the hidden slice too, and drops one that does not lie in the file, which verify alone
+refuses; `MachO` keeps `ncmds`, `flags` and the 64-bit header's `reserved`, and
 `fileRanges(of:)` names each range a command references; `EmbeddedCodeDirectory` reads its team identifier.
 
 Adding a rule is a guard and a sentence in the group it belongs to, and a test that crafts the condition. Its doc

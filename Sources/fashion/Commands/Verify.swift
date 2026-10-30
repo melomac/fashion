@@ -96,7 +96,10 @@ extension Verify {
     /// The same over a file already open, which throws what it refuses of the file as a whole: the fuzzer's `verify`
     /// harness runs it with closures that keep nothing.
     static func verify(_ file: File, found: (_ finding: String, _ arch: String?) -> Void, refused: (_ error: Error, _ arch: String?) -> Void) throws {
-        switch try Universal.open(file) {
+        // The slice hidden past the table's count that does not lie in the file: no slice to hash mode, which takes
+        // the file as the table counts it, a refusal here, as dyld refuses the file for it.
+        var hiddenRefused: (name: String, error: ParserError)?
+        switch try Universal.open(file, hiddenRefused: { hiddenRefused = ($0, $1) }) {
         case let .thin(image):
             let (findings, error) = MachOVerifier(image, in: file).anomalies()
             findings.forEach { found($0, nil) }
@@ -105,6 +108,9 @@ extension Verify {
             }
         case let .fat(archs):
             MachOVerifier.anomalies(universal: file, archs).forEach { found($0, nil) }
+            if let hiddenRefused {
+                refused(hiddenRefused.error, "\(hiddenRefused.name) hidden past the table")
+            }
             for arch in archs {
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {

@@ -854,7 +854,8 @@ final class VerifierTests: XCTestCase {
 
     /**
      A universal file as the kernel, dyld and Security read it: an arm64 slice hidden past the table's count, which
-     is a slice to `Universal` as to Security, two slices of one architecture, a slice whose table entry names another
+     is a slice to `Universal` as to Security, past a count of none too, or with a subtype dyld does not take, or
+     with a range that does not hold, two slices of one architecture, a slice whose table entry names another
      architecture than its header, padding that is not zero, a 64-bit universal file, a slice that is itself universal,
      a slice off its page, and one off the alignment its entry declares.
      */
@@ -875,6 +876,30 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(archs.map(\.name), ["x86_64", "arm64"])
         XCTAssertEqual(archs.map(\.hidden), [false, true])
         XCTAssertEqual(try Universal.fileEnd(data: hidden), hidden.count)
+        // A table that counts no entry is a universal file by the arm64 slice hidden past it, to codesign and dyld.
+        let alone = makeUniversal([ARM], hideLast: true)
+        XCTAssertEqual(try self.verify(alone, "alone", in: directory).lines, [": slice arm64 is hidden past the table's 0 entries: dyld and codesign find it, the kernel does not", unsigned])
+        guard case let .fat(only) = try Universal.open(data: alone) else {
+            return XCTFail("a universal file")
+        }
+        XCTAssertEqual(only.map(\.hidden), [true])
+        // Hidden with a subtype, which dyld's exact compare of arm64 leaves to codesign alone.
+        XCTAssertEqual(try self.verify(makeUniversal([X86, (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E, arm, 14)], hideLast: true), "hiddene", in: directory).lines, [": slice arm64e is hidden past the table's 1 entry: codesign finds it, dyld and the kernel do not", ": slice arm64e by the table is arm64 by its header", " (arm64e): not signed, which the kernel refuses to run as arm64"])
+        // A hidden entry that does not lie in the file is no slice to hash mode, its entry and its bytes what the
+        // table leaves around the counted slice, and to verify the refusal dyld makes of the file.
+        var unheld = hidden
+        unheld.store(UInt32(0xffff_ffff).bigEndian, at: 8 + 20 + 12)
+        let refused = try self.verify(unheld, "unheld", in: directory)
+        XCTAssertEqual(refused.lines, [
+            ": 0x8 bytes of padding before slice x86_64 are not zero, the first at 0x1c",
+            ": \((unheld.count - 0x1000 - x86.count).hex) bytes past the last slice, x86_64's end at \((0x1000 + x86.count).hex)",
+            " (arm64 hidden past the table): Invalid Mach-O: fat architecture range at offset 0x4000 with size 0xffffffff is outside the \(unheld.count.hex)-byte file",
+        ])
+        XCTAssertEqual(refused.errors, 1)
+        guard case let .fat(counted) = try Universal.open(data: unheld) else {
+            return XCTFail("a universal file")
+        }
+        XCTAssertEqual(counted.map(\.name), ["x86_64"])
 
         XCTAssertEqual(try self.verify(makeUniversal([X86, X86]), "twice", in: directory).lines, [": 2 slices of x86_64, which the kernel refuses"])
         XCTAssertEqual(try self.verify(makeUniversal([X86, (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E, arm, 14)]), "mismatch", in: directory).lines, [": slice arm64e by the table is arm64 by its header", " (arm64e): not signed, which the kernel refuses to run as arm64"])
