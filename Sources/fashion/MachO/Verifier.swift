@@ -318,7 +318,8 @@ struct MachOVerifier {
     /**
      The table as the loaders walk it: `ncmds` commands, where Security and this parser walk `sizeofcmds` (the
      kernel's `parse_machfile`, dyld's `forEachLoadCommand`), so `ncmds` short of the table hides commands from the
-     loaders alone; a command size that is not pointer sized, which dyld's `Header::validLoadCommands` refuses (the
+     loaders alone, and bytes past the last command inside `sizeofcmds` are read by none of them; a command size that
+     is not pointer sized, which dyld's `Header::validLoadCommands` refuses (the
      published `forEachLoadCommand` asks a multiple of 4 alone); a command dyld does not know, flagged `LC_REQ_DYLD`,
      where one without the flag is skipped; a command of a fixed structure sized otherwise, whose extra bytes no
      loader reads, or `LC_BUILD_VERSION` sized other than its tools; a segment command of the other ABI, which the
@@ -338,6 +339,9 @@ struct MachOVerifier {
             found.append("ncmds \(image.ncmds) hides the last \(String(held - image.ncmds, pluralizing: "command")) of \(held) from the loaders: \(unread)")
         } else if image.ncmds > held {
             found.append("ncmds \(image.ncmds) exceeds the \(String(held, pluralizing: "command")) the table holds")
+        }
+        if image.loadCommandsTail > 0 {
+            found.append("sizeofcmds holds \(image.loadCommandsTail.hex) bytes past the last load command, which the loaders never read and Security's walk stops short of: codesign verifies the image and cannot re-sign it, Rosetta refuses it")
         }
         let pointer = image.is64 ? 8 : 4
         let unaligned = image.loadCommands.enumerated().filter { $0.element.data.count % pointer != 0 }

@@ -720,11 +720,20 @@ final class MachOTests: XCTestCase {
     }
 
     /**
-     One 24-byte command inside a declared 32-byte table: the leftover bytes are not a command.
+     One 24-byte command inside a declared 32-byte table: the 8 bytes left hold no command, and the table is taken
+     with them as its tail, as the kernel and dyld take it, reading `ncmds` commands, and as codesign verifies it. A
+     tail shorter than a command header is one too. The table is refused when `ncmds` commands do not fit before it.
      */
-    func testSliceRejectsCommandsNotFillingTable() {
-        let data = self.thinHeader(ncmds: 1, sizeofcmds: 32, commands: self.command(LC_UUID, size: 24) + Data(repeating: 0, count: 8))
+    func testSliceAcceptsATailNoCommandCovers() throws {
+        let command = self.command(LC_UUID, size: 24)
+        let tailed = try XCTUnwrap(MachO(self.thinHeader(ncmds: 1, sizeofcmds: 32, commands: command + Data(count: 8))))
+        XCTAssertEqual(tailed.loadCommands.count, 1)
+        XCTAssertEqual(tailed.loadCommandsTail, 8)
+        let short = try XCTUnwrap(MachO(self.thinHeader(ncmds: 1, sizeofcmds: 28, commands: command + Data(count: 4))))
+        XCTAssertEqual(short.loadCommandsTail, 4)
+        XCTAssertEqual(try XCTUnwrap(MachO(self.thinHeader(ncmds: 1, sizeofcmds: 24, commands: command))).loadCommandsTail, 0)
 
+        let data = self.thinHeader(ncmds: 2, sizeofcmds: 32, commands: command + Data(count: 8))
         XCTAssertThrowsError(try MachO(data)) { error in
             XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(size: 32, fileSize: data.count))
         }

@@ -13,17 +13,15 @@ final class RunnerTests: XCTestCase {
         return try Hasher.parse(arguments).scan()
     }
 
-    /**
-     A thin arm64 Mach-O with one `LC_SYMTAB`, whose declared load-command table is `padding` bytes longer than the command.
-     */
-    private func machO(padding: UInt32 = 0) -> Data {
+    /// A thin arm64 Mach-O with one `LC_SYMTAB`, its load-command table declared `overhang` bytes past the file's end.
+    private func machO(overhang: UInt32 = 0) -> Data {
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)
         data.appendInt32(CPU_TYPE_ARM64)
         data.appendInt32(0)
         data.appendUInt32(UInt32(MH_EXECUTE))
         data.appendUInt32(1) // ncmds
-        data.appendUInt32(24 + padding) // sizeofcmds
+        data.appendUInt32(24 + overhang) // sizeofcmds
         data.appendUInt32(0)
         data.appendUInt32(0)
         data.appendUInt32(UInt32(LC_SYMTAB))
@@ -32,7 +30,6 @@ final class RunnerTests: XCTestCase {
         data.appendUInt32(0) // nsyms
         data.appendUInt32(56) // stroff
         data.appendUInt32(0) // strsize
-        data.append(Data(repeating: 0, count: Int(padding)))
         return data
     }
 
@@ -106,7 +103,7 @@ final class RunnerTests: XCTestCase {
     }
 
     func testMalformedMachOSetsExitCode2() throws {
-        let url = try self.write(self.machO(padding: 8), name: "bad")
+        let url = try self.write(self.machO(overhang: 8), name: "bad")
         defer {
             try? FileManager.default.removeItem(at: url)
         }
@@ -122,7 +119,7 @@ final class RunnerTests: XCTestCase {
      --slices is a Mach-O-aware mode: a broken slice is reported whether or not --exact is set, after its architecture.
      */
     func testSlicesRejectsMalformedSliceInsideFat() throws {
-        let bad = try self.write(self.fat(wrapping: self.machO(padding: 8)), name: "fat-bad")
+        let bad = try self.write(self.fat(wrapping: self.machO(overhang: 8)), name: "fat-bad")
         let good = try self.write(self.fat(wrapping: self.machO()), name: "fat-ok")
         defer {
             try? FileManager.default.removeItem(at: bad)

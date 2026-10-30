@@ -392,7 +392,8 @@ final class VerifierTests: XCTestCase {
 
     /**
      The table as the loaders walk it: `ncmds` short of the commands the table holds names the commands hidden from
-     the loaders, one more than it holds is named too, as is a command size that is not a multiple of 4, a command of
+     the loaders, one more than it holds is named too, as are bytes past the last command inside `sizeofcmds`, a
+     command size that is not a multiple of 4, a command of
      a fixed structure sized otherwise, a command dyld does not know when it is flagged `LC_REQ_DYLD` and not when it
      is not, a 32-bit `LC_SEGMENT` in a 64-bit image, the reserved field holding anything, a command the loaders take
      once twice, `LC_DYSYMTAB` without `LC_SYMTAB` or partitioning the symbol table other than as the linker lays it,
@@ -409,6 +410,12 @@ final class VerifierTests: XCTestCase {
         var long = program
         long.store(UInt32(commands.count + 1), at: 16)
         XCTAssertEqual(try self.verify(long, "long", in: directory).lines, [": ncmds \(commands.count + 1) exceeds the \(commands.count) commands the table holds"])
+        // The linker pads the header with zeros past the commands: sizeofcmds taking 8 of them in holds a tail.
+        var tailed = program
+        let sizeofcmds = try XCTUnwrap(MachO(File(data: program))).sizeofcmds
+        XCTAssertEqual(program[(program.startIndex + 32 + sizeofcmds) ..< (program.startIndex + 32 + sizeofcmds + 8)], Data(count: 8))
+        tailed.store(UInt32(sizeofcmds + 8), at: 20)
+        XCTAssertEqual(try self.verify(tailed, "tailed", in: directory).lines, [": sizeofcmds holds 0x8 bytes past the last load command, which the loaders never read and Security's walk stops short of: codesign verifies the image and cannot re-sign it, Rosetta refuses it"])
 
         // The last command clang's linker writes is LC_DATA_IN_CODE, 16 bytes of fixed structure.
         var odd = program

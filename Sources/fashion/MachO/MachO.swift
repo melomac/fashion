@@ -82,8 +82,15 @@ struct MachO {
      */
     static let maxLoadCommandsSize = 64 << 20
     let loadCommands: [LoadCommand]
-    /// Whether the commands fill the table the way `MachOBase::nextCommand` requires.
+    /// Whether the table holds its commands the way the loaders and `MachOBase::nextCommand` require.
     private let tableIsValid: Bool
+    /**
+     The bytes inside `sizeofcmds` past the last load command that no command covers: none for a table the commands
+     fill, as the linker writes it. The kernel and dyld walk `ncmds` commands and never read them; Security's walk
+     is lazy and stops at what it looks for, so codesign verifies the image, while codesign cannot re-sign it and
+     Rosetta refuses it.
+     */
+    let loadCommandsTail: Int
 
     /**
      The image `length` bytes long at `offset` in `file` (the rest of the file by default), whose first bytes the caller
@@ -124,7 +131,7 @@ struct MachO {
         // and they stay under the limit.
         let end = layout.headerSize + self.sizeofcmds
         let table = try self.sizeofcmds <= Self.maxLoadCommandsSize && end <= length ? (end <= head.count ? head.prefix(end) : file.read(at: offset, count: end)) : head
-        (self.loadCommands, self.tableIsValid) = Self.parseLoadCommands(data: table, headerSize: layout.headerSize, sizeofcmds: self.sizeofcmds, swap: layout.swap)
+        (self.loadCommands, self.tableIsValid, self.loadCommandsTail) = Self.parseLoadCommands(data: table, headerSize: layout.headerSize, ncmds: self.ncmds, sizeofcmds: self.sizeofcmds, swap: layout.swap)
     }
 
     /**
@@ -479,8 +486,10 @@ struct MachO {
     /**
      The load commands as Security walks them: `MachO::MachO` reads the `sizeofcmds`-byte table, which must hold at least
      one command header, and `MachOBase::nextCommand` steps by each `cmdsize` until it reaches the end of the table; a
-     command it steps onto must fit the table. `ncmds` plays no part. The walk is valid when it ends there, and stops at
-     the first command that breaks those rules otherwise.
+     command it steps onto must fit the table. The walk is valid when it ends there, whatever `ncmds` says, and when
+     it has walked the `ncmds` commands the loaders read and what is left of the table holds no command: a tail the
+     kernel and dyld never read, and Security reaches only when nothing it looks for comes first, which `codesign
+     --verify` never does. It stops at the first command that breaks those rules otherwise.
 
      A `cmdsize` must hold the command's own header, as the kernel (`parse_machfile`) and dyld (`forEachLoadCommand`)
      require, where Security refuses zero alone and reads the next header inside a shorter command: a table of 4-byte
@@ -490,13 +499,13 @@ struct MachO {
      The table is walked once to count its commands and judge it, then read into an array of that size: a crafted
      table of millions of commands costs their array and nothing more.
      */
-    private static func parseLoadCommands(data: Data, headerSize: Int, sizeofcmds: Int, swap: Bool) -> (commands: [LoadCommand], valid: Bool) {
+    private static func parseLoadCommands(data: Data, headerSize: Int, ncmds: Int, sizeofcmds: Int, swap: Bool) -> (commands: [LoadCommand], valid: Bool, tail: Int) {
         let end = headerSize + sizeofcmds
         guard
             sizeofcmds >= MemoryLayout<load_command>.size,
             end <= data.count
         else {
-            return ([], false)
+            return ([], false, 0)
         }
 
         func header(at offset: Int) -> (cmd: UInt32, size: Int) {
@@ -528,6 +537,11 @@ struct MachO {
                 break
             }
         }
+        // The table's tail, past the commands the loaders read, holds no command.
+        let tail = valid ? 0 : end - offset
+        if tail > 0, count >= max(ncmds, 1) {
+            valid = true
+        }
 
         var commands: [LoadCommand] = []
         commands.reserveCapacity(count)
@@ -537,7 +551,7 @@ struct MachO {
             commands.append(LoadCommand(cmd: cmd, data: data.bytes(in: offset ..< offset + size)))
             offset += size
         }
-        return (commands, valid)
+        return (commands, valid, valid ? tail : 0)
     }
 
     /// `<mach-o/loader.h>` filetypes, numbered from `MH_OBJECT` (1).
