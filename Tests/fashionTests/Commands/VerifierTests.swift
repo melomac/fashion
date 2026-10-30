@@ -810,4 +810,46 @@ final class VerifierTests: XCTestCase {
         declared.store(UInt32(14).bigEndian, at: 8 + 16)
         XCTAssertEqual(try self.verify(declared, "declared", in: directory).lines, [": slice x86_64 at 0x1000 is not aligned to the 2^14 its entry declares"])
     }
+
+    /**
+     A section laid past 2^64, where its address sits near the top of a segment that maps most of the address space,
+     is named rather than tripped over.
+     */
+    func testASectionLaidPastTheAddressSpaceIsNamed() throws {
+        let directory = try self.directory("past")
+        var data = self.segment64("__DATA", vmaddr: 0, vmsize: UInt64.max, fileoff: 0x1000, filesize: 0x1000, prot: 3)
+        data.store(UInt32(72 + 80), at: 4)
+        data.store(UInt32(1), at: 64) // nsects
+        data.append(Data("__data".utf8)); data.append(Data(count: 10)); data.append(Data("__DATA".utf8)); data.append(Data(count: 10))
+        data.appendUInt64(0xffff_ffff_ffff_f000); data.appendUInt64(0x10) // addr, size
+        [UInt32(0x1000), 0, 0, 0, 0, 0, 0, 0].forEach { data.appendUInt32($0) } // offset, align, reloff, nreloc, flags, reserved
+        let file = try self.crafted("past", in: directory, size: 0x2000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5)], commands: [data])
+        self.assertVerify(file.path, [
+            "\(file.path): segment __DATA's address 0x0 is out of order after __TEXT's 0x1000",
+            "\(file.path): segments __DATA and __TEXT overlap in memory",
+            "\(file.path): __TEXT has no sections",
+            "\(file.path): section __DATA,__data's file offset 0x1000 is not where its address lays it, past 2^64",
+            "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
+            "\(file.path): no LC_UUID",
+            "\(file.path): no MH_DYLDLINK: a static executable",
+            "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+        ])
+    }
+
+    /**
+     Segments are checked for overlaps in one pass over them, however many a crafted table holds: twenty thousand are
+     verified in no time, where every pair would be their count squared.
+     */
+    func testATableOfThousandsOfSegmentsIsVerifiedInOnePass() throws {
+        let directory = try self.directory("thousands")
+        let count = 20000
+        let segments = (0 ..< count).map { ("", UInt64(0x1_0000_0000 + $0), UInt64(1), UInt64($0), UInt64(1), UInt32(0)) }
+        let file = try self.crafted("thousands", in: directory, size: 32 + 72 * count, segments: segments)
+        var data = try Data(contentsOf: file)
+        data.store(UInt32(MH_PRELOAD), at: 12) // no loader maps it: its segments are held to no page
+        try data.write(to: file)
+        let start = ContinuousClock.now
+        self.assertVerify(file.path, ["\(file.path): \(count) segments with an empty name", "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it"])
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(10), "every pair of segments compared")
+    }
 }

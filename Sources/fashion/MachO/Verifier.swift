@@ -364,15 +364,11 @@ struct MachOVerifier {
         for (before, after) in zip(mapped, mapped.dropFirst()) where after.vmaddr < before.vmaddr {
             found.append("segment \(after.name)'s address \(after.vmaddr.hex) is out of order after \(before.name)'s \(before.vmaddr.hex)")
         }
-        for (index, one) in loaded.enumerated() {
-            for other in loaded.dropFirst(index + 1) where one.fileoff < other.fileend && other.fileoff < one.fileend {
-                found.append("segments \(one.name) and \(other.name) overlap in the file")
-            }
+        for (one, other) in Self.overlapping(loaded, from: \.fileoff, to: \.fileend) {
+            found.append("segments \(one.name) and \(other.name) overlap in the file")
         }
-        for (index, one) in mapped.enumerated() {
-            for other in mapped.dropFirst(index + 1) where one.vmaddr < other.vmend && other.vmaddr < one.vmend {
-                found.append("segments \(one.name) and \(other.name) overlap in memory")
-            }
+        for (one, other) in Self.overlapping(mapped, from: \.vmaddr, to: \.vmend) {
+            found.append("segments \(one.name) and \(other.name) overlap in memory")
         }
         for segment in segments where segment.filesize > segment.vmsize {
             found.append("segment \(segment.name)'s file size \(segment.filesize.hex) exceeds its vmsize \(segment.vmsize.hex)")
@@ -463,6 +459,27 @@ struct MachOVerifier {
     }
 
     /**
+     The pairs of `segments` whose ranges, `from` their start `to` their end, overlap: each segment against the one
+     before it, in the order of their starts, that reaches furthest, which is the one it overlaps when any does. One
+     pass over the segments, however many a crafted table holds, where every pair would cost the square of their
+     count.
+     */
+    private static func overlapping(_ segments: [Segment], from start: KeyPath<Segment, UInt64>, to end: KeyPath<Segment, UInt64>) -> [(Segment, Segment)] {
+        var found: [(Segment, Segment)] = []
+        var furthest: Segment?
+        let sorted = segments.indices.sorted { (segments[$0][keyPath: start], $0) < (segments[$1][keyPath: start], $1) }.map { segments[$0] }
+        for segment in sorted {
+            if let furthest, segment[keyPath: start] < furthest[keyPath: end] {
+                found.append((furthest, segment))
+            }
+            if furthest.map({ segment[keyPath: end] > $0[keyPath: end] }) ?? true {
+                furthest = segment
+            }
+        }
+        return found
+    }
+
+    /**
      What a 16-byte name field holds that one reader sees and another does not: bytes after its NUL, which a prefix
      reader never sees and a `strncmp` reader compares, and bytes that are not printable ASCII, which print as another
      name than they are.
@@ -499,9 +516,10 @@ struct MachOVerifier {
                 } else if end.overflow || section.addr < segment.vmaddr || end.partialValue > segment.vmend {
                     found.append("\(what)'s address range \(section.addr.hex)...\(end.partialValue.hex) lies outside its segment's \(segment.vmaddr.hex)...\(segment.vmend.hex)")
                 } else if section.hasContent, segment.filesize > 0 {
-                    let expected = segment.fileoff + (section.addr - segment.vmaddr)
-                    if UInt64(section.offset) != expected {
-                        found.append("\(what)'s file offset \(section.offset.hex) is not where its address lays it, \(expected.hex)")
+                    // Where the address lays it may lie past 2^64, in a segment that maps most of the address space.
+                    let expected = segment.fileoff.addingReportingOverflow(section.addr - segment.vmaddr)
+                    if expected.overflow || UInt64(section.offset) != expected.partialValue {
+                        found.append("\(what)'s file offset \(section.offset.hex) is not where its address lays it, \(expected.overflow ? "past 2^64" : expected.partialValue.hex)")
                     }
                 }
                 if section.hasContent, section.fileend < UInt64(section.offset) || section.fileend > UInt64(self.image.length) {
