@@ -422,8 +422,8 @@ extension MachO {
 
         // Its size as Security writes it, wrapping when the segment starts past the new end.
         if let linkedit = try self.findSegment("__LINKEDIT") {
-            // Rounding to 1 leaves the size as it is.
-            let page = self.linkeditSizeRounding
+            // Rounding to 1 leaves the size as it is, which is the choice where the rounding cannot be told.
+            let page = self.linkeditSizeRounding ?? 1
             if linkedit.cmd == UInt32(LC_SEGMENT_64) {
                 let segment = try linkedit.load(segment_command_64.self)
                 let filesize = UInt64(newEnd) &- self.sw(segment.fileoff)
@@ -462,15 +462,20 @@ extension MachO {
        (`linkerVersion`), tells the toolchain, where the SDK alone would not, since one builds against older SDKs.
 
      An image is stripped when its symbol table is as `strip` leaves it (`isStripped`). 1 for the file size as it is.
+     Nil for a stripped 64-bit image that records no linker, as one built for macOS 10.13 or earlier does, with
+     `LC_VERSION_MIN_MACOSX` in place of `LC_BUILD_VERSION`: its `strip` may have been either.
      */
-    var linkeditSizeRounding: Int {
+    var linkeditSizeRounding: Int? {
         guard self.isStripped else {
             return self.segmentAlignment
         }
-        if self.is64, let linker = self.linkerVersion, linker >= 0x045b_0000 {
-            return 0x4000
+        guard self.is64 else {
+            return 1
         }
-        return 1
+        guard let linker = self.linkerVersion else {
+            return nil
+        }
+        return linker >= 0x045b_0000 ? 0x4000 : 1
     }
 
     /**

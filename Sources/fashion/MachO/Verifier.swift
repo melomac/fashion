@@ -958,9 +958,9 @@ struct MachOVerifier {
 
         // codesign rounds __LINKEDIT's vmsize up to 16 KiB when it signs, and leaves it so when it removes the
         // signature, where ld64 and strip round it as `linkeditSizeRounding` says: more than that, on an image without a
-        // signature, is a signature's residue.
-        if image.findCommand(UInt32(LC_CODE_SIGNATURE)) == nil, let linkedit = self.segments.last(where: { $0.name == "__LINKEDIT" }), linkedit.filesize > 0 {
-            let rounding = UInt64(image.linkeditSizeRounding)
+        // signature, is a signature's residue. Nothing is said where the rounding cannot be told, of a stripped image
+        // that records no linker, whose strip may have rounded to 16 KiB itself.
+        if image.findCommand(UInt32(LC_CODE_SIGNATURE)) == nil, let linkedit = self.segments.last(where: { $0.name == "__LINKEDIT" }), linkedit.filesize > 0, let rounding = image.linkeditSizeRounding.map(UInt64.init) {
             let expected = (linkedit.filesize + rounding - 1) & ~(rounding - 1)
             if linkedit.vmsize % 0x4000 == 0, linkedit.vmsize > expected {
                 found.append("__LINKEDIT's vmsize \(linkedit.vmsize.hex) is a signature's 16 KiB rounding on an image without one: a signature came out")

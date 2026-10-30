@@ -573,7 +573,7 @@ final class ThinnerTests: XCTestCase {
         let calling = try compile("calling", in: directory, source: "#include <stdio.h>\nint main(void) { puts(\"hi\"); return 0; }\n", ["-arch", "x86_64"])
         let emptied = try compile("emptied", in: directory, ["-arch", "x86_64", "-Wl,-x"])
         let weak = try compile("weak", in: directory, source: "__attribute__((weak)) int weak(int x) { return x + 1; }\nint (*pointer)(int) = weak;\nint main(void) { return pointer(1); }\n", ["-arch", "x86_64"])
-        func symbols(_ url: URL) throws -> (locals: UInt32, globals: UInt32, stripped: Bool, rounding: Int, vmsize: UInt64) {
+        func symbols(_ url: URL) throws -> (locals: UInt32, globals: UInt32, stripped: Bool, rounding: Int?, vmsize: UInt64) {
             let image = try XCTUnwrap(MachO(File(path: url.path)))
             let dysymtab = try XCTUnwrap(image.findCommand(UInt32(LC_DYSYMTAB))?.payload(as: dysymtab_command.self))
             let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT")).load(segment_command_64.self)

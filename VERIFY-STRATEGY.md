@@ -166,7 +166,7 @@ left out, with the reason.
 | Bytes no section covers that are not zero: the header pad, a segment's padding after its last section; not a gap shorter than the alignment of the section that follows, which an older ld64 fills with no-ops on x86_64 (862 Python extension modules) | research: a payload, free polymorphism | ran; "valid on disk" when signed |
 | Bytes between two segments that are not zero | research | ran |
 | Bytes appended past the image's end | research: a new hash per copy, polyglots; `--exact` undoes it | ran |
-| A `__LINKEDIT` vmsize rounded as a signature rounds it, on an image without a signature | research: a signature came out, which `codesign --remove-signature` leaves so | ran (x86_64) |
+| A `__LINKEDIT` vmsize rounded as a signature rounds it, on an image without a signature; not named of a stripped 64-bit image that records no linker (`LC_VERSION_MIN_MACOSX`, macOS 10.13 and earlier), whose `strip` may have rounded to 16 KiB itself (cctools 1010, Xcode 15.3) | research: a signature came out, which `codesign --remove-signature` leaves so | ran (x86_64) |
 | UPX, as is, by a modified UPX with its marker, or signed after packing; a pack header found that does not hold, which `unpack` refuses | research; `--unpack` undoes it | ran |
 
 ### Code signature

@@ -248,7 +248,8 @@ final class VerifierTests: XCTestCase {
 
     /**
      `codesign --remove-signature` leaves `__LINKEDIT`'s vmsize at the 16 KiB the signature needed, which names a
-     signature that came out, where `unsign` restores it as the linker or `strip` left it and leaves no such trace.
+     signature that came out, where `unsign` restores it as the linker or `strip` left it and leaves no such trace;
+     nothing is named of a stripped image whose linker is unknown, whose `strip` may have rounded it so itself.
      */
     func testASignatureThatCameOutIsNamed() throws {
         let directory = try self.directory("residue")
@@ -262,6 +263,15 @@ final class VerifierTests: XCTestCase {
         self.assertVerify(apple.path, ["\(apple.path): __LINKEDIT's vmsize \(vmsize.hex) is a signature's 16 KiB rounding on an image without one: a signature came out"])
         XCTAssertEqual(Unsigner.lines(for: signed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"])
         self.assertVerify(signed.path + "_unsigned", [])
+
+        // A stripped image built for macOS 10.13 records no linker, since ld writes LC_VERSION_MIN_MACOSX for it, and
+        // this toolchain's strip rounds __LINKEDIT's vmsize to 16 KiB itself: no signature came out of it.
+        let old = try compile("old", in: directory, ["-arch", "x86_64", "-mmacosx-version-min=10.13"])
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip", old.path]), "cannot run strip")
+        let stripped = try XCTUnwrap(MachO(File(path: old.path)))
+        XCTAssertNil(stripped.linkerVersion)
+        XCTAssertNil(stripped.linkeditSizeRounding)
+        self.assertVerify(old.path, [])
     }
 
     /**
