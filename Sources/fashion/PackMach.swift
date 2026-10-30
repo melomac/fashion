@@ -46,7 +46,6 @@ extension UnpackError: LocalizedError {
  The packed file, with the offsets of an `x86_64` file UPX 3.91 packed:
 
  ```text
-
   0x0000 +-----------------------------------------------+
          | mach_header_64 and the packed file's load     |  __PAGEZERO, __XHDR (3.91), __TEXT, __LINKEDIT,
          | commands; its __TEXT spans everything below   |  LC_UNIXTHREAD or LC_MAIN
@@ -79,13 +78,11 @@ extension UnpackError: LocalizedError {
   0x6d29 +-----------------------------------------------+
          | zeros to the page                             |  3.91: an empty __LINKEDIT at 0x7000;
   0x7000 +-----------------------------------------------+  UPX 5: 16 bytes of __LINKEDIT instead
-
  ```
 
  How `init` tells a packed file, and `unpack` gives the original back:
 
  ```text
-
                       thin Mach-O: the file, or a slice of a universal one
                                            |
                                            v
@@ -142,8 +139,8 @@ extension UnpackError: LocalizedError {
          |   as it is         -> the original                       |
          |   under key 1..255 -> the original, key and marker named |  no key -> "Invalid UPX data: checksum error..."
          +----------------------------------------------------------+
-
  ```
+
  */
 struct PackMach {
     private let image: MachO
@@ -337,11 +334,18 @@ struct PackMach {
                 }
             }
             i -= small
-            guard
-                i >= 1,
-                let packHeader = try PackHeader(data.dropFirst(i), fileSize: image.length, format: format.format),
-                packHeader.format == format.format
-            else {
+            guard i >= 1 else {
+                continue
+            }
+            let packHeader: PackHeader?
+            do {
+                packHeader = try PackHeader(data.dropFirst(i), fileSize: image.length, format: format.format)
+            } catch where window.found != nil {
+                // A marker that holds nothing, in a window the segments' names did not lead to, which UPX never
+                // reads: no pack header there, as an image of its own may carry the four bytes.
+                continue
+            }
+            guard let packHeader, packHeader.format == format.format else {
                 continue
             }
 

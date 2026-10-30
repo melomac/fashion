@@ -1099,6 +1099,31 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
+     "UPX!" followed by what no pack header holds, in the page before an image's last segment: where the segments'
+     names lead UPX there, it is refused as upx -d refuses it; where they do not, in a window UPX never reads, it is
+     no pack header, an image of its own carrying the four bytes.
+     */
+    func testAMarkerThatHoldsNothingIsNoPackHeaderWhereNoSegmentNameLeads() throws {
+        let directory = try self.directory("marker")
+        let (name, _, data) = try XCTUnwrap(self.unsignedLs(in: directory).first)
+        let image = try XCTUnwrap(MachO(File(data: data)))
+        let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT")).load(segment_command_64.self)
+        let at = Int(linkedit.fileoff) - 40
+        try XCTSkipUnless(data[at ..< at + 40].allSatisfy { $0 == 0 }, "\(name): no zeros before __LINKEDIT")
+        var marked = data
+        marked.replaceSubrange(at ..< at + 5, with: Data("UPX!".utf8) + [0xff]) // a version no UPX wrote
+        XCTAssertThrowsError(try PackMach(XCTUnwrap(MachO(File(data: marked)))), name) { error in
+            XCTAssertEqual(error as? UnpackError, .cantUnpack("cannot unpack UPX ;-)"), name)
+        }
+        var renamed = marked
+        for (segment, other) in [("__TEXT", "__TEXU"), ("__LINKEDIT", "__LINKEDYT")] {
+            let command = try XCTUnwrap(image.findSegment(segment))
+            renamed.replaceSubrange(command.data.startIndex + 8 ..< command.data.startIndex + 24, with: Data(other.utf8) + Data(count: 16 - other.utf8.count))
+        }
+        XCTAssertNil(try PackMach(XCTUnwrap(MachO(File(data: renamed)))), name)
+    }
+
+    /**
      A universal file whose first slice a modified UPX packed and whose second slice's packed data does not hold:
      the warning about the first is printed, then the error about the second, each after its architecture, as hash
      mode prints them, before the digest of the file as it is, packed.
