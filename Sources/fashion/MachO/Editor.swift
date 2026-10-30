@@ -502,8 +502,9 @@ extension MachO {
      executable, no defined global symbol but those `strip` keeps, the ones referenced dynamically
      (`REFERENCED_DYNAMICALLY`, `__mh_execute_header` as the linker marks it) and the weak definitions, where the
      linker leaves `_main` at least, while a library keeps every global symbol. An executable `strip -x` kept the global
-     symbols of passes for the linker's. An image without `LC_DYSYMTAB`, or whose tables the file does not hold, is
-     taken for unstripped.
+     symbols of passes for the linker's. An image without `LC_DYSYMTAB`, or whose tables do not lie in the image, or
+     whose symbol ranges do not lie in the tables, is taken for unstripped: in a universal file, a range past the slice
+     would read another slice's bytes.
      */
     var isStripped: Bool {
         guard
@@ -513,18 +514,32 @@ extension MachO {
             return false
         }
         let entry = self.is64 ? MemoryLayout<nlist_64>.size : MemoryLayout<nlist>.size
-        func symbol(_ index: UInt32) -> Data? {
-            try? self.dataAt(Int(self.sw(symtab.symoff)) + Int(index) * entry, count: entry)
+        let (symoff, nsyms) = (Int(self.sw(symtab.symoff)), Int(self.sw(symtab.nsyms)))
+        let (stroff, strsize) = (Int(self.sw(symtab.stroff)), Int(self.sw(symtab.strsize)))
+        guard
+            symoff <= self.length, nsyms <= (self.length - symoff) / entry,
+            stroff <= self.length, strsize <= self.length - stroff
+        else {
+            return false
+        }
+        /// The `count` symbols from `first`, when the table holds them.
+        func symbols(_ first: UInt32, _ count: Int) -> Data? {
+            guard Int(first) <= nsyms, count <= nsyms - Int(first) else {
+                return nil
+            }
+            return try? self.dataAt(symoff + Int(first) * entry, count: count * entry)
         }
         switch self.sw(dysymtab.nlocalsym) {
         case 0:
             break
         case 1:
-            let placeholder = Array("radr://5614542".utf8)
+            let placeholder = Array("radr://5614542".utf8) + [0]
             guard
-                let local = symbol(self.sw(dysymtab.ilocalsym)),
-                let name = try? self.dataAt(Int(self.sw(symtab.stroff)) + Int(self.sw(local.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })), count: placeholder.count + 1),
-                name.elementsEqual(placeholder + [0])
+                let local = symbols(self.sw(dysymtab.ilocalsym), 1),
+                let strx = Int(exactly: self.sw(local.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })),
+                strx <= strsize - placeholder.count,
+                let name = try? self.dataAt(stroff + strx, count: placeholder.count),
+                name.elementsEqual(placeholder)
             else {
                 return false
             }
@@ -534,14 +549,21 @@ extension MachO {
         guard self.filetype == UInt32(MH_EXECUTE) else {
             return true
         }
-        // What strip keeps a defined global symbol for; n_desc lies where it does in nlist_64 in nlist too.
+        // What strip keeps a defined global symbol for; n_desc lies where it does in nlist_64 in nlist too. The
+        // symbols are read a chunk at a time: a crafted count is the table's at most.
         let kept = UInt16(REFERENCED_DYNAMICALLY | N_WEAK_DEF)
         let desc = MemoryLayout<nlist_64>.offset(of: \.n_desc)!
-        for index in 0 ..< self.sw(dysymtab.nextdefsym) {
-            guard let global = symbol(self.sw(dysymtab.iextdefsym) &+ index) else {
+        let (first, count) = (self.sw(dysymtab.iextdefsym), Int(self.sw(dysymtab.nextdefsym)))
+        let batch = File.chunkSize / entry
+        for start in stride(from: 0, to: count, by: batch) {
+            let read = min(batch, count - start)
+            guard let globals = symbols(first &+ UInt32(start), read) else {
                 return false
             }
-            if global.withUnsafeBytes({ self.sw($0.loadUnaligned(fromByteOffset: desc, as: UInt16.self)) }) & kept == 0 {
+            let stripped = globals.withUnsafeBytes { raw in
+                (0 ..< read).allSatisfy { self.sw(raw.loadUnaligned(fromByteOffset: $0 * entry + desc, as: UInt16.self)) & kept != 0 }
+            }
+            if !stripped {
                 return false
             }
         }

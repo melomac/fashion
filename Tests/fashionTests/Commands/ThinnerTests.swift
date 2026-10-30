@@ -776,4 +776,29 @@ final class ThinnerTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: directory / "\(name)_unsigned"), original, name)
         }
     }
+
+    /**
+     A stripped image's symbol tables are read within the image, and its symbols within the tables: a count of global
+     symbols past the table, or a table past the image, as a crafted header has them, is read as unstripped rather
+     than read past, into another slice of a universal file.
+     */
+    func testAStrippedImagesTablesAreReadWithinTheImage() throws {
+        let directory = try self.directory("tables")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let built = try compile("built", in: directory, source: "int main(void) { return 0; }\n", ["-arch", "x86_64"])
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip", built.path]), "cannot run strip")
+        let data = try Data(contentsOf: built)
+        let image = try XCTUnwrap(MachO(File(data: data)))
+        XCTAssertTrue(image.isStripped)
+        let dysymtab = try XCTUnwrap(image.findCommand(UInt32(LC_DYSYMTAB)))
+        let symtab = try XCTUnwrap(image.findCommand(UInt32(LC_SYMTAB)))
+        var globals = data
+        globals.replaceSubrange(dysymtab.data.startIndex + 20 ..< dysymtab.data.startIndex + 24, with: withUnsafeBytes(of: UInt32.max.littleEndian) { Data($0) }) // nextdefsym
+        XCTAssertFalse(try XCTUnwrap(MachO(File(data: globals))).isStripped)
+        var past = data
+        past.replaceSubrange(symtab.data.startIndex + 8 ..< symtab.data.startIndex + 12, with: withUnsafeBytes(of: UInt32(data.count).littleEndian) { Data($0) }) // symoff
+        XCTAssertFalse(try XCTUnwrap(MachO(File(data: past))).isStripped)
+    }
 }
