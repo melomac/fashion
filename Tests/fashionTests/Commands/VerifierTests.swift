@@ -766,30 +766,6 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try Thinner.parse([odd.path, "--verify"]).scan(), 0)
     }
 
-    /// A universal file of `slices`, each at the next multiple of its 2^align, the padding `gap` bytes; the last
-    /// slice's entry past the table's count with `hideLast`.
-    private func universal(_ slices: [(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t, data: Data, align: Int)], magic: UInt32 = FAT_MAGIC, hideLast: Bool = false, gap: UInt8 = 0) -> Data {
-        var table = Data()
-        table.appendUInt32BE(magic)
-        table.appendUInt32BE(UInt32(slices.count - (hideLast ? 1 : 0)))
-        let entrySize = magic == FAT_MAGIC ? 20 : 32
-        var body = Data()
-        let bodyStart = 8 + entrySize * slices.count
-        for slice in slices {
-            let start = (bodyStart + body.count + (1 << slice.align) - 1) & ~((1 << slice.align) - 1)
-            body.append(Data(repeating: gap, count: start - bodyStart - body.count))
-            table.appendInt32BE(slice.cpuType)
-            table.appendInt32BE(slice.cpuSubtype)
-            if magic == FAT_MAGIC {
-                table.appendUInt32BE(UInt32(start)); table.appendUInt32BE(UInt32(slice.data.count)); table.appendUInt32BE(UInt32(slice.align))
-            } else {
-                table.appendUInt64BE(UInt64(start)); table.appendUInt64BE(UInt64(slice.data.count)); table.appendUInt32BE(UInt32(slice.align)); table.appendUInt32BE(0)
-            }
-            body.append(slice.data)
-        }
-        return table + body
-    }
-
     /**
      A universal file as the kernel, dyld and Security read it: an arm64 slice hidden past the table's count, which
      is a slice to `Universal` as to Security, two slices of one architecture, a slice whose table entry names another
@@ -804,8 +780,8 @@ final class VerifierTests: XCTestCase {
         let X86 = (cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_ALL, data: x86, align: 12)
         let ARM = (cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64_ALL, data: arm, align: 14)
 
-        XCTAssertEqual(try self.verify(self.universal([X86, ARM]), "fat", in: directory).lines, [unsigned])
-        let hidden = self.universal([X86, ARM], hideLast: true)
+        XCTAssertEqual(try self.verify(makeUniversal([X86, ARM]), "fat", in: directory).lines, [unsigned])
+        let hidden = makeUniversal([X86, ARM], hideLast: true)
         XCTAssertEqual(try self.verify(hidden, "hidden", in: directory).lines, [": slice arm64 is hidden past the table's 1 entry: dyld and codesign find it, the kernel does not", unsigned])
         guard case let .fat(archs) = try Universal.open(data: hidden) else {
             return XCTFail("a universal file")
@@ -814,23 +790,23 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(archs.map(\.hidden), [false, true])
         XCTAssertEqual(try Universal.fileEnd(data: hidden), hidden.count)
 
-        XCTAssertEqual(try self.verify(self.universal([X86, X86]), "twice", in: directory).lines, [": 2 slices of x86_64, which the kernel refuses"])
-        XCTAssertEqual(try self.verify(self.universal([X86, (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E, arm, 14)]), "mismatch", in: directory).lines, [": slice arm64e by the table is arm64 by its header", " (arm64e): not signed, which the kernel refuses to run as arm64"])
-        XCTAssertEqual(try self.verify(self.universal([X86, ARM], gap: 0x44), "gap", in: directory).lines, [
+        XCTAssertEqual(try self.verify(makeUniversal([X86, X86]), "twice", in: directory).lines, [": 2 slices of x86_64, which the kernel refuses"])
+        XCTAssertEqual(try self.verify(makeUniversal([X86, (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E, arm, 14)]), "mismatch", in: directory).lines, [": slice arm64e by the table is arm64 by its header", " (arm64e): not signed, which the kernel refuses to run as arm64"])
+        XCTAssertEqual(try self.verify(makeUniversal([X86, ARM], gap: 0x44), "gap", in: directory).lines, [
             ": 0xfd0 bytes of padding before slice x86_64 are not zero, the first at 0x30",
             ": \((0x4000 - 0x1000 - x86.count).hex) bytes of padding before slice arm64 are not zero, the first at \((0x1000 + x86.count).hex)",
             unsigned,
         ])
-        XCTAssertEqual(try self.verify(self.universal([X86, ARM], magic: FAT_MAGIC_64), "fat64", in: directory).lines, [": a 64-bit universal file, which the kernel does not run and codesign signs as a generic file", unsigned])
-        XCTAssertEqual(try self.verify(self.universal([(CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, self.universal([ARM]), 14)]), "nested", in: directory).lines, [": slice arm64 is itself a universal file"])
+        XCTAssertEqual(try self.verify(makeUniversal([X86, ARM], magic: FAT_MAGIC_64), "fat64", in: directory).lines, [": a 64-bit universal file, which the kernel does not run and codesign signs as a generic file", unsigned])
+        XCTAssertEqual(try self.verify(makeUniversal([(CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, makeUniversal([ARM]), 14)]), "nested", in: directory).lines, [": slice arm64 is itself a universal file"])
         // The x86_64 slice padded to end past 0x4000, so the arm64 slice's 4 KiB alignment lands it at 0x5000.
         try XCTSkipUnless(x86.count < 0x3800, "a program larger than the padding")
-        XCTAssertEqual(try self.verify(self.universal([(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, x86 + Data(count: 0x3800 - x86.count), 12), (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, arm, 12)]), "page", in: directory).lines, [
+        XCTAssertEqual(try self.verify(makeUniversal([(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, x86 + Data(count: 0x3800 - x86.count), 12), (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, arm, 12)]), "page", in: directory).lines, [
             " (x86_64): \((0x3800 - x86.count).hex) bytes appended past the image's end at \(x86.count.hex)",
             ": slice arm64 at 0x5000 is not page aligned",
             unsigned,
         ])
-        var declared = self.universal([X86])
+        var declared = makeUniversal([X86])
         declared.store(UInt32(14).bigEndian, at: 8 + 16)
         XCTAssertEqual(try self.verify(declared, "declared", in: directory).lines, [": slice x86_64 at 0x1000 is not aligned to the 2^14 its entry declares"])
     }

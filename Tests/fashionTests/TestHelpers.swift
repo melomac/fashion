@@ -489,6 +489,32 @@ func codesignArchs(_ path: String) throws -> Set<String>? {
     return nil
 }
 
+/**
+ A universal file of `slices`, each at the next multiple of its 2^align, the padding `gap` bytes; the last slice's
+ entry past the table's count with `hideLast`, as `lipo -hideARM64` writes it.
+ */
+func makeUniversal(_ slices: [(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t, data: Data, align: Int)], magic: UInt32 = FAT_MAGIC, hideLast: Bool = false, gap: UInt8 = 0) -> Data {
+    var table = Data()
+    table.appendUInt32BE(magic)
+    table.appendUInt32BE(UInt32(slices.count - (hideLast ? 1 : 0)))
+    let entrySize = magic == FAT_MAGIC ? 20 : 32
+    var body = Data()
+    let bodyStart = 8 + entrySize * slices.count
+    for slice in slices {
+        let start = (bodyStart + body.count + (1 << slice.align) - 1) & ~((1 << slice.align) - 1)
+        body.append(Data(repeating: gap, count: start - bodyStart - body.count))
+        table.appendInt32BE(slice.cpuType)
+        table.appendInt32BE(slice.cpuSubtype)
+        if magic == FAT_MAGIC {
+            table.appendUInt32BE(UInt32(start)); table.appendUInt32BE(UInt32(slice.data.count)); table.appendUInt32BE(UInt32(slice.align))
+        } else {
+            table.appendUInt64BE(UInt64(start)); table.appendUInt64BE(UInt64(slice.data.count)); table.appendUInt32BE(UInt32(slice.align)); table.appendUInt32BE(0)
+        }
+        body.append(slice.data)
+    }
+    return table + body
+}
+
 /// Where `upx` is, on the PATH or where Homebrew and MacPorts put it; skips the test without one.
 func upxExecutable() throws -> String {
     let directories = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init) + ["/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"]
