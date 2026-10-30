@@ -123,6 +123,30 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
+     An artifact is written beside its name under a temporary one, 45 bytes whatever the artifact's, and renamed into
+     it: a file of 240 bytes' name gets its `_unsigned` artifact, 249, replaced under --write, where a temporary named
+     after the artifact would run past the 255 a name may have.
+     */
+    func testWriteReplacesAnArtifactWhateverItsNameLength() throws {
+        let directory = try self.directory("long-name")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let data = try Data(contentsOf: compile("program", in: directory, ["-arch", "x86_64"]))
+        let long = directory / String(repeating: "n", count: 240)
+        try FileManager.default.copyItem(at: self.codesignedFile(data, in: directory), to: long)
+        let artifact = long.path + "_unsigned"
+        try Data("something else".utf8).write(to: URL(fileURLWithPath: artifact))
+        let left = Thinner.lines(for: long.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console()))
+        XCTAssertTrue(left.first?.text.contains("exists and differs") ?? false, left.first?.text ?? "")
+
+        let written = Thinner.lines(for: long.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console()))
+        XCTAssertEqual(written.map(\.text), [artifact])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: artifact)), data)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasPrefix(".fashion-") }, [])
+    }
+
+    /**
      With --write, a different file under an artifact's name is replaced by the slice, without the execute
      bit it had, and nothing is said on standard error: the unified log alone records the replacement.
      */
@@ -145,6 +169,8 @@ final class ThinnerTests: XCTestCase {
         let lines = Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console()))
         XCTAssertEqual(lines.map(\.text), slices.map { "\(ls.path)_\($0.name)" })
         XCTAssertTrue(lines.allSatisfy { !$0.diagnostic })
+        // Nothing is left beside the artifacts: each was written under a temporary name and renamed into its own.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasPrefix(".fashion-") }, [])
     }
 
     /**

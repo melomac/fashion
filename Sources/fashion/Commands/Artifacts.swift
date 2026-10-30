@@ -242,6 +242,8 @@ struct ArtifactWriter {
     private final class Writing: @unchecked Sendable {
         private let condition = NSCondition()
         private var paths: Set<String> = []
+        /// The temporary files being written, for a run that dies to remove.
+        private var temporaries: Set<String> = []
 
         /// Wait until no other thread writes `path`, then claim it.
         func claim(_ path: String) {
@@ -258,26 +260,52 @@ struct ArtifactWriter {
             self.condition.broadcast()
             self.condition.unlock()
         }
+
+        func begin(_ temporary: String) {
+            self.condition.lock()
+            self.temporaries.insert(temporary)
+            self.condition.unlock()
+        }
+
+        func end(_ temporary: String) {
+            self.condition.lock()
+            self.temporaries.remove(temporary)
+            self.condition.unlock()
+        }
+
+        /// Remove every temporary file being written: the run dies, and none is to be found beside an artifact.
+        func abandon() {
+            self.condition.lock()
+            self.temporaries.forEach { unlink($0) }
+            self.temporaries.removeAll()
+            self.condition.unlock()
+        }
+    }
+
+    /// Remove the temporary files being written, from a run that dies of a signal or a write error.
+    static func abandonInProgress() {
+        self.writing.abandon()
     }
 
     /**
      Write `file` to `path`: a new file, or with `overwrite` a new file renamed over the regular file already
      there when it holds other bytes, as `lipo` writes its output; the same bytes are left as they are. The rename gives
      the name another inode rather than writing into the old one, so another link to it, to a file elsewhere say, keeps
-     its bytes and its mode, and a write that fails leaves the old file as it was.
+     its bytes and its mode, and a write that fails leaves the old file as it was. What is there decides first, read
+     and not written; a file that appears under the name as the artifact is placed decides the same way.
      */
     private static func write(_ file: File, to path: String, overwrite: Bool) throws -> Outcome {
-        do {
-            let fd = try FileDescriptor.open(path, .writeOnly, options: [.create, .exclusiveCreate], permissions: Self.permissions)
-            try Self.copy(file, to: fd, at: path)
-            return try .written(Self.identity(of: file))
-        } catch let error as Errno where error == .fileExists {
-            // What is there decides.
-        }
-
         // lstat sees a symbolic link as itself, where open would follow it.
         var info = stat()
-        guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+        guard lstat(path, &info) == 0 else {
+            do {
+                try Self.place(file, at: path, exclusively: true)
+            } catch let error as Errno where error == .fileExists {
+                return try Self.write(file, to: path, overwrite: overwrite)
+            }
+            return try .written(Self.identity(of: file))
+        }
+        guard info.st_mode & S_IFMT == S_IFREG else {
             throw ArtifactError.notRegularFileInTheWay
         }
         let before = try Self.identity(of: File(path: path))
@@ -288,16 +316,29 @@ struct ArtifactWriter {
         guard overwrite else {
             return .differs(before: before, after: after)
         }
+        try Self.place(file, at: path, exclusively: false)
+        return .overwritten(before: before, after: after)
+    }
 
-        let replacement = "\(path).fashion-\(UUID().uuidString)"
-        let fd = try FileDescriptor.open(replacement, .writeOnly, options: [.create, .exclusiveCreate], permissions: Self.permissions)
-        try Self.copy(file, to: fd, at: replacement)
-        guard rename(replacement, path) == 0 else {
+    /**
+     `file` written beside `path` under a temporary name and renamed into it, so that a run ended mid-way, by a
+     signal or a write error, leaves no part of an artifact under its name: the temporary file is removed as the run
+     dies. Its name is the directory's own, 45 bytes, whatever the artifact's, which may run to the 255 a name may
+     have. `exclusively` refuses a file that has appeared under the name since (`RENAME_EXCL`), as `Errno.fileExists`.
+     */
+    private static func place(_ file: File, at path: String, exclusively: Bool) throws {
+        let temporary = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(".fashion-\(UUID().uuidString)").path
+        let fd = try FileDescriptor.open(temporary, .writeOnly, options: [.create, .exclusiveCreate], permissions: Self.permissions)
+        Self.writing.begin(temporary)
+        defer {
+            Self.writing.end(temporary)
+        }
+        try Self.copy(file, to: fd, at: temporary)
+        guard (exclusively ? renamex_np(temporary, path, UInt32(RENAME_EXCL)) : rename(temporary, path)) == 0 else {
             let error = Errno(rawValue: errno)
-            unlink(replacement)
+            unlink(temporary)
             throw error
         }
-        return .overwritten(before: before, after: after)
     }
 
     /**

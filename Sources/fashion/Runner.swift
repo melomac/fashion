@@ -454,6 +454,7 @@ final class Output: @unchecked Sendable {
             let description = OutputFormatter.formatDiagnostic(File.message(for: error))
             self.reporter.end("Stopped by write error: \(description)")
             self.console.err("fashion: write error: \(description)", tint: .error)
+            ArtifactWriter.abandonInProgress()
 
             exit(2)
         }
@@ -710,6 +711,7 @@ final class SignalTrap: @unchecked Sendable {
                 return
             }
             self.reporter.end(reason)
+            ArtifactWriter.abandonInProgress()
 
             signal(signo, SIG_DFL)
             raise(signo)
