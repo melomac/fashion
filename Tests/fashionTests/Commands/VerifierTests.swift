@@ -1140,6 +1140,28 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     A load command shorter than its structure is named, where it fed no rule: an `LC_SEGMENT_64` without room for its
+     header, after `__LINKEDIT` where the parser stops checking, and an `LC_BUILD_VERSION` without room for its tool
+     count, which does not make the image undated.
+     */
+    func testACommandShorterThanItsStructureIsNamed() throws {
+        let directory = try self.directory("short-commands")
+        var segment = Data()
+        segment.appendUInt32(UInt32(LC_SEGMENT_64)); segment.appendUInt32(48); try segment.append(XCTUnwrap("__DATA".data(using: .utf8)) + Data(count: 10)); segment.append(Data(count: 24))
+        var build = Data()
+        build.appendUInt32(UInt32(LC_BUILD_VERSION)); build.appendUInt32(16); build.appendUInt32(UInt32(PLATFORM_MACOS)); build.appendUInt32(0x000e_0000)
+        let file = try self.crafted("short", in: directory, size: 0x2000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5), ("__LINKEDIT", 0x2000, 0x1000, 0x1000, 0x1000, 1)], commands: [segment, build])
+        self.assertVerify(file.path, [
+            "\(file.path): load command #2, LC_SEGMENT_64, is 0x30 bytes, not its structure's 0x48, which dyld refuses",
+            "\(file.path): load command #3, LC_BUILD_VERSION, is 0x10 bytes, not its structure's 0x18, which dyld refuses",
+            "\(file.path): __TEXT has no sections",
+            "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
+            "\(file.path): no LC_UUID",
+            "\(file.path): no MH_DYLDLINK: a static executable",
+        ])
+    }
+
+    /**
      The table's lines name a few commands and count the rest: a crafted table of ten odd-sized commands, hidden from
      the loaders too and sized other than their structure, names eight of each and counts the others, where a line
      each would be millions.

@@ -363,10 +363,19 @@ struct MachOVerifier {
         if required.count > Self.listed {
             found.append("and \(String(required.count - Self.listed, pluralizing: "more unknown load command")) flagged LC_REQ_DYLD")
         }
+        // A command shorter than its structure is one too: LC_BUILD_VERSION without room for its tool count, a
+        // segment command without room for its header, which the segment rules then never see.
         let sized = image.loadCommands.enumerated().compactMap { index, command -> (Int, MachO.LoadCommand, Int)? in
-            let expected = command.cmd == UInt32(LC_BUILD_VERSION)
-                ? command.payload(as: build_version_command.self).map { MemoryLayout<build_version_command>.size + Int(image.sw($0.ntools)) * MemoryLayout<build_tool_version>.size }
-                : Self.fixedSizes[command.cmd]
+            let expected: Int? = switch command.cmd {
+            case UInt32(LC_BUILD_VERSION):
+                MemoryLayout<build_version_command>.size + (command.payload(as: build_version_command.self).map { Int(image.sw($0.ntools)) } ?? 0) * MemoryLayout<build_tool_version>.size
+            case UInt32(LC_SEGMENT):
+                command.data.count < MemoryLayout<segment_command>.size ? MemoryLayout<segment_command>.size : nil
+            case UInt32(LC_SEGMENT_64):
+                command.data.count < MemoryLayout<segment_command_64>.size ? MemoryLayout<segment_command_64>.size : nil
+            default:
+                Self.fixedSizes[command.cmd]
+            }
             return expected.flatMap { $0 == command.data.count ? nil : (index, command, $0) }
         }
         for (index, command, expected) in sized.prefix(Self.listed) {
@@ -867,7 +876,8 @@ struct MachOVerifier {
                 found.append("encrypted: cryptid \(image.sw(info.cryptid)) over \(image.sw(info.cryptsize).hex) bytes at \(image.sw(info.cryptoff).hex)")
             }
         }
-        if (try? image.version()) ?? nil == nil {
+        // A version command too short to read is named by the table rules, not as none.
+        if !image.loadCommands.contains(where: { $0.cmd == UInt32(LC_BUILD_VERSION) || Self.versionMinCommands.contains($0.cmd) }) {
             found.append("no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it")
         }
         return found
