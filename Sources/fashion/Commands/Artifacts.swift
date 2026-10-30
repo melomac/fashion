@@ -153,7 +153,12 @@ struct ArtifactWriter {
 
         switch try Universal.open(file) {
         case let .fat(archs):
+            // Two slices of one architecture, which the kernel refuses, are named apart: the second `_x86_64_2`.
+            var named: [String: Int] = [:]
             return try archs.enumerated().flatMap { index, arch -> [(suffix: String, bytes: File)] in
+                let count = named[arch.name, default: 0] + 1
+                named[arch.name] = count
+                let name = count == 1 ? "_\(arch.name)" : "_\(arch.name)_\(count)"
                 var chain = states?[index] ?? []
                 // The fat table alone decides a slice's bytes, as for lipo -thin: it is read as a Mach-O only to cut it.
                 if chain.isEmpty, exact {
@@ -165,8 +170,8 @@ struct ArtifactWriter {
                         throw SliceError(arch: arch.name, error: error)
                     }
                 }
-                let whole = (suffix: "_\(arch.name)", bytes: File(editing: file, pieces: [.range(arch.offset ..< arch.offset + arch.length)]))
-                return [whole] + chain.map { ("_\(arch.name)" + Self.suffix($0.edits), File(editing: file, pieces: $0.pieces)) }
+                let whole = (suffix: name, bytes: File(editing: file, pieces: [.range(arch.offset ..< arch.offset + arch.length)]))
+                return [whole] + chain.map { (name + Self.suffix($0.edits), File(editing: file, pieces: $0.pieces)) }
             }
         case let .thin(image):
             var chain = states?[0] ?? []

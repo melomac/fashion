@@ -778,6 +778,26 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
+     Two slices of one architecture, which the kernel refuses, come out under names of their own, the second numbered,
+     `ls_x86_64` and `ls_x86_64_2`, and their states after them.
+     */
+    func testSlicesOfOneArchitectureAreNamedApart() throws {
+        let directory = try self.directory("twice")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let slice = try self.lsX86()
+        let x86 = (cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_ALL, data: slice, align: 12)
+        let file = directory / "ls"
+        try makeUniversal([x86, x86]).write(to: file)
+        let reporter = Reporter(console: Console())
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text), [file.path + "_x86_64", file.path + "_x86_64_unsigned", file.path + "_x86_64_2", file.path + "_x86_64_2_unsigned"])
+        XCTAssertEqual(try Data(contentsOf: directory / "ls_x86_64_2"), slice)
+        XCTAssertEqual(try Data(contentsOf: directory / "ls_x86_64_2_unsigned"), try Data(contentsOf: directory / "ls_x86_64_unsigned"))
+        XCTAssertEqual(reporter.errorCount, 0)
+    }
+
+    /**
      A stripped image's symbol tables are read within the image, and its symbols within the tables: a count of global
      symbols past the table, or a table past the image, as a crafted header has them, is read as unstripped rather
      than read past, into another slice of a universal file.
