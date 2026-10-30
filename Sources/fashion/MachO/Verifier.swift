@@ -1205,6 +1205,15 @@ struct MachOVerifier {
     }
 
     /**
+     What a universal file with more entries than `Universal.open` reads is: a file hash mode and verify take for no
+     Mach-O, whose slices are neither hashed nor looked at, where the kernel reads as many entries as its page holds
+     and runs the best of them.
+     */
+    static func anomaly(oversized archs: [Universal.Architecture]) -> String {
+        "a universal file of \(String(archs.count, pluralizing: "slice")), more than the \(Universal.maxSliceCount) read here: the kernel reads as many as fit in its page, 204 or 818, and runs one; the slices are neither hashed nor verified"
+    }
+
+    /**
      What a slice that is not a thin Mach-O is: nothing for an archive, which `lipo` puts in a universal static library,
      nor for a slice of a CPU no loader knows, as a Metal library's, a universal file inside the universal file, which
      no loader opens, or neither.

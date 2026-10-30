@@ -159,14 +159,50 @@ enum Universal {
     }
 
     /// The most slices a universal file holds, dyld's `kMaxSliceCount`: a Java class, 0xCAFEBABE too, declares far more.
-    private static let maxSliceCount: UInt32 = 16
+    static let maxSliceCount: UInt32 = 16
 
-    private static func parseFat(_ file: File, head: Data, is64: Bool) throws -> Universal {
+    /**
+     The most entries the kernel reads, as many as fit after the header in the page it maps a file's head from
+     (`fatfile_validate_fatarches`): 204 on a 4 KiB page, 818 on a 16 KiB one. A universal file of more entries than
+     `maxSliceCount` runs, one slice of it.
+     */
+    static let kernelSliceCount = UInt32((16384 - MemoryLayout<fat_header>.size) / MemoryLayout<fat_arch>.size)
+
+    /**
+     The architectures of a universal file with more entries than `open` reads, up to `kernelSliceCount`, each
+     checked as `open` checks them; nil for any other file, or a table an entry of which does not lie in the file,
+     as a Java class, 0xCAFEBABE too, has its major version and then anything where the entries would be. What
+     `verify` names, where hash mode takes the file for no Mach-O.
+     */
+    static func oversized(_ file: File) throws -> [Architecture]? {
+        guard file.size >= MemoryLayout<fat_header>.size else {
+            return nil
+        }
+        let head = try file.read(at: 0, count: min(file.size, MachO.headSize))
+        let is64 = switch head.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
+        case FAT_MAGIC, FAT_CIGAM: false
+        case FAT_MAGIC_64, FAT_CIGAM_64: true
+        default: nil as Bool?
+        }
+        guard let is64 else {
+            return nil
+        }
+        do {
+            guard case let .fat(archs) = try self.parseFat(file, head: head, is64: is64, counting: self.maxSliceCount + 1 ... self.kernelSliceCount) else {
+                return nil
+            }
+            return archs
+        } catch is ParserError {
+            return nil
+        }
+    }
+
+    private static func parseFat(_ file: File, head: Data, is64: Bool, counting counts: ClosedRange<UInt32> = 1 ... Universal.maxSliceCount) throws -> Universal {
         let nfatArch: UInt32 = head.withUnsafeBytes { ptr in
             UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
         }
 
-        guard 1 ... self.maxSliceCount ~= nfatArch else {
+        guard counts ~= nfatArch else {
             return .notMachO
         }
 

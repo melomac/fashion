@@ -497,6 +497,8 @@ final class MachOTests: XCTestCase {
                 XCTAssertNotEqual(status, 0, "dyld reads the \(count)-slice file fashion rejects")
             }
             XCTAssertEqual(try Universal.isMachO(path: url.path()), count <= 16)
+            // Past the count, the entries holding, the file is a universal file to the kernel: `verify` names it.
+            XCTAssertEqual(try Universal.oversized(File(path: url.path()))?.count, count <= 16 ? nil : count)
         }
     }
 

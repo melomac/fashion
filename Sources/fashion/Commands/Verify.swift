@@ -118,7 +118,9 @@ extension Verify {
                     }
                 }
             case .notMachO:
-                break
+                if let archs = try Universal.oversized(file) {
+                    found(MachOVerifier.anomaly(oversized: archs), nil)
+                }
             }
         } catch {
             refused(error, nil)

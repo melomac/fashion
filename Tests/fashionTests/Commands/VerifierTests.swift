@@ -843,6 +843,18 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     A universal file of more entries than `Universal.open` reads, which hash mode takes for no Mach-O, is named with
+     its count when its entries hold, as a crafted one's do and a Java class's, 0xCAFEBABE too, do not.
+     */
+    func testAUniversalFileOfMoreSlicesThanAreReadIsNamed() throws {
+        let directory = try self.directory("oversized")
+        let x86 = try (cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_ALL, data: self.program("x86_64", in: directory), align: 12)
+        XCTAssertEqual(try self.verify(makeUniversal(Array(repeating: x86, count: 16)), "sixteen", in: directory).lines, [": 16 slices of x86_64, which the kernel refuses"])
+        XCTAssertEqual(try self.verify(makeUniversal(Array(repeating: x86, count: 17)), "seventeen", in: directory).lines, [": a universal file of 17 slices, more than the 16 read here: the kernel reads as many as fit in its page, 204 or 818, and runs one; the slices are neither hashed nor verified"])
+        XCTAssertEqual(try self.verify(Data([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0x34]) + Data(count: 1024), "class", in: directory).lines, [])
+    }
+
+    /**
      A section laid past 2^64, where its address sits near the top of a segment that maps most of the address space,
      is named rather than tripped over.
      */
