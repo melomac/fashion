@@ -11,6 +11,7 @@ struct Unsigner: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "unsign",
         abstract: "Write and restore a Mach-O image, removing the code signature.",
+        discussion: copyright,
         helpNames: .shortAndLong,
         aliases: ["i"],
     )

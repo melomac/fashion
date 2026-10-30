@@ -121,7 +121,7 @@ struct Hasher: ParsableCommand {
         commandName: "hash",
         abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
         usage: "fashion [hash] [<options>] [<paths> ...]",
-        discussion: "Other subcommands are listed by 'fashion help'.",
+        discussion: copyright,
         helpNames: .shortAndLong,
         aliases: ["h"],
     )

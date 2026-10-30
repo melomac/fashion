@@ -12,6 +12,7 @@ struct Verify: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "verify",
         abstract: "Verify Mach-O files for anomalies.",
+        discussion: copyright,
         helpNames: .shortAndLong,
         aliases: ["v"],
     )

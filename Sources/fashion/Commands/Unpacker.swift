@@ -11,6 +11,7 @@ struct Unpacker: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "unpack",
         abstract: "Write and restore a UPX-packed Mach-O image, unpacked without UPX.",
+        discussion: copyright,
         helpNames: .shortAndLong,
         aliases: ["p", "upx"],
     )

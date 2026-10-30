@@ -30,6 +30,33 @@ final class FashionTests: XCTestCase {
         XCTAssertEqual(errors.first, "Error: Argument 2 is not valid UTF-8.")
     }
 
+    /**
+     The copyright line claims one year until the year after fashion was first published, then a range; a clock set
+     before publication still claims the first year.
+     */
+    func testCopyrightYears() {
+        XCTAssertEqual(Fashion.copyrightYears(in: 2026), "2026")
+        XCTAssertEqual(Fashion.copyrightYears(in: 2027), "2026-2027")
+        XCTAssertEqual(Fashion.copyrightYears(in: 2025), "2026")
+    }
+
+    /**
+     `fashion help` shows the copyright and the license; `fashion --help` falls through to `hash`, whose help does not.
+     */
+    func testHelpShowsTheCopyright() {
+        let now = Calendar(identifier: .gregorian).component(.year, from: .now)
+        let help = Fashion.helpMessage()
+        XCTAssertTrue(help.contains("Copyright (c) Melomac \(Fashion.copyrightYears(in: now))"))
+        XCTAssertTrue(help.contains("<https://codeberg.org/melomac/fashion/src/LICENSE>"))
+        XCTAssertTrue(help.contains("<https://codeberg.org/melomac/fashion/src/NOTICE>"))
+
+        XCTAssertTrue(Hasher.helpMessage().contains("Copyright"))
+        XCTAssertTrue(Thinner.helpMessage().contains("Copyright"))
+        XCTAssertTrue(Unpacker.helpMessage().contains("Copyright"))
+        XCTAssertTrue(Unsigner.helpMessage().contains("Copyright"))
+        XCTAssertTrue(Verify.helpMessage().contains("Copyright"))
+    }
+
     func testJobsResolveToTheProcessors() throws {
         let processors = ProcessInfo.processInfo.activeProcessorCount
         XCTAssertEqual(try Hasher.parse([]).scan.resolvedJobs, 1)

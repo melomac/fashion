@@ -28,7 +28,30 @@ extension ValidationError {
     }
 }
 
-// MARK: -
+// MARK: - Fashion CLI
+
+extension ParsableCommand {
+    /**
+     The years a copyright line claims in `year`: "2026" in the year fashion was first published, "2026-2027" from the
+     next.
+     */
+    static func copyrightYears(in year: Int) -> String {
+        let first = 2026
+        return year > first ? "\(first)-\(year)" : "\(first)"
+    }
+
+    static var copyright: String {
+        """
+        Copyright (c) Melomac \(self.copyrightYears(in: Calendar(identifier: .gregorian).component(.year, from: .now)))
+
+        License GPLv3: GNU General Public License version 3
+        <https://codeberg.org/melomac/fashion/src/LICENSE>
+
+        The binary includes third-party code, see NOTICE for copyright notices and license terms
+        <https://codeberg.org/melomac/fashion/src/NOTICE>
+        """
+    }
+}
 
 /**
  The command line. `fashion` runs the `hash` subcommand unless another is named, so `fashion [options] <paths>` reads as
@@ -42,6 +65,7 @@ struct Fashion: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "fashion",
         abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
+        discussion: copyright,
         version: "1.6.0",
         subcommands: [
             Hasher.self,

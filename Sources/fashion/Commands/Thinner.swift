@@ -12,6 +12,7 @@ struct Thinner: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "thinr",
         abstract: "Write the artifacts of a Mach-O beside it: each architecture, each state the flags take it through.",
+        discussion: copyright,
         helpNames: .shortAndLong,
         aliases: ["t", "thin"],
     )
