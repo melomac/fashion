@@ -108,17 +108,19 @@ enum MachOEditor {
         switch try Universal.open(file) {
         case let .thin(image):
             var said: [String] = []
+            // The padding is said before what the edit says, or the error it ends in, unless nothing comes of it.
+            var padding = held
             defer {
-                said.forEach { caveat(nil, $0) }
+                (padding + said).forEach { caveat(nil, $0) }
             }
             guard let edit = try self.edit(image, of: file, subject: file.path, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { said.append($0) }, keep: keep.map { held in { held(nil, $0, $1) } }) else {
                 // Padded as needed for nothing: the file as it is, which the parser refuses, says why.
+                padding = []
                 if file !== read {
                     _ = try Universal.open(read)
                 }
                 return nil
             }
-            said = held + said
             return (File(editing: file, pieces: edit.states.last!.pieces), [edit.states], file)
         case let .fat(archs):
             let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in

@@ -943,6 +943,21 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(left.count, 1, name)
             XCTAssertTrue(left.first?.text.hasSuffix(message) ?? false, name)
             XCTAssertEqual(forNothing.errorCount, 1, name)
+
+            // The padding is said before the error the edit then ends in: packed bytes that fail their checksum.
+            var damaged = packed
+            let at = try XCTUnwrap(damaged.ranges(of: Data("UPX!".utf8)).last).lowerBound
+            damaged[at + 12] ^= 0xff
+            damaged[at + 31] = UInt8(damaged[at + 4 ..< at + 31].reduce(0) { $0 + Int($1) } % 251)
+            let damagedFile = directory / "\(name)_damaged"
+            try damaged.write(to: damagedFile)
+            let saidFirst = Reporter(console: Console())
+            let refused = Unpacker.lines(for: damagedFile.path, write: false, reporter: saidFirst)
+            XCTAssertEqual(refused.map(\.text).first, "fashion: \(damagedFile.path): cut short of its last page, \((page - end).hex) bytes before __LINKEDIT at \(page.hex): padded with zeros", name)
+            XCTAssertEqual(refused.count, 2, name)
+            XCTAssertEqual(refused.last?.tint, .malformed, name)
+            XCTAssertTrue(refused.last?.text.hasPrefix("fashion: \(damagedFile.path): Invalid UPX data: checksum error: the packed bytes sum to") ?? false, name)
+            XCTAssertEqual(saidFirst.errorCount, 1, name)
         }
     }
 
