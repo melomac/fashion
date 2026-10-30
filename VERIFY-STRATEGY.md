@@ -144,7 +144,7 @@ left out, with the reason.
 |:--|:--|:--|
 | `LC_MAIN`: `__TEXT`'s address + `entryoff` in a segment that is not executable, or in none | dyld `validMain` "LC_MAIN points to non-executable segment" | `SIGBUS` at the jump; "valid on disk" when signed |
 | An entry in `__TEXT` but in no section, or in one that holds no code (`__cstring`, `__const`, a protector's own); a stub section is an entry too, which an app extension enters through for its imported `_NSExtensionMain` (496 of the OS's arm64e slices), as is GCC's `__text_startup` | research | |
-| `LC_UNIXTHREAD`: the pc register (`rip` index 16, `eip` 10, arm `pc` 15, arm64 `pc` 32) in a non-executable segment, or a flavor the arch does not have | dyld `entryAddrFromThreadCmd`; kernel `load_threadentry` | `SIGBUS` |
+| `LC_UNIXTHREAD`: the pc register (`rip` index 16, `eip` 10, arm `pc` 15, arm64 `pc` 32) in a non-executable segment, or a flavor the arch does not have; every thread state in the command walked, each a flavor `thread_entrypoint` takes (x86_64: its state and `x86_THREAD_FULL_STATE64`), the last one's pc the entry where dyld reads the first, which is named when there are several | dyld `entryAddrFromThreadCmd`; kernel `load_threadentry` | `SIGBUS` |
 
 ### `__LINKEDIT`
 

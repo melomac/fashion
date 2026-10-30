@@ -578,7 +578,10 @@ struct MachOVerifier {
         }
         if let thread {
             switch self.threadEntry(thread) {
-            case let .address(address):
+            case let .address(address, states):
+                if states > 1 {
+                    found.append("LC_UNIXTHREAD holds \(states) thread states: the kernel enters by the last, dyld reads the first")
+                }
                 found += self.entryAnomalies("LC_UNIXTHREAD's pc", at: address)
             case let .flavor(flavor, count):
                 found.append("LC_UNIXTHREAD's thread state, flavor \(flavor) of \(String(Int(count), pluralizing: "word")), is not \(Universal.archName(cpuType: image.cpuType, cpuSubtype: image.cpuSubtype))'s")
@@ -619,46 +622,62 @@ struct MachOVerifier {
     }
 
     private enum ThreadEntry {
-        case address(UInt64)
+        /// The pc, and how many thread states the command holds.
+        case address(UInt64, states: Int)
         case flavor(UInt32, UInt32)
         case short
     }
 
     /**
-     The entry `LC_UNIXTHREAD` sets, as dyld's `entryAddrFromThreadCmd` reads it: the pc register of the first thread
-     state, 16 bytes into the command, by its index in the architecture's state (`entryAddrRegisterIndexForThreadCmd`),
-     64 bits wide in a 64-bit image or an `arm64_32` one. The kernel's `thread_entrypoint` takes the architecture's own
-     flavor and count alone. Nil for an architecture neither knows.
+     The entry `LC_UNIXTHREAD` sets, as the kernel's `load_threadentry` reads it: every thread state in the command,
+     a flavor and a count of words then the registers, each a flavor and count the architecture's `thread_entrypoint`
+     takes, the last one's pc the entry; any other flavor, a float state say, fails the load. x86_64 takes its thread
+     state and its full one (`x86_THREAD_FULL_STATE64`, the segment registers after the others), the pc at the same
+     register of both. dyld's `entryAddrFromThreadCmd` reads the first state alone. Nil for an architecture neither
+     knows.
      */
     private func threadEntry(_ command: MachO.LoadCommand) -> ThreadEntry? {
         let image = self.image
-        let state: (index: Int, flavor: UInt32, count: UInt32)? = switch image.cpuType {
-        case CPU_TYPE_I386: (10, 1, 16) // x86_THREAD_STATE32, eip
-        case CPU_TYPE_X86_64: (16, 4, 42) // x86_THREAD_STATE64, rip
-        case CPU_TYPE_ARM: (15, 1, 17) // ARM_THREAD_STATE, pc
-        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: (32, 6, 68) // ARM_THREAD_STATE64, pc
+        let states: [(flavor: UInt32, count: UInt32, index: Int)]? = switch image.cpuType {
+        case CPU_TYPE_I386: [(1, 16, 10)] // x86_THREAD_STATE32, eip
+        case CPU_TYPE_X86_64: [(4, 42, 16), (23, 50, 16)] // x86_THREAD_STATE64 and x86_THREAD_FULL_STATE64, rip
+        case CPU_TYPE_ARM: [(1, 17, 15)] // ARM_THREAD_STATE, pc
+        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: [(6, 68, 32)] // ARM_THREAD_STATE64, pc
         default: nil
         }
-        guard let state else {
+        guard let states else {
             return nil
         }
-        guard command.data.count >= 16 else {
-            return .short
-        }
-        let (flavor, count) = command.data.withUnsafeBytes { raw in
-            (image.sw(raw.loadUnaligned(fromByteOffset: 8, as: UInt32.self)), image.sw(raw.loadUnaligned(fromByteOffset: 12, as: UInt32.self)))
-        }
-        guard flavor == state.flavor, count == state.count else {
-            return .flavor(flavor, count)
-        }
         let wide = image.is64 || image.cpuType == CPU_TYPE_ARM64_32
-        let at = 16 + state.index * (wide ? 8 : 4)
-        guard command.data.count >= at + (wide ? 8 : 4) else {
+        let data = command.data
+        var address: UInt64?
+        var held = 0
+        var at = 8
+        while at < data.count {
+            guard data.count >= at + 8 else {
+                return .short
+            }
+            let (flavor, count) = data.withUnsafeBytes { raw in
+                (image.sw(raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)), image.sw(raw.loadUnaligned(fromByteOffset: at + 4, as: UInt32.self)))
+            }
+            guard let state = states.first(where: { $0.flavor == flavor && $0.count == count }) else {
+                return .flavor(flavor, count)
+            }
+            let registers = at + 8
+            let pc = registers + state.index * (wide ? 8 : 4)
+            guard data.count >= registers + Int(count) * 4, data.count >= pc + (wide ? 8 : 4) else {
+                return .short
+            }
+            address = data.withUnsafeBytes { raw in
+                wide ? image.sw(raw.loadUnaligned(fromByteOffset: pc, as: UInt64.self)) : UInt64(image.sw(raw.loadUnaligned(fromByteOffset: pc, as: UInt32.self)))
+            }
+            held += 1
+            at = registers + Int(count) * 4
+        }
+        guard let address else {
             return .short
         }
-        return .address(command.data.withUnsafeBytes { raw in
-            wide ? image.sw(raw.loadUnaligned(fromByteOffset: at, as: UInt64.self)) : UInt64(image.sw(raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)))
-        })
+        return .address(address, states: held)
     }
 
     // MARK: - What the image links

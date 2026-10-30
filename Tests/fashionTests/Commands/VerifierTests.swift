@@ -369,13 +369,23 @@ final class VerifierTests: XCTestCase {
 
     /// An `LC_UNIXTHREAD` command with `x86_64`'s thread state, its rip at `rip`; `flavor` and `count` as given otherwise.
     private func unixthread(rip: UInt64, flavor: UInt32 = 4, count: UInt32 = 42) -> Data {
+        self.unixthread(states: [(flavor, count, rip)])
+    }
+
+    /// An `LC_UNIXTHREAD` command of `states` in turn, each a flavor, a count of words and a pc at `x86_64`'s rip,
+    /// register 16, when the state has the words for it.
+    private func unixthread(states: [(flavor: UInt32, count: UInt32, pc: UInt64)]) -> Data {
         var command = Data()
         command.appendUInt32(UInt32(LC_UNIXTHREAD))
-        command.appendUInt32(16 + 42 * 4)
-        command.appendUInt32(flavor)
-        command.appendUInt32(count)
-        for register in 0 ..< 21 {
-            command.appendUInt64(register == 16 ? rip : 0)
+        command.appendUInt32(UInt32(8 + states.reduce(0) { $0 + 8 + Int($1.count) * 4 }))
+        for state in states {
+            command.appendUInt32(state.flavor)
+            command.appendUInt32(state.count)
+            var registers = Data(count: Int(state.count) * 4)
+            if registers.count >= 136 {
+                registers.replaceSubrange(128 ..< 136, with: withUnsafeBytes(of: state.pc.littleEndian) { Data($0) })
+            }
+            command.append(registers)
         }
         return command
     }
@@ -534,6 +544,13 @@ final class VerifierTests: XCTestCase {
         thread.store(UInt32(0x7f), at: main.data.startIndex)
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr), to: thread), "thread", in: directory).lines, [": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 1, count: 16), to: thread), "flavor", in: directory).lines, [": LC_UNIXTHREAD's thread state, flavor 1 of 16 words, is not x86_64's"])
+        // The full state, the segment registers after the others, is x86_64's too, the pc at the same register.
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 23, count: 50), to: thread), "full", in: directory).lines, [": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
+        // Two thread states: the kernel enters by the last, in __text here, where dyld reads the first; a float state
+        // among them, which the kernel's thread_entrypoint does not take, fails the load.
+        let code = try program.load(UInt64.self, at: self.section("__TEXT", "__text", in: program) + 32)
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, data.vmaddr), (4, 42, code)]), to: thread), "states", in: directory).lines, [": LC_UNIXTHREAD holds 2 thread states: the kernel enters by the last, dyld reads the first"])
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, code), (5, 42, 0)]), to: thread), "float", in: directory).lines, [": LC_UNIXTHREAD's thread state, flavor 5 of 42 words, is not x86_64's"])
 
         var padding = program
         let text = try XCTUnwrap(XCTUnwrap(MachO(File(data: program))).findSegment("__TEXT")).load(segment_command_64.self)
