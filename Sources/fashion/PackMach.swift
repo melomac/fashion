@@ -423,23 +423,29 @@ struct PackMach {
      write.
      */
     func unpack() throws -> (data: Data, caveat: String?, notes: [String]) {
-        let plain = try self.unpack(keeping: false)
+        var plain = try self.unpack(keeping: false)
         guard plain.cAdler == self.cAdler else {
             throw UnpackError.unverified("checksum error: the packed bytes sum to \(plain.cAdler.hex), the pack header says \(self.cAdler.hex)", decompressed: plain.data)
         }
         if plain.adler == self.uAdler {
             return (plain.data, self.caveat(xor: 0), self.notes(plain))
         }
-        if plain.filtered {
-            // Decoded once more, the filtered blocks kept as they decoded, so each key is tried over them alone.
-            var keyed = try self.unpack(keeping: true)
-            for key in UInt8(1) ... 255 {
-                if try keyed.keyed(key) == self.uAdler {
-                    return (keyed.data, self.caveat(xor: key), self.notes(keyed))
-                }
+        let refusal = "checksum error on the unpacked image, \(self.packer): it sums to \(plain.adler.hex), the pack header says \(self.uAdler.hex)"
+        guard plain.filtered else {
+            throw UnpackError.unverified(refusal, decompressed: plain.data)
+        }
+        // Decoded once more, the filtered blocks kept as decoded, so each key is tried over them alone; the
+        // first image goes first, so no more than the second and the kept blocks are held at once.
+        plain.data = Data()
+        var keyed = try self.unpack(keeping: true)
+        for key in UInt8(1) ... 255 {
+            if try keyed.keyed(key) == self.uAdler {
+                return (keyed.data, self.caveat(xor: key), self.notes(keyed))
             }
         }
-        throw UnpackError.unverified("checksum error on the unpacked image, \(self.packer): it sums to \(plain.adler.hex), the pack header says \(self.uAdler.hex)\(plain.filtered ? ", under no XOR key" : "")", decompressed: plain.data)
+        // What decompressed as it is, the blocks under no key again, for --keep to write.
+        _ = try keyed.keyed(0)
+        throw UnpackError.unverified(refusal + ", under no XOR key", decompressed: keyed.data)
     }
 
     /**
