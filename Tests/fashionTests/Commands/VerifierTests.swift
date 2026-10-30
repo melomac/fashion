@@ -388,8 +388,8 @@ final class VerifierTests: XCTestCase {
     }
 
     /// An `LC_UNIXTHREAD` command of `states` in turn, each a flavor, a count of words and a pc at `x86_64`'s rip,
-    /// register 16, when the state has the words for it.
-    private func unixthread(states: [(flavor: UInt32, count: UInt32, pc: UInt64)]) -> Data {
+    /// register 16, or at `register`, when the state has the words for it.
+    private func unixthread(states: [(flavor: UInt32, count: UInt32, pc: UInt64)], register: Int = 16) -> Data {
         var command = Data()
         command.appendUInt32(UInt32(LC_UNIXTHREAD))
         command.appendUInt32(UInt32(8 + states.reduce(0) { $0 + 8 + Int($1.count) * 4 }))
@@ -397,8 +397,8 @@ final class VerifierTests: XCTestCase {
             command.appendUInt32(state.flavor)
             command.appendUInt32(state.count)
             var registers = Data(count: Int(state.count) * 4)
-            if registers.count >= 136 {
-                registers.replaceSubrange(128 ..< 136, with: withUnsafeBytes(of: state.pc.littleEndian) { Data($0) })
+            if registers.count >= register * 8 + 8 {
+                registers.replaceSubrange(register * 8 ..< register * 8 + 8, with: withUnsafeBytes(of: state.pc.littleEndian) { Data($0) })
             }
             command.append(registers)
         }
@@ -480,6 +480,11 @@ final class VerifierTests: XCTestCase {
         var locals = program
         locals.store(UInt32(1), at: dysymtab.data.startIndex + 8)
         XCTAssertEqual(try self.verify(locals, "locals", in: directory).lines, [": LC_DYSYMTAB's local symbols start at 1, not 0, which dyld refuses"])
+        // Relocation tables beside the chained fixups the linker wrote: dyld takes one fixup encoding.
+        var relocated = program
+        try relocated.store(self.command(UInt32(LC_SYMTAB), in: program).load(symtab_command.self).symoff, at: dysymtab.data.startIndex + 72)
+        relocated.store(UInt32(2), at: dysymtab.data.startIndex + 76)
+        XCTAssertEqual(try self.verify(relocated, "relocated", in: directory).lines, [": LC_DYSYMTAB holds 2 local relocations beside LC_DYLD_CHAINED_FIXUPS, which dyld refuses", ": the symbol table and the local relocations overlap in __LINKEDIT"])
         var externals = program
         externals.store(fields.iextdefsym + 1, at: dysymtab.data.startIndex + 16)
         XCTAssertEqual(try self.verify(externals, "externals", in: directory).lines, [
@@ -637,8 +642,11 @@ final class VerifierTests: XCTestCase {
 
     /**
      The entry point as dyld's `validMain` finds it: `LC_MAIN`'s `entryoff` in a segment that is not executable,
-     `LC_UNIXTHREAD`'s pc there, a thread state that is not the architecture's, a first state dyld does not read, an
-     entry in no section of `__TEXT`, and one in a section of it that holds no code, where a stub section does.
+     `LC_UNIXTHREAD`'s pc there, a thread state that is not the architecture's, a first state dyld does not read, the
+     full state the kernel refuses under Rosetta, `LC_UNIXTHREAD` alone in an arm64 executable, an entry in no
+     section of `__TEXT`, and one in a section of it that holds no code, where a stub section does. The arm64 and
+     the `x86_64` full-state executables were run on macOS 27.2 (Apple silicon): dyld halts the first, "main executable
+     has no entry point", the kernel kills the second, where the `x86_64` thread state alone runs under Rosetta.
      */
     func testTheEntryPointIsNamed() throws {
         let directory = try self.directory("entry")
@@ -654,13 +662,21 @@ final class VerifierTests: XCTestCase {
         thread.store(UInt32(0x7f), at: main.data.startIndex)
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr), to: thread), "thread", in: directory).lines, [": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 1, count: 16), to: thread), "flavor", in: directory).lines, [": LC_UNIXTHREAD's thread state, flavor 1 of 16 words, is not x86_64's"])
-        // The full state, the segment registers after the others, is x86_64's too to the kernel, the pc at the same
-        // register; dyld reads the thread state alone, and finds no entry in a command that begins with the full one.
+        // The full state, the segment registers after the others, is x86_64's too to an Intel Mac's kernel, the pc
+        // at the same register, where the kernel on Apple silicon refuses it for the translated process; dyld reads
+        // the thread state alone, and finds no entry in a command that begins with the full one.
         let dyld = ": LC_UNIXTHREAD's first thread state, flavor 23 of 50 words, is not the one dyld reads, flavor 4 of 42: the kernel enters by it, dyld finds no entry"
-        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 23, count: 50), to: thread), "full", in: directory).lines, [dyld, ": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
+        let rosetta = ": LC_UNIXTHREAD holds a thread state, flavor 23 of 50 words, which the kernel takes on an Intel Mac and refuses under Rosetta"
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 23, count: 50), to: thread), "full", in: directory).lines, [dyld, rosetta, ": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
         let code = try program.load(UInt64.self, at: self.section("__TEXT", "__text", in: program) + 32)
-        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: code, flavor: 23, count: 50), to: thread), "fullcode", in: directory).lines, [dyld])
-        XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, data.vmaddr), (23, 50, code)]), to: thread), "fullsecond", in: directory).lines, [": LC_UNIXTHREAD holds 2 thread states: the kernel enters by the last, dyld reads the first"])
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: code, flavor: 23, count: 50), to: thread), "fullcode", in: directory).lines, [dyld, rosetta])
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, data.vmaddr), (23, 50, code)]), to: thread), "fullsecond", in: directory).lines, [": LC_UNIXTHREAD holds 2 thread states: the kernel enters by the last, dyld reads the first", rosetta])
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: code), to: thread), "code", in: directory).lines, [])
+        // dyld takes an arm64 executable's entry from LC_MAIN alone.
+        var arm = try self.program("arm64", in: directory)
+        try arm.store(UInt32(0x7f), at: self.command(LC_MAIN, in: arm).data.startIndex)
+        let armCode = try arm.load(UInt64.self, at: self.section("__TEXT", "__text", in: arm) + 32)
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(6, 68, armCode)], register: 32), to: arm), "arm", in: directory).lines, [": LC_UNIXTHREAD alone enters an arm64 executable, which dyld takes no entry from", ": not signed, which the kernel refuses to run as arm64"])
         // Two thread states: the kernel enters by the last, in __text here, where dyld reads the first; a float state
         // among them, which the kernel's thread_entrypoint does not take, fails the load.
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, data.vmaddr), (4, 42, code)]), to: thread), "states", in: directory).lines, [": LC_UNIXTHREAD holds 2 thread states: the kernel enters by the last, dyld reads the first"])

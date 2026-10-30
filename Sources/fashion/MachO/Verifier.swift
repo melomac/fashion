@@ -453,6 +453,13 @@ struct MachOVerifier {
             if iundefsym != iextdefsym &+ nextdefsym {
                 found.append("LC_DYSYMTAB's undefined symbols start at \(iundefsym), not after the \(String(Int(nextdefsym), pluralizing: "external")) at \(iextdefsym), which dyld refuses")
             }
+            // dyld's validStructureLinkedit, one fixup encoding per image: relocation tables beside chained fixups or
+            // LC_DYLD_INFO_ONLY ("malformed mach-o contains LC_DYLD_CHAINED_FIXUPS and local relocations").
+            if let fixups = counts[LC_DYLD_CHAINED_FIXUPS] != nil ? "LC_DYLD_CHAINED_FIXUPS" : counts[LC_DYLD_INFO_ONLY] != nil ? "LC_DYLD_INFO_ONLY" : nil {
+                for (what, count) in [("local", dysymtab.nlocrel), ("external", dysymtab.nextrel)] where image.sw(count) != 0 {
+                    found.append("LC_DYSYMTAB holds \(String(Int(image.sw(count)), pluralizing: "\(what) relocation")) beside \(fixups), which dyld refuses")
+                }
+            }
         }
         if image.filetype != UInt32(MH_OBJECT), counts[UInt32(LC_LINKER_OPTION)] != nil {
             found.append("LC_LINKER_OPTION in an \(image.filetypeName), which dyld refuses: the compiler writes it in an object, for the linker")
@@ -584,8 +591,9 @@ struct MachOVerifier {
             }
         }
         // __IMPORT, the i386 linker's segment of self-modifying symbol stubs, is rwx by design, and __TEXT_EXEC is a
-        // kext's code. The kernel maps nothing writable and executable on arm64 ("curprot cannot be write+execute").
-        let wx = [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(image.cpuType) ? ", which the kernel refuses as arm64" : ""
+        // kext's code. The kernel's vm_map_enter maps a writable and executable segment with execute off on arm64
+        // ("curprot cannot be write+execute. turning off execute"): the segment's code faults when entered.
+        let wx = [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(image.cpuType) ? ", which the kernel maps without execute as arm64" : ""
         let own = ["__TEXT", "__DATA", "__LINKEDIT", "__IMPORT"] + (image.filetype == UInt32(MH_KEXT_BUNDLE) ? ["__TEXT_EXEC"] : [])
         for segment in segments where !own.contains(segment.name) && segment.isExecutable {
             found.append(segment.isWritable ? "segment \(segment.name) is writable and executable\(wx)" : "segment \(segment.name) is executable")
@@ -736,7 +744,10 @@ struct MachOVerifier {
      `LC_UNIXTHREAD`'s pc register, in a segment that is executable, which should be `__TEXT`, and in its `__text`
      section, a stub section, which an app extension enters through, or GCC's `__text_startup`, rather than in no
      section or in another, as a protector or a crafted entry lands; a thread state that is not the architecture's,
-     which the kernel refuses; or neither command.
+     which the kernel refuses; `LC_UNIXTHREAD` alone in an arm64 executable, which dyld takes no entry from (it
+     halts "main executable has no entry point", where it enters an `x86_64` executable by the command, as a 10.7
+     linker wrote it); `x86_64`'s full thread state, which the kernel takes on an Intel Mac and refuses under Rosetta;
+     or neither command.
      */
     private func entryAnomalies() -> [String] {
         let image = self.image
@@ -751,12 +762,18 @@ struct MachOVerifier {
         }
         if let thread {
             switch self.threadEntry(thread) {
-            case let .address(address, states, first):
+            case let .address(address, states, first, translated):
                 if states > 1 {
                     found.append("LC_UNIXTHREAD holds \(states) thread states: the kernel enters by the last, dyld reads the first")
                 }
                 if let dyld = Self.threadStates(for: image.cpuType)?.first, first.flavor != dyld.flavor || first.count != dyld.count {
                     found.append("LC_UNIXTHREAD's first thread state, flavor \(first.flavor) of \(String(Int(first.count), pluralizing: "word")), is not the one dyld reads, flavor \(dyld.flavor) of \(dyld.count): the kernel enters by it, dyld finds no entry")
+                }
+                if let translated {
+                    found.append("LC_UNIXTHREAD holds a thread state, flavor \(translated.flavor) of \(String(Int(translated.count), pluralizing: "word")), which the kernel takes on an Intel Mac and refuses under Rosetta")
+                }
+                if main == nil, [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(image.cpuType) {
+                    found.append("LC_UNIXTHREAD alone enters an arm64 executable, which dyld takes no entry from")
                 }
                 found += self.entryAnomalies("LC_UNIXTHREAD's pc", at: address)
             case let .flavor(flavor, count):
@@ -798,21 +815,24 @@ struct MachOVerifier {
     }
 
     private enum ThreadEntry {
-        /// The pc, how many thread states the command holds, and the first one's flavor and count.
-        case address(UInt64, states: Int, first: (flavor: UInt32, count: UInt32))
+        /// The pc, how many thread states the command holds, the first one's flavor and count, and the flavor and
+        /// count of a state the kernel refuses for a translated process, if one is held.
+        case address(UInt64, states: Int, first: (flavor: UInt32, count: UInt32), translated: (flavor: UInt32, count: UInt32)?)
         case flavor(UInt32, UInt32)
         case short
     }
 
-    /// The thread states the kernel's `thread_entrypoint` takes for `cpuType`, each a flavor, a count of words and
-    /// the index of the pc among the registers, the first the one dyld's `entryAddrFromThreadCmd` reads; nil for an
-    /// architecture neither knows.
-    private static func threadStates(for cpuType: cpu_type_t) -> [(flavor: UInt32, count: UInt32, index: Int)]? {
+    /// The thread states the kernel's `thread_entrypoint` takes for `cpuType`, each a flavor, a count of words, the
+    /// index of the pc among the registers and whether the kernel on Apple silicon takes it for a translated
+    /// process too (its `load_unixthread` refuses every `x86_64` state but the thread state, and reads no entry
+    /// from it, which Rosetta's runtime finds); the first the one dyld's `entryAddrFromThreadCmd` reads; nil for
+    /// an architecture neither knows.
+    private static func threadStates(for cpuType: cpu_type_t) -> [(flavor: UInt32, count: UInt32, index: Int, translated: Bool)]? {
         switch cpuType {
-        case CPU_TYPE_I386: [(1, 16, 10)] // x86_THREAD_STATE32, eip
-        case CPU_TYPE_X86_64: [(4, 42, 16), (23, 50, 16)] // x86_THREAD_STATE64 and x86_THREAD_FULL_STATE64, rip
-        case CPU_TYPE_ARM: [(1, 17, 15)] // ARM_THREAD_STATE, pc
-        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: [(6, 68, 32)] // ARM_THREAD_STATE64, pc
+        case CPU_TYPE_I386: [(1, 16, 10, true)] // x86_THREAD_STATE32, eip
+        case CPU_TYPE_X86_64: [(4, 42, 16, true), (23, 50, 16, false)] // x86_THREAD_STATE64 and x86_THREAD_FULL_STATE64, rip
+        case CPU_TYPE_ARM: [(1, 17, 15, true)] // ARM_THREAD_STATE, pc
+        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: [(6, 68, 32, true)] // ARM_THREAD_STATE64, pc
         default: nil
         }
     }
@@ -835,6 +855,7 @@ struct MachOVerifier {
         let data = command.data
         var address: UInt64?
         var first: (flavor: UInt32, count: UInt32)?
+        var translated: (flavor: UInt32, count: UInt32)?
         var held = 0
         var at = 8
         while at < data.count {
@@ -850,6 +871,9 @@ struct MachOVerifier {
             if first == nil {
                 first = (flavor, count)
             }
+            if !state.translated, translated == nil {
+                translated = (flavor, count)
+            }
             let registers = at + 8
             let pc = registers + state.index * (wide ? 8 : 4)
             guard data.count >= registers + Int(count) * 4, data.count >= pc + (wide ? 8 : 4) else {
@@ -864,7 +888,7 @@ struct MachOVerifier {
         guard let address, let first else {
             return .short
         }
-        return .address(address, states: held, first: first)
+        return .address(address, states: held, first: first, translated: translated)
     }
 
     // MARK: - What the image links

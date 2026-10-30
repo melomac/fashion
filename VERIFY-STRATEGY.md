@@ -105,7 +105,7 @@ left out, with the reason.
 | An `lc_str` starting inside its command's fixed fields, a dylib command's 24 bytes, the others' 12: named with the offset | live dyld "string start offset too small" | |
 | More than 64 MiB of load commands | this tool's own limit, as the symbol names': refused red before the table is read; no loader has one | |
 | A superblob declaring more than 64 MiB | this tool's own limit, as the load commands': refused red before it is read, in hash mode as in `verify`; Security reads what the length says and the kernel maps what `LC_CODE_SIGNATURE` says, a sparse file costing either the length in memory | |
-| `LC_DYSYMTAB` without `LC_SYMTAB`; `LC_DYLD_INFO` with `LC_DYLD_CHAINED_FIXUPS` | dyld | ran |
+| `LC_DYSYMTAB` without `LC_SYMTAB`; `LC_DYLD_INFO` with `LC_DYLD_CHAINED_FIXUPS`; `LC_DYSYMTAB` relocation tables beside `LC_DYLD_CHAINED_FIXUPS` or `LC_DYLD_INFO_ONLY` | dyld `validStructureLinkedit`, "malformed mach-o contains LC_DYLD_CHAINED_FIXUPS and local relocations" | ran |
 | `LC_DYLD_INFO` beside `LC_DYLD_INFO_ONLY`, `LC_ROUTINES` beside `LC_ROUTINES_64` | dyld `validStructureLoadCommands` counts each pair as one command: "multiple LC_DYLD_INFO load commands found" | |
 | No `LC_UUID` | dyld `validLinkedit` "missing LC_UUID" (SDK ≥ 14) | dyld aborted |
 | No `LC_LOAD_DYLIB` at all | dyld "must link with at least libSystem.dylib" (SDK ≥ 13) | dyld aborted |
@@ -139,7 +139,7 @@ left out, with the reason.
 | `__DATA_CONST` without `SG_READ_ONLY` | live dyld "__DATA_CONST segment missing SG_READ_ONLY flag"; not named: 177 of Apple's own slices lack it (`libccid`, the toolchain's Swift libraries), so dyld does not refuse it | |
 | `__TEXT` without sections | research: packers, crafted stubs | |
 | `__TEXT`'s `vmsize` more than a page past its `filesize` | research: room to unpack into (UPX) | killed only because it overlapped `__DATA_CONST` |
-| A segment both writable and executable; an executable segment not `__TEXT` (nor `__TEXT_EXEC` in a kext) | kernel on arm64 "curprot cannot be write+execute"; research on x86_64: Keydnap's `__TEXT` is rwx; the i386 linker's `__IMPORT` is rwx by design and not named | ran, unsigned x86_64 |
+| A segment both writable and executable; an executable segment not `__TEXT` (nor `__TEXT_EXEC` in a kext) | kernel on arm64 `vm_map_enter` "curprot cannot be write+execute. turning off execute": the segment is mapped, execute off, not refused; research on x86_64: Keydnap's `__TEXT` is rwx; the i386 linker's `__IMPORT` is rwx by design and not named | ran, unsigned x86_64 |
 | A segment or section name with bytes after its NUL, or not printable ASCII (`__TEXT\0junk`, a Cyrillic е in `__text`); shown quoted | `strncmp` readers and prefix readers disagree; lookalikes | ran, "valid on disk" when signed |
 | `mach_header_64.reserved` not zero | no reader | ran |
 | A segment flagged `SG_PROTECTED_VERSION_1`: the kernel decrypts its pages as it maps them, but for the image's first three, `APPLE_UNPROTECTED_HEADER_SIZE` counted from the image's start (`unprotect_dsmos_segment`, Apple's protection of a few 10.4 to 10.6 binaries), so a third party's code reads encrypted on disk; the line counts what of the segment stays clear | kernel `load_segment`; static tools read the file | |
@@ -150,7 +150,7 @@ left out, with the reason.
 |:--|:--|:--|
 | `LC_MAIN`: `__TEXT`'s address + `entryoff` in a segment that is not executable, or in none | dyld `validMain` "LC_MAIN points to non-executable segment" | `SIGBUS` at the jump; "valid on disk" when signed |
 | An entry in `__TEXT` but in no section, or in one that holds no code (`__cstring`, `__const`, a protector's own); a stub section is an entry too, which an app extension enters through for its imported `_NSExtensionMain` (496 of the OS's arm64e slices), as is GCC's `__text_startup` | research | |
-| `LC_UNIXTHREAD`: the pc register (`rip` index 16, `eip` 10, arm `pc` 15, arm64 `pc` 32) in a non-executable segment, or a flavor the arch does not have; every thread state in the command walked, each a flavor `thread_entrypoint` takes (x86_64: its state and `x86_THREAD_FULL_STATE64`), the last one's pc the entry where dyld reads the first, which is named when there are several; the first must be the flavor dyld's `entryAddrFromThreadCmd` takes, x86_64's thread state and not its full one, or dyld finds no entry | dyld `entryAddrFromThreadCmd`; kernel `load_threadentry` | `SIGBUS` |
+| `LC_UNIXTHREAD`: the pc register (`rip` index 16, `eip` 10, arm `pc` 15, arm64 `pc` 32) in a non-executable segment, or a flavor the arch does not have; every thread state in the command walked, each a flavor `thread_entrypoint` takes (x86_64: its state and `x86_THREAD_FULL_STATE64`), the last one's pc the entry where dyld reads the first, which is named when there are several; the first must be the flavor dyld's `entryAddrFromThreadCmd` takes, x86_64's thread state and not its full one, or dyld finds no entry; the full state is refused by the kernel on Apple silicon for a translated process (`load_unixthread` takes `x86_THREAD_STATE64` alone, and leaves the entry to Rosetta's runtime); `LC_UNIXTHREAD` alone in an arm64 executable, which dyld halts ("main executable has no entry point": `Header::mainOffset` reads `LC_MAIN` alone there, where the x86_64 slice enters by the command) | dyld `entryAddrFromThreadCmd`, `mainOffset`; kernel `load_threadentry`, `load_unixthread` | `SIGBUS`; arm64 `LC_UNIXTHREAD`: dyld halted; x86_64 full state: killed, thread state: ran |
 
 ### `__LINKEDIT`
 
@@ -390,7 +390,8 @@ dyld"), and "code signature does not cover entire file up to signature", dyld's 
 Security's `assure_signature_space` wants a signature size in multiples of 16; the kernel's strings are the sources'
 (`multiple hash=%d CodeDirectories in signature; rejecting`, `disallowing unsupported code signature page shift`,
 `multiple entitlements blobs`, `embedded signature doesn't match attached signature`) plus the W^X rule of
-`vm_map_enter`, "curprot cannot be write+execute", which refuses a writable and executable segment on arm64. Those
+`vm_map_enter`, "curprot cannot be write+execute. turning off execute", which maps a writable and executable segment
+without execute on arm64. Those
 that held against the OS and third-party sweeps became rules, with tests; three did not (section 6).
 
 ### 7.3 Gatekeeper and AMFI
