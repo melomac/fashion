@@ -5,34 +5,29 @@ import Foundation
  What every harness shares: the fuzzer's bytes as the `File` a scan opens, and as `Data`, and the walk of a Mach-O the
  scan reads.
 
- `File` reads a path, not memory, so each input is written over one scratch file per process and opened from there,
- the way a test opens a fixture (`File(data:)` in TestHelpers), then read at its offsets like any file the walk finds.
+ `File` reads a path, not memory, but an edit of one is read from memory: each input is a `File` of one piece, its
+ bytes, editing a scratch file opened once per process, so that it is read at its offsets like any file the walk finds
+ without going through the file system. Written over the scratch file and opened from there for every input, the way a
+ test opens a fixture (`File(data:)` in TestHelpers), the kernel took two thirds of a worker's time, the file's size
+ changed and its pages written, read uncached and dropped each time, and the workers of every binary at once spent
+ most of theirs waiting on it.
  */
 enum Fuzz {
     private static let path = NSTemporaryDirectory() + "fashion-fuzz-\(getpid())"
 
-    /// The scratch file, created once and removed when the fuzzer exits.
-    private static let scratch: Int32 = {
-        let fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0o600)
+    /// The scratch file every input's `File` edits, created empty once and removed when the fuzzer exits; never read,
+    /// since an input is all bytes.
+    private nonisolated(unsafe) static let base: File = {
+        let fd = open(path, O_RDONLY | O_CREAT, 0o600)
         precondition(fd >= 0, "cannot create \(path): \(String(cString: strerror(errno)))")
+        close(fd)
         atexit { unlink(Fuzz.path) }
-        return fd
+        return try! File(path: path)
     }()
 
-    /// The input written over the scratch file, as its path; nil when the scratch file cannot hold it.
-    static func written(_ start: UnsafeRawPointer, _ count: Int) -> String? {
-        guard
-            pwrite(self.scratch, start, count, 0) == count,
-            ftruncate(self.scratch, off_t(count)) == 0
-        else {
-            return nil
-        }
-        return self.path
-    }
-
-    /// The input as a file, nil when the scratch file cannot hold it.
-    static func file(_ start: UnsafeRawPointer, _ count: Int) -> File? {
-        self.written(start, count).flatMap { try? File(path: $0) }
+    /// The input as a file, in memory.
+    static func file(_ start: UnsafeRawPointer, _ count: Int) -> File {
+        File(editing: self.base, pieces: [.bytes(self.data(start, count))])
     }
 
     /// The input in memory.

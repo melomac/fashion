@@ -17,9 +17,10 @@ here feed libFuzzer's inputs through those parsers under AddressSanitizer, one e
 | `verify`     | `fashion verify` over the input: `MachOVerifier` over the universal file, each slice against its table entry and each image, every rule, the padding and the signature's pages read, the superblob's blobs against their slots, `Signer` over the CMS blob through Security's decoder and trustd, and what the parser or Security refuses |
 | `signer`     | `Signer` over a superblob alone, as `LC_CODE_SIGNATURE` points at one: checked as `signingData` checks it, its directories loaded, the CMS blob verified over the primary one and its chain built and read, the certificates rewritten by the fuzzer where the CMS signature does not cover them                                          |
 
-An input reaches a parser as a `File`, the way a test fixture does: written over one scratch file per process and
-opened from there (`support.swift`); `decompress` and `signer` take their bytes as they are, a block's `b_info` then
-its data, a superblob. `macho`, `cdhash`, `unpack` and `verify` are built with both `--exact` endings (see
+An input reaches a parser as a `File` read from memory, an edit of one piece over an empty scratch file opened once
+per process (`support.swift`): written over the scratch file and opened from there instead, the way a test fixture
+is, the inputs kept the kernel busier than the parsers. `decompress` and `signer` take their bytes as they are, a
+block's `b_info` then its data, a superblob. `macho`, `cdhash`, `unpack` and `verify` are built with both `--exact` endings (see
 Package.swift): `fuzz-macho`, `fuzz-cdhash`, `fuzz-unpack` and `fuzz-verify` with `SECURITY_STRICT_VALIDATION`, the
 `-segments` ones without.
 

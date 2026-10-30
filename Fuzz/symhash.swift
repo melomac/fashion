@@ -7,9 +7,7 @@ import Foundation
  */
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzSymHash(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
-    guard let file = Fuzz.file(start, count) else {
-        return 0
-    }
+    let file = Fuzz.file(start, count)
 
     _ = try? SymHash.compute(file, algorithms: [.md5], separator: ",", sortSymbols: true)
     _ = try? SymHash.compute(file, algorithms: [.tlsh], separator: "\n", sortSymbols: false)

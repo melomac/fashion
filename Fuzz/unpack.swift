@@ -10,9 +10,7 @@ import Foundation
  */
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzUnpack(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
-    guard let file = Fuzz.file(start, count) else {
-        return 0
-    }
+    let file = Fuzz.file(start, count)
 
     for exact in [MachOEditor.Exact.never, .asNeeded, .always] {
         for unsign in [true, false] {

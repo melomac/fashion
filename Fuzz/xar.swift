@@ -8,9 +8,7 @@ import Foundation
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzXAR(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
     _ = try? XARParser.parseHeader(data: Fuzz.data(start, count))
-    guard let file = Fuzz.file(start, count) else {
-        return 0
-    }
+    let file = Fuzz.file(start, count)
 
     _ = try? XARParser.hashToc(file, algorithms: [.sha1], decompress: false)
     for algorithm in [ByteHash.sha1, .ssdeep, .tlsh] {

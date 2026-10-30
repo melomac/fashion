@@ -83,47 +83,51 @@ extension Verify {
     /**
      What `MachOVerifier` finds about one file, as it is found: `found` gets each finding with the architecture of the
      slice it is about, nil for the file or a universal file's table; `refused` gets what the parser refuses of a file
-     or a slice, and a signature Security cannot read, the same way. The fuzzer's `verify` harness runs it with
-     closures that keep nothing.
+     or a slice, and a signature Security cannot read, the same way.
      */
     static func verify(_ path: String, found: (_ finding: String, _ arch: String?) -> Void, refused: (_ error: Error, _ arch: String?) -> Void) {
         do {
-            let file = try File(path: path)
-            switch try Universal.open(file) {
-            case let .thin(image):
-                let (findings, error) = MachOVerifier(image, in: file).anomalies()
-                findings.forEach { found($0, nil) }
-                if let error {
-                    refused(error, nil)
-                }
-            case let .fat(archs):
-                MachOVerifier.anomalies(universal: file, archs).forEach { found($0, nil) }
-                for arch in archs {
-                    do {
-                        guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
-                            if let odd = try MachOVerifier.anomaly(slice: arch, in: file) {
-                                found(odd, nil)
-                            }
-                            continue
-                        }
-                        let verifier = MachOVerifier(image, in: file)
-                        verifier.anomalies(slice: arch).forEach { found($0, nil) }
-                        let (findings, error) = verifier.anomalies()
-                        findings.forEach { found($0, arch.name) }
-                        if let error {
-                            refused(error, arch.name)
-                        }
-                    } catch {
-                        refused(error, arch.name)
-                    }
-                }
-            case .notMachO:
-                if let archs = try Universal.oversized(file) {
-                    found(MachOVerifier.anomaly(oversized: archs), nil)
-                }
-            }
+            try self.verify(File(path: path), found: found, refused: refused)
         } catch {
             refused(error, nil)
+        }
+    }
+
+    /// The same over a file already open, which throws what it refuses of the file as a whole: the fuzzer's `verify`
+    /// harness runs it with closures that keep nothing.
+    static func verify(_ file: File, found: (_ finding: String, _ arch: String?) -> Void, refused: (_ error: Error, _ arch: String?) -> Void) throws {
+        switch try Universal.open(file) {
+        case let .thin(image):
+            let (findings, error) = MachOVerifier(image, in: file).anomalies()
+            findings.forEach { found($0, nil) }
+            if let error {
+                refused(error, nil)
+            }
+        case let .fat(archs):
+            MachOVerifier.anomalies(universal: file, archs).forEach { found($0, nil) }
+            for arch in archs {
+                do {
+                    guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
+                        if let odd = try MachOVerifier.anomaly(slice: arch, in: file) {
+                            found(odd, nil)
+                        }
+                        continue
+                    }
+                    let verifier = MachOVerifier(image, in: file)
+                    verifier.anomalies(slice: arch).forEach { found($0, nil) }
+                    let (findings, error) = verifier.anomalies()
+                    findings.forEach { found($0, arch.name) }
+                    if let error {
+                        refused(error, arch.name)
+                    }
+                } catch {
+                    refused(error, arch.name)
+                }
+            }
+        case .notMachO:
+            if let archs = try Universal.oversized(file) {
+                found(MachOVerifier.anomaly(oversized: archs), nil)
+            }
         }
     }
 }

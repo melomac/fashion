@@ -9,9 +9,6 @@ import Foundation
  */
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzVerify(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
-    guard let path = Fuzz.written(start, count) else {
-        return 0
-    }
-    Verify.verify(path) { _, _ in } refused: { _, _ in }
+    try? Verify.verify(Fuzz.file(start, count)) { _, _ in } refused: { _, _ in }
     return 0
 }

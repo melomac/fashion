@@ -8,9 +8,7 @@ import Foundation
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzByteHash(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
     let data = Fuzz.data(start, count)
-    guard let file = Fuzz.file(start, count) else {
-        return 0
-    }
+    let file = Fuzz.file(start, count)
 
     for hash in [ByteHash.ssdeep, .tlsh, .git] {
         _ = try? hash.digest(file)

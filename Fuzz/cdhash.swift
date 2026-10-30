@@ -7,9 +7,7 @@ import Foundation
  */
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzCDHash(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
-    guard let file = Fuzz.file(start, count) else {
-        return 0
-    }
+    let file = Fuzz.file(start, count)
 
     _ = try? CDHash.hash(file, path: "input", exact: false)
     _ = try? CDHash.hash(file, path: "input", exact: true)

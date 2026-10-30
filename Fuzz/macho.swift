@@ -7,9 +7,7 @@ import Foundation
  */
 @_cdecl("LLVMFuzzerTestOneInput")
 public func fuzzMachO(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
-    guard let file = Fuzz.file(start, count) else {
-        return 0
-    }
+    let file = Fuzz.file(start, count)
     Fuzz.walk(file)
     _ = try? Universal.fileEnd(file)
     _ = try? MachO(lenient: file)?.logicalEnd()
