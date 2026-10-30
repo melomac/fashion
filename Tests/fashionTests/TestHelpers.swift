@@ -347,6 +347,16 @@ func usageError(_ arguments: [String]) -> String? {
     }
 }
 
+/// A 64-bit thin image `data` with `command` appended to its load commands, counted in: the header pad must hold it.
+func appending(_ command: Data, to data: Data) -> Data {
+    var data = data
+    let (ncmds, sizeofcmds) = data.withUnsafeBytes { ($0.loadUnaligned(fromByteOffset: 16, as: UInt32.self), $0.loadUnaligned(fromByteOffset: 20, as: UInt32.self)) }
+    data.replaceSubrange(32 + Int(sizeofcmds) ..< 32 + Int(sizeofcmds) + command.count, with: command)
+    data.replaceSubrange(16 ..< 20, with: withUnsafeBytes(of: (ncmds + 1).littleEndian) { Data($0) })
+    data.replaceSubrange(20 ..< 24, with: withUnsafeBytes(of: (sizeofcmds + UInt32(command.count)).littleEndian) { Data($0) })
+    return data
+}
+
 /**
  Run the built `fashion` on `arguments`, its output discarded: the exit status and the lines it wrote to stderr. Through
  `sh`, which runs `script` with `$0` the binary and `$1`… the arguments, it can be handed bytes a Swift string cannot

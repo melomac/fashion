@@ -558,6 +558,71 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
+     A dylib with no local symbol is the linker's, not `strip`'s, while it has an indirect symbol table: `strip` writes
+     the `radr://5614542` placeholder beside one whenever no local symbol is left, so `strip -x` tells it stripped. And an
+     image that records no linker, built for macOS 10.13 with `LC_VERSION_MIN_MACOSX`, is dated by its SDK, today's:
+     `strip` rounds its `__LINKEDIT` to 16 KiB. Each, signed by `codesign`, comes back byte for byte.
+     */
+    func testADylibAndAnOldDeploymentTargetAreToldStrippedAsStripLeavesThem() throws {
+        let directory = try self.directory("dylib-old")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let dylib = try compile("calling.dylib", in: directory, source: "#include <stdio.h>\nvoid hello(void) { puts(\"hi\"); }\n", ["-arch", "x86_64", "-dynamiclib"])
+        let old = try compile("old", in: directory, ["-arch", "x86_64", "-mmacosx-version-min=10.13"])
+        XCTAssertNil(try XCTUnwrap(MachO(File(path: old.path))).findCommand(UInt32(LC_BUILD_VERSION)), "LC_VERSION_MIN_MACOSX dates it")
+        for (linked, strip) in [(dylib, ["-x"]), (old, [])] {
+            let name = linked.lastPathComponent
+            let image = try XCTUnwrap(MachO(File(path: linked.path)))
+            XCTAssertFalse(image.isStripped, name)
+            XCTAssertEqual(image.linkeditSizeRounding, 0x1000, name)
+            let stripped = directory / "stripped-\(name)"
+            try FileManager.default.copyItem(at: linked, to: stripped)
+            try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip"] + strip + [stripped.path]), "cannot run strip")
+            let strippedImage = try XCTUnwrap(MachO(File(path: stripped.path)))
+            XCTAssertTrue(strippedImage.isStripped, name)
+            XCTAssertEqual(strippedImage.linkeditSizeRounding, 0x4000, name)
+            XCTAssertEqual(try XCTUnwrap(strippedImage.findSegment("__LINKEDIT")).load(segment_command_64.self).vmsize, 0x4000, name)
+            for original in [linked, stripped] {
+                let data = try Data(contentsOf: original)
+                let signed = try self.codesignedFile(data, in: directory)
+                XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], original.lastPathComponent)
+            }
+        }
+    }
+
+    /**
+     A thin file cut short of an empty segment within a page is padded with zeros up to it, and the padding said; when
+     the padded file still fails to parse, a second empty segment lying a page or more past the end, the padding is
+     said before the error, which names the padded size, under thinr -i as under --exact.
+     */
+    func testThePaddingIsSaidBeforeTheErrorAPaddedFileEndsIn() throws {
+        let directory = try self.directory("padded-error")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        var data = try Data(contentsOf: compile("program", in: directory, ["-arch", "x86_64", "-Wl,-headerpad,0x800"]))
+        let end = data.count
+        func segment(_ name: String, at fileoff: Int) -> Data {
+            var command = Data()
+            [UInt32(LC_SEGMENT_64), 72].forEach { command.appendUInt32($0) }
+            command.append(Data(name.utf8)); command.append(Data(count: 16 - name.utf8.count))
+            [UInt64(0x2000_0000) + UInt64(fileoff), 0, UInt64(fileoff), 0].forEach { command.appendUInt64($0) }
+            [UInt32(1), 1, 0, 0].forEach { command.appendUInt32($0) }
+            return command
+        }
+        data = appending(segment("__PAD2", at: end + 0x6000), to: appending(segment("__PAD1", at: end + 0x10), to: data))
+        let file = directory / "cut"
+        try data.write(to: file)
+        let (status, errors) = try runFashion(["thinr", "-i", file.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, [
+            "fashion: \(file.path): cut short of its last page, 0x10 bytes before __PAD1 at \((end + 0x10).hex): padded with zeros",
+            "fashion: \(file.path): Invalid Mach-O: segment __PAD2 at offset \((end + 0x6000).hex) with size 0x0 is outside the \((end + 0x10).hex)-byte slice",
+        ])
+    }
+
+    /**
      An executable with no local symbol to show for it is told stripped by its global symbols: a program with none at
      all, one calling `puts` through a stub, and one `ld -x` emptied of them keep `_main` beside `__mh_execute_header`
      and get the linker's page back, 4 KiB on `x86_64` where today's `strip` writes 16 KiB; through `strip`, they keep

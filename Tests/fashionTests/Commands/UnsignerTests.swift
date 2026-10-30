@@ -260,5 +260,71 @@ final class UnsignerTests: XCTestCase {
         let small = MachOEditor.universal([(arch: arch, pieces: [File.Piece.range(0 ..< 0x1000)], align: 12)], is64: false)
         XCTAssertEqual(try table(small).magic, FAT_MAGIC)
         XCTAssertEqual(try table(small).count, 8 + 20)
+
+        // A hidden slice is counted in a 64-bit table, where no reader looks past the count.
+        let hidden = Universal.Architecture(cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64_ALL, offset: 0x1_0000_4000, length: 0x1000, align: 14, hidden: true)
+        let both = MachOEditor.universal([(arch: arch, pieces: [File.Piece.range(0 ..< 0x1_0000_0000)], align: 12), (arch: hidden, pieces: [File.Piece.range(0 ..< 0x1000)], align: 14)], is64: false)
+        guard case let .bytes(wide)? = both.first else {
+            return XCTFail("no table")
+        }
+        XCTAssertEqual(UInt32(bigEndian: wide.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }), 2)
+        XCTAssertEqual(wide.count, 8 + 2 * 32)
+    }
+
+    /**
+     Security's `remove_signature_space` walks the `ncmds` commands the loaders read and takes the last `__LINKEDIT`,
+     the last `LC_SYMTAB` and the last `LC_CODE_SIGNATURE` of them. An arm64 program given a second, empty `__LINKEDIT`
+     after its own, signed by codesign, comes back as it was, byte for byte: codesign extends and shrinks the second,
+     and leaves the 16 KiB signing gave it where unsign restores the nothing it had. One given a second `LC_SYMTAB`
+     whose string table ends nowhere near the signature unsigns to what `codesign --remove-signature` writes, byte for
+     byte, the padding before the signature kept. A signature command hidden past `ncmds`, or under `ncmds` 0, is none
+     to either: codesign leaves the file as it is, and so does unsign.
+     */
+    func testUnsignTakesTheLastCommandsAsCodesignDoes() throws {
+        let directory = try self.directory("last")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let program = try Data(contentsOf: compile("arm", in: directory, ["-arch", "arm64", "-Wl,-headerpad,0x800"]))
+        let linkedit = try XCTUnwrap(XCTUnwrap(MachO(File(data: program))).findSegment("__LINKEDIT")).load(segment_command_64.self)
+        var decoyLinkedit = Data()
+        [UInt32(LC_SEGMENT_64), 72].forEach { decoyLinkedit.appendUInt32($0) }
+        decoyLinkedit.append(Data("__LINKEDIT".utf8)); decoyLinkedit.append(Data(count: 6))
+        [linkedit.vmaddr + linkedit.vmsize, 0, linkedit.fileoff + linkedit.filesize, 0].forEach { decoyLinkedit.appendUInt64($0) }
+        [UInt32(1), 1, 0, 0].forEach { decoyLinkedit.appendUInt32($0) }
+        var decoySymtab = Data()
+        [UInt32(LC_SYMTAB), 24, 0, 0, 0, 0].forEach { decoySymtab.appendUInt32($0) }
+        for (name, decoy, roundTrip) in [("linkedit", decoyLinkedit, true), ("symtab", decoySymtab, false)] {
+            let file = directory / name
+            let original = appending(decoy, to: program)
+            try original.write(to: file)
+            _ = try codesign(["-s", "-", file.path])
+            let oracle = directory / "\(name)-codesign"
+            try FileManager.default.copyItem(at: file, to: oracle)
+            _ = try codesign(["--remove-signature", oracle.path])
+            let reporter = Reporter(console: Console())
+            XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_unsigned"], name)
+            let unsigned = try Data(contentsOf: URL(fileURLWithPath: file.path + "_unsigned"))
+            XCTAssertEqual(unsigned, try roundTrip ? original : Data(contentsOf: oracle), name)
+            XCTAssertEqual(unsigned.count, try Data(contentsOf: oracle).count, name)
+        }
+
+        let signed = directory / "signed"
+        try program.write(to: signed)
+        _ = try codesign(["-s", "-", signed.path])
+        let data = try Data(contentsOf: signed)
+        let commands = try XCTUnwrap(MachO(File(data: data))).loadCommands
+        XCTAssertEqual(commands.last?.cmd, UInt32(LC_CODE_SIGNATURE))
+        for (name, ncmds) in [("hidden", UInt32(commands.count - 1)), ("none", UInt32(0))] {
+            var crafted = data
+            crafted.replaceSubrange(16 ..< 20, with: withUnsafeBytes(of: ncmds.littleEndian) { Data($0) })
+            let file = directory / name
+            try crafted.write(to: file)
+            XCTAssertNil(try XCTUnwrap(MachO(File(data: crafted))).removingSignature(end: crafted.count), name)
+            let reporter = Reporter(console: Console())
+            XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).count, 0, name)
+            _ = try execute("/usr/bin/codesign", ["--remove-signature", file.path])
+            XCTAssertEqual(try Data(contentsOf: file), crafted, "\(name): codesign leaves it as it is")
+        }
     }
 }

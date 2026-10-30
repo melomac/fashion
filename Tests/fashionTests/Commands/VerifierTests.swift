@@ -264,13 +264,13 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(Unsigner.lines(for: signed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"])
         self.assertVerify(signed.path + "_unsigned", [])
 
-        // A stripped image built for macOS 10.13 records no linker, since ld writes LC_VERSION_MIN_MACOSX for it, and
-        // this toolchain's strip rounds __LINKEDIT's vmsize to 16 KiB itself: no signature came out of it.
+        // A stripped image built for macOS 10.13 records no linker, since ld writes LC_VERSION_MIN_MACOSX for it; its
+        // SDK, today's, dates it to a strip that rounds __LINKEDIT's vmsize to 16 KiB itself: no signature came out.
         let old = try compile("old", in: directory, ["-arch", "x86_64", "-mmacosx-version-min=10.13"])
         try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip", old.path]), "cannot run strip")
         let stripped = try XCTUnwrap(MachO(File(path: old.path)))
         XCTAssertNil(stripped.linkerVersion)
-        XCTAssertNil(stripped.linkeditSizeRounding)
+        XCTAssertEqual(stripped.linkeditSizeRounding, 0x4000)
         self.assertVerify(old.path, [])
     }
 

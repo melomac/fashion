@@ -107,7 +107,15 @@ enum MachOEditor {
         let read = file
         var held: [String] = []
         let file = try exact == .never ? file : self.padded(file, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
-        switch try Universal.open(file) {
+        let opened: Universal
+        do {
+            opened = try Universal.open(file)
+        } catch {
+            // The padding is said before the error the padded file ends in, which names the padded size.
+            held.forEach { caveat(nil, $0) }
+            throw error
+        }
+        switch opened {
         case let .thin(image):
             var said: [String] = []
             // The padding is said before what the edit says, or the error it ends in, unless nothing comes of it.
@@ -321,8 +329,9 @@ enum MachOEditor {
      A universal file of `slices`, in order, laid out as `lipo` lays them out (`UniversalWriter`): each slice at the
      first offset after the fat table, or after the slice before it, that its alignment allows, the gaps zeroed; the
      table records each slice where it lies, and its alignment, and counts the slices as `lipo -hideARM64` counts
-     them, a hidden one lying past the count. The table is 32-bit unless the file was, or a slice lies or sizes past
-     4 GiB, which `lipo` writes a 64-bit table for too.
+     them, a hidden one lying past the count of a 32-bit table; a 64-bit table counts it, as no reader looks past the
+     count of one. The table is 32-bit unless the file was, or a slice lies or sizes past 4 GiB, which `lipo` writes a
+     64-bit table for too.
      */
     static func universal(_ slices: [(arch: Universal.Architecture, pieces: [File.Piece], align: Int)], is64: Bool) -> [File.Piece] {
         self.universal(slices, wide: is64) ?? self.universal(slices, wide: true)!
@@ -336,7 +345,7 @@ enum MachOEditor {
 
         var table = Data()
         append(wide ? FAT_MAGIC_64 : FAT_MAGIC, to: &table)
-        append(UInt32(slices.count { !$0.arch.hidden }), to: &table)
+        append(UInt32(wide ? slices.count : slices.count { !$0.arch.hidden }), to: &table)
         var offset = table.count + slices.count * (wide ? MemoryLayout<fat_arch_64>.size : MemoryLayout<fat_arch>.size)
         var body: [File.Piece] = []
         for slice in slices {
@@ -374,9 +383,11 @@ extension MachO {
      it: its header and load commands rewritten, and where it now ends. Nil when it is not signed.
 
      Security removes the signature in process (`remove_signature_space`, which `MachOEditor::allocate` calls for each
-     architecture) where it once ran `codesign_allocate -r`: `LC_CODE_SIGNATURE` comes out of the load commands, which
-     close up behind it, and the image ends where the signature started, or where the string table ends when no more
-     than 12 bytes, the padding that aligns the signature, lie between. `__LINKEDIT` ends there too. Throws
+     architecture) where it once ran `codesign_allocate -r`: it walks the `ncmds` commands the loaders read, the last
+     `LC_CODE_SIGNATURE`, `__LINKEDIT` and `LC_SYMTAB` of them its, so a signature command hidden past `ncmds` is none
+     to it; `LC_CODE_SIGNATURE` comes out of the load commands, which close up behind it, and the image ends where the
+     signature started, or where the string table ends when no more than 12 bytes, the padding that aligns the
+     signature, lie between. `__LINKEDIT` ends there too. Throws
      `EditError.signatureNotAtEnd` when the signature does not end the image, give or take the 7 bytes Security lets
      go with it: removing it would cut off what follows.
 
@@ -391,12 +402,12 @@ extension MachO {
      never signs, though what to write is as clear there.
      */
     func removingSignature(end: Int) throws -> (head: Data, end: Int)? {
-        guard
-            let command = self.findCommand(UInt32(LC_CODE_SIGNATURE)),
-            let signature = try self.findCodeSignature()
-        else {
+        let read = self.loadCommands.prefix(self.ncmds)
+        guard let command = read.last(where: { $0.cmd == UInt32(LC_CODE_SIGNATURE) }) else {
             return nil
         }
+        let data = try command.load(linkedit_data_command.self)
+        let signature = (offset: Int(self.sw(data.dataoff)), size: Int(self.sw(data.datasize)))
         guard end - 7 ... end ~= signature.offset + signature.size else {
             throw EditError.signatureNotAtEnd
         }
@@ -407,7 +418,7 @@ extension MachO {
         }
 
         var newEnd = signature.offset
-        if let symtab = self.findCommand(UInt32(LC_SYMTAB))?.payload(as: symtab_command.self) {
+        if let symtab = read.last(where: { $0.cmd == UInt32(LC_SYMTAB) })?.payload(as: symtab_command.self) {
             let strings = Int(self.sw(symtab.stroff)) + Int(self.sw(symtab.strsize))
             if strings < newEnd, newEnd <= strings + 12 {
                 newEnd = strings
@@ -421,7 +432,7 @@ extension MachO {
         }
 
         // Its size as Security writes it, wrapping when the segment starts past the new end.
-        if let linkedit = try self.findSegment("__LINKEDIT") {
+        if let linkedit = read.last(where: { $0.isSegment(named: "__LINKEDIT") }) {
             // Rounding to 1 leaves the size as it is, which is the choice where the rounding cannot be told.
             let page = self.linkeditSizeRounding ?? 1
             if linkedit.cmd == UInt32(LC_SEGMENT_64) {
@@ -462,8 +473,9 @@ extension MachO {
        (`linkerVersion`), tells the toolchain, where the SDK alone would not, since one builds against older SDKs.
 
      An image is stripped when its symbol table is as `strip` leaves it (`isStripped`). 1 for the file size as it is.
-     Nil for a stripped 64-bit image that records no linker, as one built for macOS 10.13 or earlier does, with
-     `LC_VERSION_MIN_MACOSX` in place of `LC_BUILD_VERSION`: its `strip` may have been either.
+     An image that records no linker, as one built for macOS 10.13 or earlier does, with `LC_VERSION_MIN_MACOSX` in
+     place of `LC_BUILD_VERSION`, or one whose `LC_BUILD_VERSION` names no `TOOL_LD`, is dated by the SDK it was built
+     against, Xcode 15.3's being the first to ship cctools 1010. Nil for a stripped 64-bit image that records neither.
      */
     var linkeditSizeRounding: Int? {
         guard self.isStripped else {
@@ -472,11 +484,24 @@ extension MachO {
         guard self.is64 else {
             return 1
         }
-        guard let linker = self.linkerVersion else {
+        if let linker = self.linkerVersion {
+            return linker >= 0x045b_0000 ? 0x4000 : 1
+        }
+        guard let version = try? self.version(), let first = Self.firstRoundingSDK[version.platform] else {
             return nil
         }
-        return linker >= 0x045b_0000 ? 0x4000 : 1
+        return version.sdk >= first ? 0x4000 : 1
     }
+
+    /// The SDKs Xcode 15.3 shipped, by platform: macOS 14.4, iOS and tvOS 17.4, watchOS 10.4, visionOS 1.1, and the
+    /// simulators' and Mac Catalyst's the same.
+    private static let firstRoundingSDK: [Int32: UInt32] = [
+        PLATFORM_MACOS: 0x000e_0400,
+        PLATFORM_IOS: 0x0011_0400, PLATFORM_IOSSIMULATOR: 0x0011_0400, PLATFORM_MACCATALYST: 0x0011_0400,
+        PLATFORM_TVOS: 0x0011_0400, PLATFORM_TVOSSIMULATOR: 0x0011_0400,
+        PLATFORM_WATCHOS: 0x000a_0400, PLATFORM_WATCHOSSIMULATOR: 0x000a_0400,
+        11: 0x0001_0100, 12: 0x0001_0100, // visionOS and its simulator
+    ]
 
     /**
      The version of the linker that wrote the image, as `LC_BUILD_VERSION` records it among its tools (`TOOL_LD`),
@@ -505,7 +530,8 @@ extension MachO {
     /**
      Whether the image's symbol table is as `strip` leaves it (`strip_symtab` in cctools' `misc/strip.c`): no local
      symbol but the one `radr://5614542` placeholder `strip` writes when none is left and the image has an indirect
-     symbol table, so that no indirect symbol gets the index 0, which dyld reads as the classic linker's bug; and in an
+     symbol table, so that no indirect symbol gets the index 0, which dyld reads as the classic linker's bug, so that
+     no local symbol beside an indirect symbol table is the linker's doing, not `strip`'s; and in an
      executable, no defined global symbol but those `strip` keeps, the ones referenced dynamically
      (`REFERENCED_DYNAMICALLY`, `__mh_execute_header` as the linker marks it) and the weak definitions, where the
      linker leaves `_main` at least, while a library keeps every global symbol. An executable `strip -x` kept the global
@@ -538,7 +564,9 @@ extension MachO {
         }
         switch self.sw(dysymtab.nlocalsym) {
         case 0:
-            break
+            guard self.sw(dysymtab.nindirectsyms) == 0 else {
+                return false
+            }
         case 1:
             let placeholder = Array("radr://5614542".utf8) + [0]
             guard
