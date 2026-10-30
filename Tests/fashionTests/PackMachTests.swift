@@ -1049,9 +1049,10 @@ final class PackMachTests: XCTestCase {
      A file UPX packed, made by hand as UPX 5 lays one out: an `x86_64` executable of a page, one `__TEXT` segment over
      it, its headers in an NRV2B block and the rest stored; with `overlapping` more segments in its headers laid
      over the same page, each wanting the page's worth of blocks again, stored, where UPX writes each byte of an
-     original once. The pack header's sums are the packer's.
+     original once. The pack header's sums are the packer's. `editing` rewrites the original's headers before they
+     are packed, for a test of what the unpacker makes of them.
      */
-    private func packedByHand(overlapping: Int) throws -> (packed: Data, original: Data) {
+    private func packedByHand(overlapping: Int, editing: (inout Data) -> Void = { _ in }) throws -> (packed: Data, original: Data) {
         let size = 0x1000
         var original = Data()
         [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_EXECUTE), UInt32(1 + overlapping), UInt32(72 * (1 + overlapping)), 0, 0].forEach { original.appendUInt32($0) }
@@ -1063,6 +1064,7 @@ final class PackMachTests: XCTestCase {
         }
         let headers = original.count
         original.append(Data((headers ..< size).map { UInt8(truncatingIfNeeded: $0 * 7 + 1) }))
+        editing(&original)
 
         var blocks = Data()
         func block(_ unpacked: Data, as packed: Data) {
@@ -1106,22 +1108,30 @@ final class PackMachTests: XCTestCase {
      `__TEXT` page, a `__DATA_CONST` of 64 bytes, a `__LINKEDIT` of 32 and an `LC_UUID` (canUnpack wants three
      segments' worth of commands and an entry's, whatever the filetype), the headers in an NRV2B block and the rest
      of `__TEXT` stored, the other two segments copied page-aligned after the blocks, every command kept, the pack
-     header at the file's end; `p_info` says `fileSize` for the original's size.
+     header at the file's end; `p_info` says `fileSize` for the original's size. With `modInit`, the second segment
+     is a `__DATA` with a `__mod_init_func` section, whose offset the packed headers place outside the segment, in
+     the padding after the blocks, where 8 bytes point into the file.
      */
-    private func packedDylibByHand(fileSize: Int) throws -> (packed: Data, original: Data) {
+    private func packedDylibByHand(fileSize: Int, modInit: Bool = false) throws -> (packed: Data, original: Data) {
         let page = 0x1000
+        let sizeofcmds = UInt32(modInit ? 320 : 240)
         var original = Data()
-        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_DYLIB), 4, 240, 0, 0].forEach { original.appendUInt32($0) }
-        func segment(_ name: String, _ offset: Int, _ count: Int, _ prot: Int, into data: inout Data, vmaddr: Int) {
-            data.appendUInt32(UInt32(LC_SEGMENT_64)); data.appendUInt32(72)
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_DYLIB), 4, sizeofcmds, 0, 0].forEach { original.appendUInt32($0) }
+        func segment(_ name: String, _ offset: Int, _ count: Int, _ prot: Int, into data: inout Data, vmaddr: Int, section: Int? = nil) {
+            data.appendUInt32(UInt32(LC_SEGMENT_64)); data.appendUInt32(section == nil ? 72 : 152)
             data.append(Data(name.utf8) + Data(count: 16 - name.utf8.count))
             [UInt64(vmaddr), UInt64(max(page, (count + 0xfff) & ~0xfff)), UInt64(offset), UInt64(count)].forEach { data.appendUInt64($0) }
-            [prot, prot, 0, 0].forEach { data.appendUInt32(UInt32($0)) }
+            [prot, prot, section == nil ? 0 : 1, 0].forEach { data.appendUInt32(UInt32($0)) }
+            if let section {
+                data.append(Data("__mod_init_func".utf8) + Data(count: 1)); data.append(Data(name.utf8) + Data(count: 16 - name.utf8.count))
+                [UInt64(vmaddr), 8].forEach { data.appendUInt64($0) }
+                [UInt32(section), 3, 0, 0, 0x9, 0, 0, 0].forEach { data.appendUInt32($0) } // offset, align, reloff, nreloc, S_MOD_INIT_FUNC_POINTERS, reserved
+            }
         }
         var uuid = Data()
         uuid.appendUInt32(UInt32(LC_UUID)); uuid.appendUInt32(24); uuid.append(Data((1 ... 16).map { UInt8($0) }))
         segment("__TEXT", 0, page, 5, into: &original, vmaddr: 0)
-        segment("__DATA_CONST", page, 64, 3, into: &original, vmaddr: page)
+        segment(modInit ? "__DATA" : "__DATA_CONST", page, 64, 3, into: &original, vmaddr: page, section: modInit ? page : nil)
         segment("__LINKEDIT", page + 64, 32, 1, into: &original, vmaddr: 2 * page)
         original += uuid
         let headers = original.count
@@ -1136,17 +1146,18 @@ final class PackMachTests: XCTestCase {
         block(original[headers ..< page], as: original[headers ..< page])
 
         var packed = Data()
-        let overlay = 32 + 240 + 12
-        let data = (overlay + 12 + blocks.count + 0xfff) & ~0xfff
-        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_DYLIB), 4, 240, 0, 0].forEach { packed.appendUInt32($0) }
+        let overlay = 32 + Int(sizeofcmds) + 12
+        let data = (overlay + 12 + blocks.count + 16 + 0xfff) & ~0xfff
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_DYLIB), 4, sizeofcmds, 0, 0].forEach { packed.appendUInt32($0) }
         segment("__TEXT", 0, data, 5, into: &packed, vmaddr: 0)
-        segment("__DATA_CONST", data, 64, 3, into: &packed, vmaddr: data)
+        segment(modInit ? "__DATA" : "__DATA_CONST", data, 64, 3, into: &packed, vmaddr: data, section: modInit ? data - 16 : nil)
         segment("__LINKEDIT", data + 64, 32, 1, into: &packed, vmaddr: data + page)
         packed += uuid
         packed.appendUInt32(0); packed.append(Data("UPX!".utf8)); packed.append(contentsOf: [0, 0, 13, 35]) // l_info: checksum, magic, size, version, format
         [0, UInt32(fileSize), UInt32(page)].forEach { packed.appendUInt32($0) } // p_info: progid, filesize, blocksize
         packed += blocks
-        packed.append(Data(count: data - packed.count))
+        packed.append(Data(count: data - 16 - packed.count))
+        packed.appendUInt64(0x40); packed.appendUInt64(0) // the pointer the misplaced section holds, into the headers
         packed += original[page ..< page + 96]
         packed.append(Data("UPX!".utf8)); packed.append(contentsOf: [13, 35, 2, 8]) // version, format, method, level
         let adler = original.prefix(page).withUnsafeBytes { UInt32(adler32(1, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt(page))) }
@@ -1179,6 +1190,84 @@ final class PackMachTests: XCTestCase {
                 XCTAssertTrue(try execute(upx, ["-q", "-d", "-o", upxd.path, file.path]), name)
                 XCTAssertEqual(try Data(contentsOf: upxd), original, name)
             }
+        }
+    }
+
+    /**
+     What the unpacker refuses, in UPX's words, each from a sound file changed in one place:
+
+     - an overlay offset outside the file: `file corrupted`;
+     - decompressed headers with no load command, with more than they hold, or one of no size: `bad packed Mach load_command`;
+     - a block whose method UPX has not got: `corrupt b_info`;
+     - a block whose filter it has not got;
+     - a pack header cut short of its sizes: `header corrupted 1`;
+     - a pack header cut short of its sums: `header corrupted 7`;
+     - a pack header whose compressed size exceeds its uncompressed one;
+     - a pack header of a version after 13 or before 8, or of the 0xff version;
+     - a pack header whose compression method it has not got;
+     - a dylib whose `__mod_init_func` section lies outside its `__DATA`.
+
+     Hash mode hashes each packed and says the refusal; unpack refuses it, red, nothing written.
+     */
+    func testTheUnpackersRefusalsAreNamed() throws {
+        let directory = try self.directory("refusals")
+        let (sound, _) = try self.packedByHand(overlapping: 0)
+        let header = try XCTUnwrap(sound.ranges(of: Data("UPX!".utf8)).last).lowerBound
+        let blocks = try self.blocks(of: sound)
+
+        /// `sound` with its pack header's byte at `index` set to `value`, the header's checksum made to hold.
+        func headerByte(_ index: Int, _ value: UInt8) -> Data {
+            var edited = sound
+            edited[header + index] = value
+            edited[header + 31] = UInt8(edited[header + 4 ..< header + 31].reduce(0) { $0 + Int($1) } % 251)
+            return edited
+        }
+
+        /// `sound` with `__TEXT` ending and `__LINKEDIT` placed `cut` bytes into the pack header, where the window
+        /// UPX reads ends.
+        func linkeditAt(_ cut: Int) throws -> Data {
+            var edited = sound
+            let image = try XCTUnwrap(MachO(File(data: sound)))
+            try edited.store(UInt64(header + cut), at: XCTUnwrap(image.findSegment("__TEXT")).data.startIndex + 48)
+            try edited.store(UInt64(header + cut), at: XCTUnwrap(image.findSegment("__LINKEDIT")).data.startIndex + 40)
+            return edited
+        }
+
+        var outside = sound
+        outside.store(UInt32(sound.count), at: header + 32)
+        var method = sound
+        method[blocks[1].offset - 4] = 15 // the second block's b_info: its method, past LZMA's 14
+        var filter = sound
+        filter[blocks[0].offset - 3] = 0x51 // the first block's filter, one UPX has not got: a stored block is not unfiltered
+        let cases: [(String, Data, String)] = try [
+            ("outside", outside, "file corrupted"),
+            ("nocmds", self.packedByHand(overlapping: 0) { $0.store(UInt32(0), at: 16) }.packed, "bad Mach_header.ncmds = 0"),
+            ("morecmds", self.packedByHand(overlapping: 0) { $0.store(UInt32(3), at: 16) }.packed, "bad packed Mach load_command"),
+            ("nosize", self.packedByHand(overlapping: 0) { $0.store(UInt32(0), at: 36) }.packed, "bad packed Mach load_command @0x20"),
+            ("method", method, "corrupt b_info"),
+            ("filter", filter, "unknown filter 0x51"),
+            ("sizes", linkeditAt(12), "header corrupted 1"),
+            ("sums", linkeditAt(24), "header corrupted 7"),
+            ("larger", headerByte(22, 0x20), "header corrupted"),
+            ("newer", headerByte(4, 14), "need a newer version of UPX"),
+            ("older", headerByte(4, 7), "I am not compatible with older versions of UPX"),
+            ("joke", headerByte(4, 0xff), "cannot unpack UPX ;-)"),
+            ("compression", headerByte(6, 12), "unknown compression method (try a newer version of UPX)"),
+            ("modinit", self.packedDylibByHand(fileSize: 0x1060, modInit: true).packed, "bad __mod_init_func"),
+        ]
+
+        for (name, data, message) in cases {
+            let file = directory / name
+            try data.write(to: file)
+            let refusal = "fashion: \(file.path): Invalid UPX data: \(message)"
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [refusal + ", hashed packed", XCTUnwrap(ByteHash.sha256.digest(data))], name)
+
+            let reporter = Reporter(console: Console())
+            let lines = Unpacker.lines(for: file.path, write: false, reporter: reporter)
+            XCTAssertEqual(lines.map(\.text), [refusal], name)
+            XCTAssertEqual(lines.first?.tint, .malformed, name)
+            XCTAssertEqual(reporter.errorCount, 1, name)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
         }
     }
 

@@ -6,18 +6,6 @@ import XCTest
 /**
  `verify` names what is odd about a Mach-O, one line each, and nothing about one with nothing to say.
  */
-private extension Data {
-    /// `value` stored little-endian at `offset`, over the bytes there.
-    mutating func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
-        Swift.withUnsafeBytes(of: value.littleEndian) { self.replaceSubrange(offset ..< offset + MemoryLayout<T>.size, with: $0) }
-    }
-
-    /// The little-endian integer at `offset`.
-    func load<T: FixedWidthInteger>(_: T.Type, at offset: Int) -> T {
-        T(littleEndian: self.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: T.self) })
-    }
-}
-
 final class VerifierTests: XCTestCase {
     /// The package root, which the fixtures are kept under whatever the test process's working directory.
     private static let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

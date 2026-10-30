@@ -533,3 +533,16 @@ func upxExecutable() throws -> String {
     }
     return path
 }
+
+/// Little-endian integers in place, for the tests that edit a header's field.
+extension Data {
+    /// `value` stored little-endian at `offset`, over the bytes there.
+    mutating func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
+        Swift.withUnsafeBytes(of: value.littleEndian) { self.replaceSubrange(offset ..< offset + MemoryLayout<T>.size, with: $0) }
+    }
+
+    /// The little-endian integer at `offset`.
+    func load<T: FixedWidthInteger>(_: T.Type, at offset: Int) -> T {
+        T(littleEndian: self.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: T.self) })
+    }
+}
