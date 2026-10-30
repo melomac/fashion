@@ -538,8 +538,10 @@ final class PackMachTests: XCTestCase {
 
     /**
      A pack header whose checksum does not hold is malformed UPX data: red, counted, nothing written. So is a
-     header block that claims more than a block, 2 GiB less a byte, refused before any of it is made room for. Hash
-     mode hashes the file packed, the refusal said in a warning.
+     header block that claims more than a block, 2 GiB less a byte, refused before any of it is made room for, and
+     a packed file with a byte written into the zero padding after its pack header, which moves the last non-zero
+     byte the scan steps back from: the stub runs it, and upx -d gives it up, "file corrupted", by the 16-byte
+     `__LINKEDIT` only UPX writes. Hash mode hashes the file packed, the refusal said in a warning.
      */
     func testCorruptPackHeaderIsReported() throws {
         let directory = try self.directory("corrupt")
@@ -565,8 +567,12 @@ final class PackMachTests: XCTestCase {
         // A p_filesize past what this tool unpacks in memory, which UPX, bounding each block alone, would unpack.
         var large = packed
         large.replaceSubrange(overlay + 4 ..< overlay + 8, with: withUnsafeBytes(of: UInt32(0x7fff_ffff).littleEndian) { Data($0) })
+        var padded = packed
+        XCTAssertEqual(padded[header + 40], 0)
+        padded[header + 40] = 1
+        XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", (directory / "padded_upx-d").path, { try padded.write(to: directory / "padded_upx"); return directory / "padded_upx" }().path]))
 
-        for (name, data, message) in [("corrupt", corrupt, "Invalid UPX data: header corrupted 3"), ("huge", huge, "Invalid UPX data: file header corrupted"), ("big", big, "Invalid UPX data: header corrupted 4"), ("unknown", unknown, "Invalid UPX data: unknown format 200"), ("large", large, "Mach-O too large: the image UPX packed would be 2147483647 bytes, more than the 805306368 this tool unpacks in memory")] {
+        for (name, data, message) in [("padded", padded, "Invalid UPX data: file corrupted: no pack header before the 16-byte __LINKEDIT UPX writes"), ("corrupt", corrupt, "Invalid UPX data: header corrupted 3"), ("huge", huge, "Invalid UPX data: file header corrupted"), ("big", big, "Invalid UPX data: header corrupted 4"), ("unknown", unknown, "Invalid UPX data: unknown format 200"), ("large", large, "Mach-O too large: the image UPX packed would be 2147483647 bytes, more than the 805306368 this tool unpacks in memory")] {
             let file = directory / name
             try data.write(to: file)
             let reporter = Reporter(console: Console())

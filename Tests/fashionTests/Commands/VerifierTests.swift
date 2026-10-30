@@ -281,7 +281,7 @@ final class VerifierTests: XCTestCase {
 
     /**
      A file UPX packed is named for it, by a modified UPX with its marker, and signed after packing as such, the
-     signature hiding what UPX left from a look at the file as it is.
+     signature hiding what UPX left from a look at the file as it is, with bytes appended after signing too.
      */
     func testUPXIsNamed() throws {
         let directory = try self.directory("upx")
@@ -298,13 +298,25 @@ final class VerifierTests: XCTestCase {
         try FileManager.default.copyItem(at: packed, to: signed)
         _ = try codesign(["-f", "-s", "-", signed.path])
         XCTAssertTrue(self.verify(signed.path).lines.contains("\(signed.path): packed by UPX, signed after packing"))
-        // A pack header that does not hold, its checksum wrong, is named as unpack refuses it.
+        let appended = directory / "appended"
+        try (Data(contentsOf: signed) + Data(repeating: 0x41, count: 16)).write(to: appended)
+        let lines = self.verify(appended.path).lines
+        XCTAssertTrue(try lines.contains("\(appended.path): 0x10 bytes appended past the image's end at \(Data(contentsOf: signed).count.hex)"))
+        XCTAssertTrue(lines.contains("\(appended.path): packed by UPX, signed after packing"))
+        // A pack header that does not hold, its checksum wrong, is named as unpack refuses it; so is none before
+        // UPX's 16-byte __LINKEDIT, a byte written into the padding after the header hiding it from the scan.
         var broken = try Data(contentsOf: packed)
         let header = try XCTUnwrap(broken.ranges(of: Data("UPX!".utf8)).last).lowerBound
         broken[header + 31] ^= 0xff
         let corrupt = directory / "corrupt"
         try broken.write(to: corrupt)
-        XCTAssertTrue(self.verify(corrupt.path).lines.contains("\(corrupt.path): Invalid UPX data: header corrupted 3: a pack header that does not hold, which unpack refuses"))
+        XCTAssertTrue(self.verify(corrupt.path).lines.contains("\(corrupt.path): Invalid UPX data: header corrupted 3, which unpack refuses"))
+        var padded = try Data(contentsOf: packed)
+        XCTAssertEqual(padded[header + 40], 0)
+        padded[header + 40] = 1
+        let hidden = directory / "hidden"
+        try padded.write(to: hidden)
+        XCTAssertTrue(self.verify(hidden.path).lines.contains("\(hidden.path): Invalid UPX data: file corrupted: no pack header before the 16-byte __LINKEDIT UPX writes, which unpack refuses"))
     }
 
     /**

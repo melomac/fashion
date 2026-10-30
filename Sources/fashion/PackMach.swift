@@ -380,6 +380,14 @@ struct PackMach {
             found = (packHeader, window.start + i + packHeader.offset, overlayOffset, window.found)
         }
         guard let found else {
+            // No pack header where the scan looks, before the 16-byte __LINKEDIT only UPX writes: a packed image
+            // whose zero padding after the header was written into, which moves the last non-zero byte the scan
+            // steps back from. Its stub runs it as packed (the entry code carries its own offsets); canUnpack calls
+            // it "file corrupted" (its style 395 branch) and gives up, and so does this tool, rather than taking the
+            // image for one UPX never packed, as it does an image of any other layout.
+            if style == 395 {
+                throw UnpackError.cantUnpack("file corrupted: no pack header before the 16-byte __LINKEDIT UPX writes")
+            }
             return nil
         }
 
