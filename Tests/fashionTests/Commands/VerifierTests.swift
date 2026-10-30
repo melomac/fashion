@@ -417,6 +417,22 @@ final class VerifierTests: XCTestCase {
         var short = program
         short.store(UInt32(commands.count - 1), at: 16)
         XCTAssertEqual(try self.verify(short, "short", in: directory).lines, try [": ncmds \(commands.count - 1) hides the last 1 command of \(commands.count) from the loaders: \(XCTUnwrap(commands.last).name)"])
+        // A segment hidden past ncmds lying past the file: the kernel never reads it, codesign signs and verifies the
+        // image, hash mode hashes it, and verify names the hidden command alone.
+        var hidden = program
+        let end = 32 + Int(program.load(UInt32.self, at: 20))
+        XCTAssertTrue(hidden[end ..< end + 72].allSatisfy { $0 == 0 }, "room in the header pad")
+        var segment = Data()
+        [UInt32(LC_SEGMENT_64), 72].forEach { segment.appendUInt32($0) }
+        segment.append(Data("__HIDDEN".utf8)); segment.append(Data(count: 8))
+        [UInt64(0), 0x1000, UInt64(program.count) + 0x1000, 0x1000].forEach { segment.appendUInt64($0) } // vmaddr, vmsize, fileoff, filesize
+        [UInt32(1), 1, 0, 0].forEach { segment.appendUInt32($0) }
+        hidden.replaceSubrange(end ..< end + 72, with: segment)
+        hidden.store(UInt32(end - 32 + 72), at: 20)
+        XCTAssertEqual(try self.verify(hidden, "hidden", in: directory).lines, [": ncmds \(commands.count) hides the last 1 command of \(commands.count + 1) from the loaders: LC_SEGMENT_64"])
+        XCTAssertFalse(try CDHash.hash(fixture: hidden).isEmpty)
+        _ = try codesign(["-s", "-", (directory / "hidden").path])
+        XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", "--strict", (directory / "hidden").path]))
         var long = program
         long.store(UInt32(commands.count + 1), at: 16)
         XCTAssertEqual(try self.verify(long, "long", in: directory).lines, [": ncmds \(commands.count + 1) exceeds the \(commands.count) commands the table holds"])
@@ -425,7 +441,7 @@ final class VerifierTests: XCTestCase {
         info.appendUInt32(UInt32(LC_DYLD_INFO)); info.appendUInt32(48); info.append(Data(count: 40))
         var only = info
         only.store(LC_DYLD_INFO_ONLY, at: 0)
-        XCTAssertTrue(try self.verify(self.appending(info + only, to: program), "aliased", in: directory).lines.contains(": LC_DYLD_INFO beside LC_DYLD_INFO_ONLY, which dyld counts as two LC_DYLD_INFO commands"))
+        XCTAssertTrue(try self.verify(self.appending(only, to: self.appending(info, to: program)), "aliased", in: directory).lines.contains(": LC_DYLD_INFO beside LC_DYLD_INFO_ONLY, which dyld counts as two LC_DYLD_INFO commands"))
         // The linker pads the header with zeros past the commands: sizeofcmds taking 8 of them in holds a tail.
         var tailed = program
         let sizeofcmds = try XCTUnwrap(MachO(File(data: program))).sizeofcmds
@@ -1612,30 +1628,34 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
-     The table's lines name a few commands and count the rest: a crafted table of ten odd-sized commands, hidden from
-     the loaders too and sized other than their structure, names eight of each and counts the others, where a line
-     each would be millions.
+     The table's lines name a few commands and count the rest: a crafted table of ten odd-sized commands, sized other
+     than their structure, names eight of each and counts the others, where a line each would be millions. Hidden
+     from the loaders, the ten are named by the hiding line alone: no loader reads them, so none of their rules apply.
      */
     func testTheTableLinesAreCounted() throws {
         let directory = try self.directory("counted")
         var odd = Data()
         odd.appendUInt32(UInt32(LC_UUID)); odd.appendUInt32(28); odd.append(Data(count: 20))
         let file = try self.crafted("counted", in: directory, size: 0x1000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5)], commands: Array(repeating: odd, count: 10))
+        let rest = [
+            "\(file.path): __TEXT has no sections",
+            "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
+            "\(file.path): no MH_DYLDLINK: a static executable",
+            "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+        ]
+        self.assertVerify(file.path, (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, has a size 0x1c that is not a multiple of 8" } + [
+            "\(file.path): and 2 more load commands with a size that is not a multiple of 8",
+        ] + (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, is 0x1c bytes, not its structure's 0x18, which dyld refuses" } + [
+            "\(file.path): and 2 more load commands sized other than their structure",
+            "\(file.path): 10 LC_UUID commands",
+        ] + rest)
+
         var data = try Data(contentsOf: file)
         data.store(UInt32(1), at: 16) // ncmds: the segment alone
         try data.write(to: file)
         self.assertVerify(file.path, [
             "\(file.path): ncmds 1 hides the last 10 commands of 11 from the loaders: \(Array(repeating: "LC_UUID", count: 8).joined(separator: ", "))…",
-        ] + (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, has a size 0x1c that is not a multiple of 8" } + [
-            "\(file.path): and 2 more load commands with a size that is not a multiple of 8",
-        ] + (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, is 0x1c bytes, not its structure's 0x18, which dyld refuses" } + [
-            "\(file.path): and 2 more load commands sized other than their structure",
-            "\(file.path): 10 LC_UUID commands",
-            "\(file.path): __TEXT has no sections",
-            "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
-            "\(file.path): no MH_DYLDLINK: a static executable",
-            "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
-        ])
+        ] + rest)
     }
 
     /// `cms` with `token` as its signer's `id-aa-timeStampToken` unsigned attribute, the enclosing lengths rewritten.

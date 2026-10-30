@@ -1267,16 +1267,16 @@ final class MachOTests: XCTestCase {
     /**
      The kernel refuses a segment lying past the file, whatever its size, and the file never loads: a packed file
      cut short of its last page has its empty `__LINKEDIT` there. One at the file's very end, as UPX 3.91 placed
-     it, loads, and passes.
+     it, loads, and passes; so does one hidden past `ncmds`, which the kernel never reads.
      */
-    func testSliceRejectsSegmentPastTheFile() {
-        func image(fileoff: UInt64, filesize: UInt64) -> Data {
+    func testSliceRejectsSegmentPastTheFile() throws {
+        func image(fileoff: UInt64, filesize: UInt64, ncmds: UInt32 = 1) -> Data {
             var data = Data()
             data.appendUInt32(MH_MAGIC_64)
             data.appendInt32(CPU_TYPE_X86_64)
             data.appendInt32(0)
             data.appendUInt32(UInt32(MH_EXECUTE))
-            data.appendUInt32(1) // ncmds
+            data.appendUInt32(ncmds)
             data.appendUInt32(72) // sizeofcmds
             data.appendUInt32(0)
             data.appendUInt32(0)
@@ -1294,6 +1294,8 @@ final class MachOTests: XCTestCase {
             XCTAssertThrowsError(try MachO(image(fileoff: fileoff, filesize: filesize)), "\(fileoff), \(filesize)") { error in
                 XCTAssertEqual(error as? ParserError, .invalidSegmentRange(name: "__LINKEDIT", offset: fileoff, size: filesize, fileSize: 200))
             }
+            let hidden = try XCTUnwrap(MachO(image(fileoff: fileoff, filesize: filesize, ncmds: 0)), "hidden past ncmds")
+            XCTAssertEqual(hidden.loadCommands.count, 1)
         }
     }
 
@@ -1489,6 +1491,10 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(
             ParserError.invalidSegmentRange(name: "__LINKEDIT", offset: 32768, size: 0, fileSize: 28672).localizedDescription,
             "Invalid Mach-O: segment __LINKEDIT at offset 0x8000 with size 0x0 is outside the 0x7000-byte slice",
+        )
+        XCTAssertEqual(
+            ParserError.truncatedMachHeader(expectedSize: 32, fileSize: 20).localizedDescription,
+            "Invalid Mach-O: expected a 32-byte header in a 20-byte slice",
         )
     }
 

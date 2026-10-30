@@ -20,7 +20,7 @@ extension ParserError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .truncatedMachHeader(expectedSize, fileSize):
-            "Invalid Mach-O: expected a \(expectedSize)-byte header in a \(fileSize)-byte file"
+            "Invalid Mach-O: expected a \(expectedSize)-byte header in a \(fileSize)-byte slice"
         case let .invalidLoadCommandTable(size, fileSize):
             "Invalid Mach-O: sizeofcmds \(size) does not hold a load-command table in the \(fileSize)-byte slice"
         case let .truncatedLoadCommand(cmd, size, expectedSize):
@@ -137,8 +137,8 @@ struct MachO {
     /**
      Parse a thin Mach-O as Security's `MachO` constructor does, throwing for a load-command table `parseLoadCommands`
      rejects and for a segment or symbol table command too short for its structure before the image's end
-     (`MachO::validateStructure`), and as the kernel does for a segment lying past the image (`load_segment`). Nil for
-     data that is not a thin Mach-O at all.
+     (`MachO::validateStructure`), and as the kernel does for a segment it reads lying past the image
+     (`load_segment`). Nil for data that is not a thin Mach-O at all.
      */
     init?(_ file: File, offset: Int = 0, length: Int? = nil, head: Data? = nil) throws {
         guard let image = try MachO(lenient: file, offset: offset, length: length, head: head) else {
@@ -172,8 +172,9 @@ struct MachO {
         }
 
         // The kernel refuses a segment lying past the image, whatever its size, "to make sure what we get from the
-        // file is really ours": LOAD_BADMACHO, and the file never loads. Security's MachO does not look.
-        for command in image.loadCommands {
+        // file is really ours": LOAD_BADMACHO, and the file never loads. It walks `ncmds` commands, as dyld does: a
+        // segment hidden past them is read by no loader, and verify names it. Security's MachO does not look.
+        for command in image.loadCommands.prefix(image.ncmds) {
             let range: (offset: UInt64, size: UInt64)? = switch command.cmd {
             case UInt32(LC_SEGMENT):
                 command.payload(as: segment_command.self).map { (UInt64(image.sw($0.fileoff)), UInt64(image.sw($0.filesize))) }

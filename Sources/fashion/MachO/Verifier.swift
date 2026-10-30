@@ -56,13 +56,17 @@ struct MachOVerifier {
     private let image: MachO
     /// The file the image lies in, which an edit of the image reads through.
     private let file: File
+    /// The commands the loaders read, `ncmds` of them, which the loaders' rules run over: the kernel and dyld walk
+    /// that many, where Security and the parser walk `sizeofcmds`; the table rules alone name what lies past them.
+    private let commands: ArraySlice<MachO.LoadCommand>
     /// The segments, with their sections, parsed once for every group below.
     private let segments: [Segment]
 
     init(_ image: MachO, in file: File) {
         self.image = image
         self.file = file
-        self.segments = Self.segments(of: image)
+        self.commands = image.loadCommands.prefix(image.ncmds)
+        self.segments = Self.segments(of: image, among: self.commands)
     }
 
     /**
@@ -183,9 +187,9 @@ struct MachOVerifier {
         }
     }
 
-    /// The image's segments, each with the sections its command holds.
-    private static func segments(of image: MachO) -> [Segment] {
-        image.loadCommands.compactMap { command in
+    /// The image's segments among `commands`, each with the sections its command holds.
+    private static func segments(of image: MachO, among commands: ArraySlice<MachO.LoadCommand>) -> [Segment] {
+        commands.compactMap { command in
             switch command.cmd {
             case UInt32(LC_SEGMENT):
                 command.payload(as: segment_command.self).map {
@@ -359,7 +363,7 @@ struct MachOVerifier {
             found.append("sizeofcmds holds \(image.loadCommandsTail.hex) bytes past the last load command, which the loaders never read and Security's walk stops short of: codesign verifies the image and cannot re-sign it, Rosetta refuses it")
         }
         let pointer = image.is64 ? 8 : 4
-        let unaligned = image.loadCommands.enumerated().filter { $0.element.data.count % pointer != 0 }
+        let unaligned = self.commands.enumerated().filter { $0.element.data.count % pointer != 0 }
         for (index, command) in unaligned.prefix(Self.listed) {
             found.append("load command #\(index), \(command.name), has a size \(command.data.count.hex) that is not a multiple of \(pointer)")
         }
@@ -371,7 +375,7 @@ struct MachOVerifier {
         // LC_REQ_DYLD ("unknown required load command"); a command of a fixed structure is exactly that size ("load
         // command size wrong"), as is LC_BUILD_VERSION for its tools: the bytes past the structure are a place no
         // loader reads, as the header pad is.
-        let required = image.loadCommands.enumerated().filter { !$0.element.isKnown && $0.element.cmd & UInt32(LC_REQ_DYLD) != 0 }
+        let required = self.commands.enumerated().filter { !$0.element.isKnown && $0.element.cmd & UInt32(LC_REQ_DYLD) != 0 }
         for (index, command) in required.prefix(Self.listed) {
             found.append("load command #\(index), \(command.name), is unknown and flagged LC_REQ_DYLD, which dyld refuses")
         }
@@ -380,7 +384,7 @@ struct MachOVerifier {
         }
         // A command shorter than its structure is one too: LC_BUILD_VERSION without room for its tool count, a
         // segment command without room for its header, which the segment rules then never see.
-        let sized = image.loadCommands.enumerated().compactMap { index, command -> (Int, MachO.LoadCommand, Int)? in
+        let sized = self.commands.enumerated().compactMap { index, command -> (Int, MachO.LoadCommand, Int)? in
             let expected: Int? = switch command.cmd {
             case UInt32(LC_BUILD_VERSION):
                 MemoryLayout<build_version_command>.size + (command.payload(as: build_version_command.self).map { Int(image.sw($0.ntools)) } ?? 0) * MemoryLayout<build_tool_version>.size
@@ -399,7 +403,7 @@ struct MachOVerifier {
         if sized.count > Self.listed {
             found.append("and \(String(sized.count - Self.listed, pluralizing: "more load command")) sized other than their structure")
         }
-        let counts = Dictionary(image.loadCommands.map { ($0.cmd, 1) }, uniquingKeysWith: +)
+        let counts = Dictionary(self.commands.map { ($0.cmd, 1) }, uniquingKeysWith: +)
         if image.is64, counts[UInt32(LC_SEGMENT)] != nil {
             found.append("LC_SEGMENT in a 64-bit image")
         }
@@ -861,7 +865,7 @@ struct MachOVerifier {
         var found: [String] = []
         var installName: String?
         var dylibs = 0
-        for command in image.loadCommands where Self.stringCommands.contains(command.cmd) {
+        for command in self.commands where Self.stringCommands.contains(command.cmd) {
             // The fixed fields the name must start past: a dylib command's 24 bytes, the others' 12.
             let fixed = Self.dylibCommands.contains(command.cmd) || command.cmd == UInt32(LC_ID_DYLIB) ? MemoryLayout<dylib_command>.size : MemoryLayout<dylinker_command>.size
             guard let string = command.string(swap: image.swap, fixed: fixed) else {
@@ -923,7 +927,7 @@ struct MachOVerifier {
             }
         }
 
-        for command in image.loadCommands {
+        for command in self.commands {
             let wide = command.cmd == UInt32(LC_ENCRYPTION_INFO_64)
             guard wide || command.cmd == UInt32(LC_ENCRYPTION_INFO), let info = command.payload(as: encryption_info_command.self) else {
                 continue
@@ -936,7 +940,7 @@ struct MachOVerifier {
             }
         }
         // A version command too short to read is named by the table rules, not as none.
-        if !image.loadCommands.contains(where: { $0.cmd == UInt32(LC_BUILD_VERSION) || Self.versionMinCommands.contains($0.cmd) }) {
+        if !self.commands.contains(where: { $0.cmd == UInt32(LC_BUILD_VERSION) || Self.versionMinCommands.contains($0.cmd) }) {
             found.append("no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it")
         }
         return found
@@ -1016,7 +1020,7 @@ struct MachOVerifier {
             return []
         }
         var found: [String] = []
-        let tables = image.loadCommands.filter { Self.linkeditCommands.contains($0.cmd) }.flatMap { image.fileRanges(of: $0) ?? [] }.filter { $0.size > 0 }
+        let tables = self.commands.filter { Self.linkeditCommands.contains($0.cmd) }.flatMap { image.fileRanges(of: $0) ?? [] }.filter { $0.size > 0 }
         var inside: [MachO.FileRange] = []
         for table in tables {
             let end = table.offset.addingReportingOverflow(table.size)

@@ -94,7 +94,7 @@ left out, with the reason.
 
 | Rule | Authority | Launch |
 |:--|:--|:--|
-| `ncmds` fewer than the commands `sizeofcmds` holds: the loaders read `ncmds`, Security walks `sizeofcmds` | kernel and dyld walk `ncmds`; Security `MachOBase::nextCommand` walks the table | signed after hiding its `LC_CODE_SIGNATURE`: "valid on disk" to codesign, Rosetta "sizeofcmds is incorrect"; native dyld would run it unsigned |
+| `ncmds` fewer than the commands `sizeofcmds` holds: the loaders read `ncmds`, Security walks `sizeofcmds`; the loaders' rules, the parser's kernel range rule among them, run over the `ncmds` commands alone, so a segment hidden past them lying past the file is named here, not refused | kernel and dyld walk `ncmds`; Security `MachOBase::nextCommand` walks the table | signed after hiding its `LC_CODE_SIGNATURE`: "valid on disk" to codesign, Rosetta "sizeofcmds is incorrect"; native dyld would run it unsigned |
 | `ncmds` more than the table holds | dyld "extends past sizeofcmds"; kernel `LOAD_BADMACHO` | killed |
 | Bytes inside `sizeofcmds` past the last command that hold no command: the parser takes the table when its `ncmds` commands fit, verify names the tail | kernel and dyld walk `ncmds` commands; Security `MachOBase::nextCommand` is lazy and `MachO::MachO` stops at `__LINKEDIT`/`LC_SYMTAB`, so `codesign --verify` passes; `codesign_allocate` "inconsistent sizeofcmds field", Rosetta "sizeofcmds is incorrect" | ran (arm64, code slot 0 refreshed); dlopen loaded a dylib; Rosetta refused |
 | A `cmdsize` not a multiple of 4, not pointer sized on 64-bit | dyld `forEachLoadCommand` "not multiple of 4"; live dyld "cmdsize is not pointer sized" | ran; `dyld_info` flags it, launch did not |
