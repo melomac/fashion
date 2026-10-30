@@ -1026,6 +1026,47 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     Segments laid over the same bytes, thousands of them with a section each as a crafted table lays them, have the
+     bytes no section covers read once, not once per segment: a 4 MiB file under 4000 such segments would be 16 GiB
+     of reads. And a segment laid inside another names none of the outer one's content as lying between segments.
+     */
+    func testPaddingIsReadOnceUnderSegmentsOverTheSameBytes() throws {
+        let directory = try self.directory("padding-once")
+        let count = 4000
+        let size = 4 << 20
+        var data = Data()
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_PRELOAD), UInt32(count), UInt32(count * 152), 0, 0].forEach { data.appendUInt32($0) }
+        let headerEnd = 32 + count * 152
+        for index in 0 ..< count {
+            data.appendUInt32(UInt32(LC_SEGMENT_64)); data.appendUInt32(152)
+            try data.append(XCTUnwrap("__S\(index)".data(using: .utf8)) + Data(count: 16 - "__S\(index)".utf8.count))
+            [UInt64(0x1_0000_0000), UInt64(size), 0, UInt64(size)].forEach { data.appendUInt64($0) } // vmaddr, vmsize, fileoff, filesize
+            [UInt32(5), 5, 1, 0].forEach { data.appendUInt32($0) } // maxprot, initprot, nsects, flags
+            try data.append(XCTUnwrap("__text".data(using: .utf8)) + Data(count: 10) + XCTUnwrap("__S\(index)".data(using: .utf8)) + Data(count: 16 - "__S\(index)".utf8.count))
+            [UInt64(0x1_0000_0000) + UInt64(headerEnd), 1].forEach { data.appendUInt64($0) } // addr, size
+            [UInt32(headerEnd), 0, 0, 0, 0x8000_0400, 0, 0, 0].forEach { data.appendUInt32($0) } // offset, align, reloff, nreloc, flags, reserved
+        }
+        data.append(Data(repeating: 0x41, count: size - data.count))
+        let file = directory / "same"
+        try data.write(to: file)
+        let start = ContinuousClock.now
+        let lines = self.verify(file.path).lines
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(10), "every segment's padding read on its own")
+        XCTAssertTrue(lines.contains("\(file.path): \((size - headerEnd - 1).hex) bytes of __S0 that no section covers are not zero, the first at \((headerEnd + 1).hex)"))
+        XCTAssertTrue(lines.contains("\(file.path): \((size - headerEnd - 1).hex) bytes of __S\(count - 1) that no section covers are not zero, the first at \((headerEnd + 1).hex)"))
+
+        // __INNER lies inside __TEXT's bytes: what follows it to __DATA is __TEXT's content, not bytes between them.
+        let nested = try self.crafted("nested", in: directory, size: 0x4000, segments: [("__TEXT", 0x1000, 0x3000, 0, 0x3000, 5), ("__INNER", 0x4000, 0x100, 0x1000, 0x100, 1), ("__DATA", 0x5000, 0x1000, 0x3000, 0x1000, 3)])
+        var filled = try Data(contentsOf: nested)
+        filled.replaceSubrange(0x800 ..< 0x3000, with: Data(repeating: 0x42, count: 0x2800))
+        filled.store(UInt32(MH_PRELOAD), at: 12)
+        try filled.write(to: nested)
+        let nestedLines = self.verify(nested.path).lines
+        XCTAssertTrue(nestedLines.contains("\(nested.path): segments __TEXT and __INNER overlap in the file"))
+        XCTAssertFalse(nestedLines.contains { $0.contains("between") }, "\(nestedLines)")
+    }
+
+    /**
      What the image says of itself is quoted when it is not printable ASCII: a dylinker or a dylib named with a
      newline stays on its line, where it would make a line of its own off a terminal.
      */

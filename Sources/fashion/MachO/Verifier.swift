@@ -1060,12 +1060,16 @@ struct MachOVerifier {
      The bytes of a segment no section covers, past the header and load commands, and the bytes between one segment's
      content and the next's: page padding the linker writes as zeros, which no loader reads and codesign signs over. A
      gap shorter than the alignment of the section that follows is that section's alignment padding, which an older
-     ld64 fills with no-ops on x86_64, so it is not looked at.
+     ld64 fills with no-ops on `x86_64`, so it is not looked at. The gaps are read once each: a crafted table lays
+     thousands of segments over the same bytes, and reading each segment's gaps on its own would read the file as
+     many times. The bytes between segments are taken from the furthest end so far, so that a segment laid inside
+     another names none of the outer one's content as lying between them.
      */
     private func paddingAnomalies() -> [String] {
         let image = self.image
         var found: [String] = []
         let headerEnd = UInt64((image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size) + image.sizeofcmds)
+        var uncovered: [(name: String, gaps: [Range<Int>])] = []
         for segment in self.segments where segment.filesize > 0 && segment.name != "__LINKEDIT" && !segment.sections.isEmpty {
             var gaps: [Range<Int>] = []
             var cursor = segment.fileoff == 0 ? min(headerEnd, segment.fileend) : segment.fileoff
@@ -1079,17 +1083,66 @@ struct MachOVerifier {
             if segment.fileend > cursor {
                 gaps.append(Int(cursor) ..< Int(segment.fileend))
             }
-            if let (count, first) = self.nonZero(in: gaps) {
-                found.append("\(count.hex) bytes of \(segment.name) that no section covers are not zero, the first at \(first.hex)")
+            uncovered.append((segment.name, gaps))
+        }
+        var between: [(before: String, after: String, gap: Range<Int>)] = []
+        var furthest: (name: String, end: UInt64)?
+        for segment in self.segments.filter({ $0.filesize > 0 }).sorted(by: { $0.fileoff < $1.fileoff }) {
+            if let furthest, segment.fileoff > furthest.end {
+                between.append((furthest.name, segment.name, Int(furthest.end) ..< Int(segment.fileoff)))
+            }
+            if furthest == nil || segment.fileend > furthest!.end {
+                furthest = (segment.name, segment.fileend)
             }
         }
-        let placed = self.segments.filter { $0.filesize > 0 }.sorted { $0.fileoff < $1.fileoff }
-        for (before, after) in zip(placed, placed.dropFirst()) where after.fileoff > before.fileend {
-            if let (count, first) = self.nonZero(in: [Int(before.fileend) ..< Int(after.fileoff)]) {
-                found.append("\(count.hex) bytes between \(before.name) and \(after.name) are not zero, the first at \(first.hex)")
+
+        // Every gap is a run of pieces cut at every gap's bounds, each piece read once, by where it starts.
+        let read = Dictionary(uniqueKeysWithValues: Self.pieces(of: uncovered.flatMap(\.gaps) + between.map(\.gap)).map { ($0.lowerBound, (end: $0.upperBound, nonZero: self.nonZero(in: [$0]))) })
+        func nonZero(in gaps: [Range<Int>]) -> (count: Int, first: Int)? {
+            var count = 0
+            var first = Int.max
+            for gap in gaps {
+                var at = gap.lowerBound
+                while at < gap.upperBound, let piece = read[at] {
+                    if let nonZero = piece.nonZero {
+                        count += nonZero.count
+                        first = min(first, nonZero.first)
+                    }
+                    at = piece.end
+                }
+            }
+            return count > 0 ? (count, first) : nil
+        }
+        for (name, gaps) in uncovered {
+            if let (count, first) = nonZero(in: gaps) {
+                found.append("\(count.hex) bytes of \(name) that no section covers are not zero, the first at \(first.hex)")
+            }
+        }
+        for (before, after, gap) in between {
+            if let (count, first) = nonZero(in: [gap]) {
+                found.append("\(count.hex) bytes between \(before) and \(after) are not zero, the first at \(first.hex)")
             }
         }
         return found
+    }
+
+    /// `ranges` cut at every bound of every range into pieces that overlap none, in order, each inside at least one.
+    private static func pieces(of ranges: [Range<Int>]) -> [Range<Int>] {
+        let bounds = Set(ranges.flatMap { [$0.lowerBound, $0.upperBound] }).sorted()
+        var opens: [Int: Int] = [:]
+        for range in ranges where !range.isEmpty {
+            opens[range.lowerBound, default: 0] += 1
+            opens[range.upperBound, default: 0] -= 1
+        }
+        var pieces: [Range<Int>] = []
+        var covering = 0
+        for (bound, next) in zip(bounds, bounds.dropFirst()) {
+            covering += opens[bound, default: 0]
+            if covering > 0 {
+                pieces.append(bound ..< next)
+            }
+        }
+        return pieces
     }
 
     // MARK: - Signature
