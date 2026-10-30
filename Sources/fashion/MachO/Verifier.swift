@@ -411,6 +411,11 @@ struct MachOVerifier {
                 found.append("\(count) \(MachO.LoadCommand.name(cmd)) commands")
             }
         }
+        // dyld's validStructureLoadCommands counts LC_DYLD_INFO_ONLY with LC_DYLD_INFO and LC_ROUTINES_64 with
+        // LC_ROUTINES ("multiple LC_DYLD_INFO load commands found"): one of each is two to it.
+        for (one, other) in [(UInt32(LC_DYLD_INFO), LC_DYLD_INFO_ONLY), (UInt32(LC_ROUTINES), UInt32(LC_ROUTINES_64))] where counts[one] != nil && counts[other] != nil {
+            found.append("\(MachO.LoadCommand.name(one)) beside \(MachO.LoadCommand.name(other)), which dyld counts as two \(MachO.LoadCommand.name(one)) commands")
+        }
         // The kernel takes one version command of an executable (`found_version_cmd`); a zippered dylib carries two
         // LC_BUILD_VERSION, which dyld reads both of.
         let versionMins = Self.versionMinCommands.reduce(0) { $0 + counts[$1, default: 0] }
@@ -717,9 +722,12 @@ struct MachOVerifier {
         }
         if let thread {
             switch self.threadEntry(thread) {
-            case let .address(address, states):
+            case let .address(address, states, first):
                 if states > 1 {
                     found.append("LC_UNIXTHREAD holds \(states) thread states: the kernel enters by the last, dyld reads the first")
+                }
+                if let dyld = Self.threadStates(for: image.cpuType)?.first, first.flavor != dyld.flavor || first.count != dyld.count {
+                    found.append("LC_UNIXTHREAD's first thread state, flavor \(first.flavor) of \(String(Int(first.count), pluralizing: "word")), is not the one dyld reads, flavor \(dyld.flavor) of \(dyld.count): the kernel enters by it, dyld finds no entry")
                 }
                 found += self.entryAnomalies("LC_UNIXTHREAD's pc", at: address)
             case let .flavor(flavor, count):
@@ -761,10 +769,23 @@ struct MachOVerifier {
     }
 
     private enum ThreadEntry {
-        /// The pc, and how many thread states the command holds.
-        case address(UInt64, states: Int)
+        /// The pc, how many thread states the command holds, and the first one's flavor and count.
+        case address(UInt64, states: Int, first: (flavor: UInt32, count: UInt32))
         case flavor(UInt32, UInt32)
         case short
+    }
+
+    /// The thread states the kernel's `thread_entrypoint` takes for `cpuType`, each a flavor, a count of words and
+    /// the index of the pc among the registers, the first the one dyld's `entryAddrFromThreadCmd` reads; nil for an
+    /// architecture neither knows.
+    private static func threadStates(for cpuType: cpu_type_t) -> [(flavor: UInt32, count: UInt32, index: Int)]? {
+        switch cpuType {
+        case CPU_TYPE_I386: [(1, 16, 10)] // x86_THREAD_STATE32, eip
+        case CPU_TYPE_X86_64: [(4, 42, 16), (23, 50, 16)] // x86_THREAD_STATE64 and x86_THREAD_FULL_STATE64, rip
+        case CPU_TYPE_ARM: [(1, 17, 15)] // ARM_THREAD_STATE, pc
+        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: [(6, 68, 32)] // ARM_THREAD_STATE64, pc
+        default: nil
+        }
     }
 
     /**
@@ -772,24 +793,19 @@ struct MachOVerifier {
      a flavor and a count of words then the registers, each a flavor and count the architecture's `thread_entrypoint`
      takes, the last one's pc the entry; any other flavor, a float state say, fails the load. x86_64 takes its thread
      state and its full one (`x86_THREAD_FULL_STATE64`, the segment registers after the others), the pc at the same
-     register of both. dyld's `entryAddrFromThreadCmd` reads the first state alone. Nil for an architecture neither
-     knows.
+     register of both. dyld's `entryAddrFromThreadCmd` reads the first state alone, and takes the architecture's
+     own flavor and count for it, `x86_64`'s thread state and not its full one: a command whose first state is
+     another is one dyld finds no entry in. Nil for an architecture neither knows.
      */
     private func threadEntry(_ command: MachO.LoadCommand) -> ThreadEntry? {
         let image = self.image
-        let states: [(flavor: UInt32, count: UInt32, index: Int)]? = switch image.cpuType {
-        case CPU_TYPE_I386: [(1, 16, 10)] // x86_THREAD_STATE32, eip
-        case CPU_TYPE_X86_64: [(4, 42, 16), (23, 50, 16)] // x86_THREAD_STATE64 and x86_THREAD_FULL_STATE64, rip
-        case CPU_TYPE_ARM: [(1, 17, 15)] // ARM_THREAD_STATE, pc
-        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: [(6, 68, 32)] // ARM_THREAD_STATE64, pc
-        default: nil
-        }
-        guard let states else {
+        guard let states = Self.threadStates(for: image.cpuType) else {
             return nil
         }
         let wide = image.is64 || image.cpuType == CPU_TYPE_ARM64_32
         let data = command.data
         var address: UInt64?
+        var first: (flavor: UInt32, count: UInt32)?
         var held = 0
         var at = 8
         while at < data.count {
@@ -802,6 +818,9 @@ struct MachOVerifier {
             guard let state = states.first(where: { $0.flavor == flavor && $0.count == count }) else {
                 return .flavor(flavor, count)
             }
+            if first == nil {
+                first = (flavor, count)
+            }
             let registers = at + 8
             let pc = registers + state.index * (wide ? 8 : 4)
             guard data.count >= registers + Int(count) * 4, data.count >= pc + (wide ? 8 : 4) else {
@@ -813,10 +832,10 @@ struct MachOVerifier {
             held += 1
             at = registers + Int(count) * 4
         }
-        guard let address else {
+        guard let address, let first else {
             return .short
         }
-        return .address(address, states: held)
+        return .address(address, states: held, first: first)
     }
 
     // MARK: - What the image links

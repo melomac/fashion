@@ -410,6 +410,12 @@ final class VerifierTests: XCTestCase {
         var long = program
         long.store(UInt32(commands.count + 1), at: 16)
         XCTAssertEqual(try self.verify(long, "long", in: directory).lines, [": ncmds \(commands.count + 1) exceeds the \(commands.count) commands the table holds"])
+        // dyld counts LC_DYLD_INFO_ONLY with LC_DYLD_INFO: one of each is two to it.
+        var info = Data()
+        info.appendUInt32(UInt32(LC_DYLD_INFO)); info.appendUInt32(48); info.append(Data(count: 40))
+        var only = info
+        only.store(LC_DYLD_INFO_ONLY, at: 0)
+        XCTAssertTrue(try self.verify(self.appending(info + only, to: program), "aliased", in: directory).lines.contains(": LC_DYLD_INFO beside LC_DYLD_INFO_ONLY, which dyld counts as two LC_DYLD_INFO commands"))
         // The linker pads the header with zeros past the commands: sizeofcmds taking 8 of them in holds a tail.
         var tailed = program
         let sizeofcmds = try XCTUnwrap(MachO(File(data: program))).sizeofcmds
@@ -594,8 +600,8 @@ final class VerifierTests: XCTestCase {
 
     /**
      The entry point as dyld's `validMain` finds it: `LC_MAIN`'s `entryoff` in a segment that is not executable,
-     `LC_UNIXTHREAD`'s pc there, a thread state that is not the architecture's, an entry in no section of `__TEXT`,
-     and one in a section of it that holds no code, where a stub section does.
+     `LC_UNIXTHREAD`'s pc there, a thread state that is not the architecture's, a first state dyld does not read, an
+     entry in no section of `__TEXT`, and one in a section of it that holds no code, where a stub section does.
      */
     func testTheEntryPointIsNamed() throws {
         let directory = try self.directory("entry")
@@ -611,11 +617,15 @@ final class VerifierTests: XCTestCase {
         thread.store(UInt32(0x7f), at: main.data.startIndex)
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr), to: thread), "thread", in: directory).lines, [": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 1, count: 16), to: thread), "flavor", in: directory).lines, [": LC_UNIXTHREAD's thread state, flavor 1 of 16 words, is not x86_64's"])
-        // The full state, the segment registers after the others, is x86_64's too, the pc at the same register.
-        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 23, count: 50), to: thread), "full", in: directory).lines, [": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
+        // The full state, the segment registers after the others, is x86_64's too to the kernel, the pc at the same
+        // register; dyld reads the thread state alone, and finds no entry in a command that begins with the full one.
+        let dyld = ": LC_UNIXTHREAD's first thread state, flavor 23 of 50 words, is not the one dyld reads, flavor 4 of 42: the kernel enters by it, dyld finds no entry"
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: data.vmaddr, flavor: 23, count: 50), to: thread), "full", in: directory).lines, [dyld, ": LC_UNIXTHREAD's pc \(data.vmaddr.hex) lies in __DATA_CONST, which is not executable"])
+        let code = try program.load(UInt64.self, at: self.section("__TEXT", "__text", in: program) + 32)
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(rip: code, flavor: 23, count: 50), to: thread), "fullcode", in: directory).lines, [dyld])
+        XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, data.vmaddr), (23, 50, code)]), to: thread), "fullsecond", in: directory).lines, [": LC_UNIXTHREAD holds 2 thread states: the kernel enters by the last, dyld reads the first"])
         // Two thread states: the kernel enters by the last, in __text here, where dyld reads the first; a float state
         // among them, which the kernel's thread_entrypoint does not take, fails the load.
-        let code = try program.load(UInt64.self, at: self.section("__TEXT", "__text", in: program) + 32)
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, data.vmaddr), (4, 42, code)]), to: thread), "states", in: directory).lines, [": LC_UNIXTHREAD holds 2 thread states: the kernel enters by the last, dyld reads the first"])
         XCTAssertEqual(try self.verify(self.appending(self.unixthread(states: [(4, 42, code), (5, 42, 0)]), to: thread), "float", in: directory).lines, [": LC_UNIXTHREAD's thread state, flavor 5 of 42 words, is not x86_64's"])
 

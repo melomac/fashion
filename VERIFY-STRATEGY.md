@@ -105,6 +105,7 @@ left out, with the reason.
 | An `lc_str` starting inside its command's fixed fields, a dylib command's 24 bytes, the others' 12: named with the offset | live dyld "string start offset too small" | |
 | More than 64 MiB of load commands | this tool's own limit, as the symbol names': refused red before the table is read; no loader has one | |
 | `LC_DYSYMTAB` without `LC_SYMTAB`; `LC_DYLD_INFO` with `LC_DYLD_CHAINED_FIXUPS` | dyld | ran |
+| `LC_DYLD_INFO` beside `LC_DYLD_INFO_ONLY`, `LC_ROUTINES` beside `LC_ROUTINES_64` | dyld `validStructureLoadCommands` counts each pair as one command: "multiple LC_DYLD_INFO load commands found" | |
 | No `LC_UUID` | dyld `validLinkedit` "missing LC_UUID" (SDK ≥ 14) | dyld aborted |
 | No `LC_LOAD_DYLIB` at all | dyld "must link with at least libSystem.dylib" (SDK ≥ 13) | dyld aborted |
 | `LC_ID_DYLIB` in a non-dylib; `MH_DYLIB` without one | dyld `validEmbeddedPaths` | dyld aborted |
@@ -148,7 +149,7 @@ left out, with the reason.
 |:--|:--|:--|
 | `LC_MAIN`: `__TEXT`'s address + `entryoff` in a segment that is not executable, or in none | dyld `validMain` "LC_MAIN points to non-executable segment" | `SIGBUS` at the jump; "valid on disk" when signed |
 | An entry in `__TEXT` but in no section, or in one that holds no code (`__cstring`, `__const`, a protector's own); a stub section is an entry too, which an app extension enters through for its imported `_NSExtensionMain` (496 of the OS's arm64e slices), as is GCC's `__text_startup` | research | |
-| `LC_UNIXTHREAD`: the pc register (`rip` index 16, `eip` 10, arm `pc` 15, arm64 `pc` 32) in a non-executable segment, or a flavor the arch does not have; every thread state in the command walked, each a flavor `thread_entrypoint` takes (x86_64: its state and `x86_THREAD_FULL_STATE64`), the last one's pc the entry where dyld reads the first, which is named when there are several | dyld `entryAddrFromThreadCmd`; kernel `load_threadentry` | `SIGBUS` |
+| `LC_UNIXTHREAD`: the pc register (`rip` index 16, `eip` 10, arm `pc` 15, arm64 `pc` 32) in a non-executable segment, or a flavor the arch does not have; every thread state in the command walked, each a flavor `thread_entrypoint` takes (x86_64: its state and `x86_THREAD_FULL_STATE64`), the last one's pc the entry where dyld reads the first, which is named when there are several; the first must be the flavor dyld's `entryAddrFromThreadCmd` takes, x86_64's thread state and not its full one, or dyld finds no entry | dyld `entryAddrFromThreadCmd`; kernel `load_threadentry` | `SIGBUS` |
 
 ### `__LINKEDIT`
 
