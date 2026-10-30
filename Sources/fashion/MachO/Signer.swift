@@ -16,18 +16,26 @@ import Security
  */
 struct Signer {
     /// What `SecStaticCode::verifySignature` throws `errSecCSSignatureFailed` for.
-    enum Failure: Error {
+    enum Failure: Error, Equatable {
         /// The CMS blob does not decode.
         case undecodable
         /// The CMS blob carries no signer.
         case unsigned
+        /// The CMS blob carries more signers than the one Security requires.
+        case signers(Int)
         /// The signature does not verify over the code directory.
         case invalidSignature
         /// The signer's certificate chain does not build or verify, in trustd's words.
         case chain(String)
+        /// The chain is expired or not yet valid at the date the signer claims, in trustd's words, which Security
+        /// tolerates but for the directory's `CS_ENFORCE_EXPIRATION` flag.
+        case expired(String)
         /// The signer's hash-agility attributes do not bind the code directories the signature holds: an invalid
         /// signature to Security.
         case agility(String)
+        /// The secure timestamp's chain ends outside Apple's roots where the signer's ends at one, which Security
+        /// refuses the signature for.
+        case timestampChain
     }
 
     /// Which of Gatekeeper's requirements the chain meets.
@@ -83,10 +91,13 @@ struct Signer {
      truncated to 20 bytes, in the order of their hash types, and the v2 attribute names each by its digest
      algorithm with its cdhash, as many as there are directories, the `best` among them; a signer that wrote
      neither binds nothing, which Security lets pass. Then trustd builds the chain with no network, every
-     self-signed certificate an anchor and expiry allowed, as the date the signer claims. Throws a `Failure`
-     otherwise. An empty `binding` skips the attributes, for a caller with the one directory alone.
+     self-signed certificate an anchor, as of the secure timestamp, else the date the signer claims: a chain expired
+     or not yet valid then is tried again with expiry allowed, as Security tries it, only without a secure timestamp,
+     and not when `enforcingExpiration`, the directory's `CS_ENFORCE_EXPIRATION` flag. A signer anchored at Apple
+     whose secure timestamp's chain is not ends the verification too. Throws a `Failure` otherwise. An empty
+     `binding` skips the attributes, for a caller with the one directory alone.
      */
-    init(cms: Data, over directory: Data, binding: [(hashType: HashType, cdhash: Data)] = [], best: HashType? = nil) throws(Failure) {
+    init(cms: Data, over directory: Data, binding: [(hashType: HashType, cdhash: Data)] = [], best: HashType? = nil, enforcingExpiration: Bool = false) throws(Failure) {
         var created: CMSDecoder?
         guard CMSDecoderCreate(&created) == errSecSuccess, let decoder = created,
               cms.withUnsafeBytes({ $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, cms.count) } ?? errSecParam }) == errSecSuccess,
@@ -98,6 +109,10 @@ struct Signer {
         var signers = 0
         guard CMSDecoderGetNumSigners(decoder, &signers) == errSecSuccess, signers > 0 else {
             throw .unsigned
+        }
+        // "CMS has %zu signers, expected exactly one": Security's verifySignature takes no other count.
+        guard signers == 1 else {
+            throw .signers(signers)
         }
 
         var status = CMSSignerStatus.unsigned
@@ -126,21 +141,42 @@ struct Signer {
 
         var time: CFAbsoluteTime = 0
         self.signingTime = CMSDecoderCopySignerSigningTime(decoder, 0, &time) == errSecSuccess ? Date(timeIntervalSinceReferenceDate: time) : nil
-        self.timestamp = Self.timestamp(in: cms)
+        let stamp = Self.timestamp(in: cms)
+        self.timestamp = stamp?.date
 
         SecTrustSetNetworkFetchAllowed(trust, false)
-        SecTrustSetOptions(trust, [.allowExpired, .allowExpiredRoot, .implicitAnchors])
+        SecTrustSetOptions(trust, [.implicitAnchors])
         if let date = self.timestamp ?? self.signingTime {
             SecTrustSetVerifyDate(trust, date as CFDate)
         }
         var error: CFError?
-        guard SecTrustEvaluateWithError(trust, &error) else {
-            throw .chain(error.map { ($0 as Error).localizedDescription } ?? "not trusted")
+        if !SecTrustEvaluateWithError(trust, &error) {
+            // Security's validateDirectory tries again with expiry allowed when that is the failure and no secure
+            // timestamp vouches for the date, then refuses what it allowed under CS_ENFORCE_EXPIRATION.
+            let reason = error.map { ($0 as Error).localizedDescription } ?? "not trusted"
+            guard let failure = error, Self.expiryCodes.contains(OSStatus(CFErrorGetCode(failure))), self.timestamp == nil else {
+                throw .chain(reason)
+            }
+            guard !enforcingExpiration else {
+                throw .expired(reason)
+            }
+            SecTrustSetOptions(trust, [.allowExpired, .allowExpiredRoot, .implicitAnchors])
+            guard SecTrustEvaluateWithError(trust, &error) else {
+                throw .chain(error.map { ($0 as Error).localizedDescription } ?? reason)
+            }
         }
         self.chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] ?? []
         self.leafFields = Self.fields(of: self.chain.first)
         self.issuerFields = Self.fields(of: self.chain.dropFirst().first)
+        // A signer anchored at Apple needs its secure timestamp anchored at Apple too: "timestamp policy
+        // verification failed", and the signature with it.
+        if let stamp, self.anchoredAtApple, !(stamp.chain.last.map(Self.isAppleRoot) ?? false) {
+            throw .timestampChain
+        }
     }
+
+    /// trustd's words for a chain expired or not yet valid, the failures Security tries again past.
+    private static let expiryCodes: Set<OSStatus> = [errSecCertificateExpired, errSecCertificateNotValidYet]
 
     // MARK: - Timestamp
 
@@ -157,7 +193,8 @@ struct Signer {
 
     /**
      The secure timestamp in `cms`: the token a timestamp authority signed over the signer's signature, carried as an
-     unsigned attribute of the signer. Its date, when the token's imprint is the signature's digest, its own
+     unsigned attribute of the signer. Its date and the chain trustd built, when the token's imprint is the
+     signature's digest, its own
      signature verifies, and its chain builds under Apple's timestamping policy to the system's anchors, or to
      `anchors`, as of the date it certifies, with no network. Security's `CMSDecoderCopySignerTimestampWithPolicy`
      does as much through trustd, which may fetch an issuer over the network for the token's chain, where it fetches
@@ -165,7 +202,7 @@ struct Signer {
      reads it, so the content is handed back to it as detached for the signer's digest. Nil without a token that
      holds.
      */
-    static func timestamp(in cms: Data, anchors: [SecCertificate]? = nil) -> Date? {
+    static func timestamp(in cms: Data, anchors: [SecCertificate]? = nil) -> (date: Date, chain: [SecCertificate])? {
         guard let (signature, token) = signatureAndToken(in: cms) else {
             return nil
         }
@@ -191,7 +228,10 @@ struct Signer {
             SecTrustSetAnchorCertificates(trust, anchors as CFArray)
         }
         SecTrustSetVerifyDate(trust, imprinted.date as CFDate)
-        return SecTrustEvaluateWithError(trust, nil) ? imprinted.date : nil
+        guard SecTrustEvaluateWithError(trust, nil) else {
+            return nil
+        }
+        return (imprinted.date, SecTrustCopyCertificateChain(trust) as? [SecCertificate] ?? [])
     }
 
     /**
@@ -310,10 +350,12 @@ struct Signer {
 
     /// Whether the chain ends at one of Apple's roots: `anchor apple generic`.
     var anchoredAtApple: Bool {
-        guard let anchor = self.chain.last else {
-            return false
-        }
-        return Self.appleRoots.contains(Data(SHA256.hash(data: SecCertificateCopyData(anchor) as Data)).hexString)
+        self.chain.last.map(Self.isAppleRoot) ?? false
+    }
+
+    /// Whether `certificate` is one of Apple's roots.
+    private static func isAppleRoot(_ certificate: SecCertificate) -> Bool {
+        self.appleRoots.contains(Data(SHA256.hash(data: SecCertificateCopyData(certificate) as Data)).hexString)
     }
 
     var kind: Kind {

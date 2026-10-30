@@ -1155,6 +1155,8 @@ struct MachOVerifier {
     private static let csslotRequirements: UInt32 = 2
     private static let csslotEntitlements: UInt32 = 5
     private static let csslotDEREntitlements: UInt32 = 7
+    /// `CS_ENFORCE_EXPIRATION` (`codesign -o expires`): an expired signer refused, where Security tolerates one otherwise.
+    private static let csEnforceExpiration: UInt32 = 0x400
     private static let csslotSignature: UInt32 = 0x10000
     private static let csAdhoc: UInt32 = 0x2
 
@@ -1442,14 +1444,17 @@ struct MachOVerifier {
         let type = "the \(primary.hashType.name) code directory"
         let signer: Signer
         do {
-            signer = try Signer(cms: cms, over: primary.data, binding: directories.map { ($0.hashType, $0.hashType.digest($0.data)) }, best: best.hashType)
+            signer = try Signer(cms: cms, over: primary.data, binding: directories.map { ($0.hashType, $0.hashType.digest($0.data)) }, best: best.hashType, enforcingExpiration: best.flags & Self.csEnforceExpiration != 0)
         } catch {
             let line = switch error {
             case .undecodable: "a CMS signature Security cannot decode"
             case .unsigned: "a CMS signature with no signer"
+            case let .signers(count): "a CMS signature with \(count) signers, where Security requires exactly one, an invalid signature to it"
             case .invalidSignature: "the CMS signature does not verify over \(type)"
             case let .chain(reason): "the signer's certificate chain does not build: \(Self.shown(reason))"
+            case let .expired(reason): "the signer's certificate chain does not hold at the date it claims: \(Self.shown(reason)), which the code directory's CS_ENFORCE_EXPIRATION flag refuses where Security tolerates it"
             case let .agility(reason): "the CMS signature does not bind the code directories as Security requires: \(reason), an invalid signature to it"
+            case .timestampChain: "the secure timestamp's chain ends outside Apple's roots where the signer's ends at one, which Security refuses the signature for"
             }
             return [line] + self.restrictedEntitlements(entitled, signedBy: nil)
         }

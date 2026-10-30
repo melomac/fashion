@@ -1044,6 +1044,12 @@ final class VerifierTests: XCTestCase {
         let wrapper = try XCTUnwrap(mismagic.range(of: Data([0xfa, 0xde, 0x0b, 0x01])))
         mismagic.store(UInt32(0xfade_0b02).bigEndian, at: wrapper.lowerBound)
         XCTAssertEqual(try self.verify(mismagic, "mismagic", in: directory).lines, [": the CMS blob's magic is 0xfade0b02, not 0xfade0b01, which Security refuses the signature for"])
+        // Security takes exactly one signer: the same signer twice is an invalid signature to it, where the one is
+        // a signature codesign verifies.
+        let doubled = try Self.withSigners(signatureBlob, times: 2)
+        XCTAssertEqual(try self.verify(embedded(directoryBlob, doubled), "doubled", in: directory).lines, [": a CMS signature with 2 signers, where Security requires exactly one, an invalid signature to it"])
+        XCTAssertFalse(try execute("/usr/bin/codesign", ["--verify", (directory / "doubled").path]))
+        XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", (directory / "self-signed").path]))
 
         let plist = directory / "entitlements.plist"
         try """
@@ -1458,38 +1464,12 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(directories.map { $0[37] }, [1, 2], "SHA-1 at slot 0, SHA-256 the alternate")
         let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
 
-        let (configuration, key, pem, der) = (directory / "certificate.cnf", directory / "key.pem", directory / "certificate.pem", directory / "certificate.der")
-        try "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n[dn]\nCN = Fashion Self\n[ext]\nextendedKeyUsage = codeSigning\nkeyUsage = digitalSignature\nbasicConstraints = CA:FALSE\n".write(to: configuration, atomically: true, encoding: .utf8)
-        try XCTSkipUnless(execute("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key.path, "-out", pem.path, "-config", configuration.path, "-days", "30"]), "cannot make a certificate")
-        try XCTSkipUnless(execute("/usr/bin/openssl", ["x509", "-in", pem.path, "-outform", "DER", "-out", der.path]), "cannot convert a certificate")
-        let certificate = try Data(contentsOf: der)
-        // The issuer and serial, from the certificate: a version, the serial, the algorithm, the issuer.
-        var reader = DER.Reader(certificate)
-        let tbs = try XCTUnwrap(DER.elements(of: XCTUnwrap(DER.elements(of: XCTUnwrap(reader.next()).content)?.first).content))
-        let (serial, issuer) = (tbs[1].raw, tbs[3].raw)
-
-        /// A CMS signature over `content` by the certificate, binding `bound` through both hash-agility attributes.
-        func cms(over content: Data, binding bound: [(type: HashType, cdhash: Data)], _ name: String) throws -> Data {
-            func oid(_ bytes: [UInt8]) -> Data {
-                DER.encode(0x06, Data(bytes))
-            }
-            func attribute(_ type: [UInt8], _ values: Data) -> Data {
-                DER.encode(0x30, oid(type) + DER.encode(0x31, values))
-            }
-            let sha256 = oid([0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01])
+        let (certificate, key) = try Self.identity("Fashion Self", in: directory)
+        /// The hash-agility attributes binding `bound`: the cdhashes plist and the v2 attribute.
+        func binding(_ bound: [(type: HashType, cdhash: Data)]) -> Data {
             let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>cdhashes</key><array>" + bound.map { "<data>\($0.cdhash.prefix(20).base64EncodedString())</data>" }.joined() + "</array></dict></plist>\n"
-            let v2 = bound.map { DER.encode(0x30, oid($0.type == .sha1 ? [0x2b, 0x0e, 0x03, 0x02, 0x1a] : [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]) + DER.encode(0x04, $0.cdhash)) }.reduce(Data(), +)
-            let attributes = attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x03], oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01]))
-                + attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x04], DER.encode(0x04, Data(SHA256.hash(data: content))))
-                + attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x01], DER.encode(0x04, Data(plist.utf8)))
-                + attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x02], v2)
-            let (toSign, signatureFile) = (directory / "\(name).attrs", directory / "\(name).sig")
-            try DER.encode(0x31, attributes).write(to: toSign)
-            try XCTSkipUnless(execute("/usr/bin/openssl", ["dgst", "-sha256", "-sign", key.path, "-out", signatureFile.path, toSign.path]), "cannot sign")
-            let rsa = DER.encode(0x30, oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]) + DER.encode(0x05, Data()))
-            let signerInfo = try DER.encode(0x30, DER.encode(0x02, Data([1])) + DER.encode(0x30, issuer + serial) + DER.encode(0x30, sha256 + DER.encode(0x05, Data())) + DER.encode(0xa0, attributes) + rsa + DER.encode(0x04, Data(contentsOf: signatureFile)))
-            let signedData = DER.encode(0x30, DER.encode(0x02, Data([1])) + DER.encode(0x31, DER.encode(0x30, sha256 + DER.encode(0x05, Data()))) + DER.encode(0x30, oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01])) + DER.encode(0xa0, certificate) + DER.encode(0x31, signerInfo))
-            return DER.encode(0x30, oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02]) + DER.encode(0xa0, signedData))
+            let v2 = bound.map { DER.encode(0x30, Self.oid($0.type == .sha1 ? [0x2b, 0x0e, 0x03, 0x02, 0x1a] : [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]) + DER.encode(0x04, $0.cdhash)) }.reduce(Data(), +)
+            return Self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x01], DER.encode(0x04, Data(plist.utf8))) + Self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x02], v2)
         }
         /// `program` signed with `sha1` at slot 0, `sha256` the alternate, and `cms` wrapped.
         func embedded(_ sha1: Data, _ sha256: Data, _ cms: Data) -> Data {
@@ -1511,7 +1491,7 @@ final class VerifierTests: XCTestCase {
             return signed
         }
         let (sha1, sha256) = (directories[0], directories[1])
-        let bound = try cms(over: sha1, binding: [(.sha1, Data(Insecure.SHA1.hash(data: sha1))), (.sha256, Data(SHA256.hash(data: sha256)))], "bound")
+        let bound = try Self.cms(over: sha1, certificate: certificate, key: key, attributes: binding([(.sha1, Data(Insecure.SHA1.hash(data: sha1))), (.sha256, Data(SHA256.hash(data: sha256)))]), in: directory, "bound")
         let agility = Signer.hashAgility(in: bound)
         XCTAssertEqual(agility.cdhashes, [Data(Insecure.SHA1.hash(data: sha1)).prefix(20), Data(SHA256.hash(data: sha256)).prefix(20)])
         XCTAssertEqual(agility.v2, [.sha1: Data(Insecure.SHA1.hash(data: sha1)), .sha256: Data(SHA256.hash(data: sha256))])
@@ -1658,6 +1638,95 @@ final class VerifierTests: XCTestCase {
         ] + rest)
     }
 
+    /// The DER of an OID from its bytes.
+    private static func oid(_ bytes: [UInt8]) -> Data {
+        DER.encode(0x06, Data(bytes))
+    }
+
+    /// A CMS attribute of `type` holding `values`: a SEQUENCE of the OID and a SET.
+    private static func attribute(_ type: [UInt8], _ values: Data) -> Data {
+        DER.encode(0x30, self.oid(type) + DER.encode(0x31, values))
+    }
+
+    /// A self-signed code-signing certificate `name`d, made with openssl in `directory` for `days`: its DER, and the
+    /// key's path. Skips the test when openssl cannot.
+    private static func identity(_ name: String, in directory: URL, days: Int = 30) throws -> (certificate: Data, key: URL) {
+        let (configuration, key, pem, der) = (directory / "\(name).cnf", directory / "\(name).key", directory / "\(name).pem", directory / "\(name).der")
+        try "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n[dn]\nCN = \(name)\n[ext]\nextendedKeyUsage = codeSigning\nkeyUsage = digitalSignature\nbasicConstraints = CA:FALSE\n".write(to: configuration, atomically: true, encoding: .utf8)
+        try XCTSkipUnless(execute("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key.path, "-out", pem.path, "-config", configuration.path, "-days", String(days)]), "cannot make a certificate")
+        try XCTSkipUnless(execute("/usr/bin/openssl", ["x509", "-in", pem.path, "-outform", "DER", "-out", der.path]), "cannot convert a certificate")
+        return try (Data(contentsOf: der), key)
+    }
+
+    /**
+     A CMS signature over `content` by `certificate` with `key`, laid out as codesign's: the signed attributes are the
+     content type, `signingTime` when given, the message digest and `attributes`, which openssl signs under SHA-256
+     with RSA, in `directory` as `name`; the certificate rides along.
+     */
+    private static func cms(over content: Data, certificate: Data, key: URL, signingTime: Date? = nil, attributes: Data = Data(), in directory: URL, _ name: String) throws -> Data {
+        // The issuer and serial, from the certificate: a version, the serial, the algorithm, the issuer.
+        var reader = DER.Reader(certificate)
+        let tbs = try XCTUnwrap(DER.elements(of: XCTUnwrap(DER.elements(of: XCTUnwrap(reader.next()).content)?.first).content))
+        let (serial, issuer) = (tbs[1].raw, tbs[3].raw)
+        let sha256 = self.oid([0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01])
+        var signed = self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x03], self.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01]))
+        if let signingTime {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(identifier: "UTC")
+            formatter.dateFormat = "yyMMddHHmmss'Z'"
+            signed += self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x05], DER.encode(0x17, Data(formatter.string(from: signingTime).utf8)))
+        }
+        signed += self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x04], DER.encode(0x04, Data(SHA256.hash(data: content)))) + attributes
+        let (toSign, signatureFile) = (directory / "\(name).attrs", directory / "\(name).sig")
+        try DER.encode(0x31, signed).write(to: toSign)
+        try XCTSkipUnless(execute("/usr/bin/openssl", ["dgst", "-sha256", "-sign", key.path, "-out", signatureFile.path, toSign.path]), "cannot sign")
+        let rsa = DER.encode(0x30, self.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]) + DER.encode(0x05, Data()))
+        let signerInfo = try DER.encode(0x30, DER.encode(0x02, Data([1])) + DER.encode(0x30, issuer + serial) + DER.encode(0x30, sha256 + DER.encode(0x05, Data())) + DER.encode(0xa0, signed) + rsa + DER.encode(0x04, Data(contentsOf: signatureFile)))
+        let signedData = DER.encode(0x30, DER.encode(0x02, Data([1])) + DER.encode(0x31, DER.encode(0x30, sha256 + DER.encode(0x05, Data()))) + DER.encode(0x30, self.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01])) + DER.encode(0xa0, certificate) + DER.encode(0x31, signerInfo))
+        return DER.encode(0x30, self.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02]) + DER.encode(0xa0, signedData))
+    }
+
+    /// `cms` with its signer's SignerInfo `times` over, the enclosing lengths rewritten.
+    private static func withSigners(_ cms: Data, times: Int) throws -> Data {
+        var reader = DER.Reader(cms)
+        let contentInfo = try XCTUnwrap(reader.next())
+        let outer = try XCTUnwrap(DER.elements(of: contentInfo.content))
+        let signedData = try XCTUnwrap(DER.elements(of: outer[1].content)?.first)
+        var fields = try XCTUnwrap(DER.elements(of: signedData.content))
+        let signerInfo = try XCTUnwrap(DER.elements(of: XCTUnwrap(fields.popLast()).content)?.first)
+        let rewritten = DER.encode(0x31, Array(repeating: signerInfo.raw, count: times).reduce(Data(), +))
+        return DER.encode(0x30, outer[0].raw + DER.encode(0xa0, DER.encode(0x30, fields.map(\.raw).reduce(Data(), +) + rewritten)))
+    }
+
+    /// `program` with its signature replaced by a superblob holding `directory` in slot 0, `requirements` in slot 2
+    /// and `cms` wrapped in slot 0x10000, in the room `signature` has.
+    private static func embedding(_ directory: Data, _ requirements: Data, _ cms: Data, in program: Data, at signature: (offset: Int, size: Int)) -> Data {
+        var wrapped = Data()
+        [0xfade_0b01, UInt32(8 + cms.count)].forEach { wrapped.appendUInt32BE($0) }
+        wrapped += cms
+        var blob = Data()
+        let (first, second) = (36 + directory.count, 36 + directory.count + requirements.count)
+        [0xfade_0cc0, UInt32(second + wrapped.count), 3, 0, 36, 2, UInt32(first), 0x10000, UInt32(second)].forEach { blob.appendUInt32BE($0) }
+        blob += directory + requirements + wrapped
+        XCTAssertLessThanOrEqual(blob.count, signature.size)
+        var signed = program
+        signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
+        return signed
+    }
+
+    /// The first slice's code directory and CMS signature of the signed file at `path`.
+    private static func signature(of path: String) throws -> (directory: Data, cms: Data) {
+        let file = try File(path: path)
+        let image: MachO = switch try Universal.open(file) {
+        case let .fat(archs): try XCTUnwrap(MachO(file, offset: XCTUnwrap(archs.first).offset, length: XCTUnwrap(archs.first).length))
+        case let .thin(image): image
+        case .notMachO: throw XCTSkip("\(path) is not Mach-O")
+        }
+        let superblob = try image.signingData(XCTUnwrap(image.findCodeSignature()))
+        return try (Data(XCTUnwrap(MachO.component(0, of: superblob))), Data(XCTUnwrap(MachO.component(0x10000, of: superblob)).dropFirst(8)))
+    }
+
     /// `cms` with `token` as its signer's `id-aa-timeStampToken` unsigned attribute, the enclosing lengths rewritten.
     private static func timestamped(_ cms: Data, with token: Data) throws -> Data {
         func parts(_ data: Data) throws -> [DER.Element] {
@@ -1676,10 +1745,47 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     Expiry as Security tolerates it: a chain expired, or not yet valid, at the date the signer claims is tried again
+     with expiry allowed and passes, as codesign passes it, unless the directory's flags carry `CS_ENFORCE_EXPIRATION`,
+     codesign -o expires, which refuses it; the flag refuses nothing of a chain valid at that date.
+     */
+    func testExpiryIsToleratedAsSecurityTolerates() throws {
+        let directory = try self.directory("expiry")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        var directoryBlob = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        directoryBlob.store((UInt32(bigEndian: directoryBlob.load(UInt32.self, at: 12)) & ~UInt32(2)).bigEndian, at: 12) // CS_ADHOC out
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+        let (certificate, key) = try Self.identity("Fashion Self", in: directory, days: 30)
+        let gatekeeper = ": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"
+        for (name, claimed) in [("expired", Date(timeIntervalSinceNow: 60 * 86400)), ("early", Date(timeIntervalSinceNow: -60 * 86400))] {
+            let cms = try Self.cms(over: directoryBlob, certificate: certificate, key: key, signingTime: claimed, in: directory, name)
+            XCTAssertEqual(try self.verify(Self.embedding(directoryBlob, requirements, cms, in: program, at: signature), name, in: directory).lines, [gatekeeper], name)
+            XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", (directory / name).path]), name)
+        }
+
+        var enforcing = directoryBlob
+        enforcing.store((UInt32(bigEndian: enforcing.load(UInt32.self, at: 12)) | 0x400).bigEndian, at: 12)
+        let enforced = try Self.cms(over: enforcing, certificate: certificate, key: key, signingTime: Date(timeIntervalSinceNow: 60 * 86400), in: directory, "enforced")
+        XCTAssertEqual(try self.verify(Self.embedding(enforcing, requirements, enforced, in: program, at: signature), "enforced", in: directory).lines, [": the signer's certificate chain does not hold at the date it claims: \"“Fashion Self” certificate is expired\", which the code directory's CS_ENFORCE_EXPIRATION flag refuses where Security tolerates it"])
+        XCTAssertFalse(try execute("/usr/bin/codesign", ["--verify", (directory / "enforced").path]))
+        let current = try Self.cms(over: enforcing, certificate: certificate, key: key, signingTime: Date(), in: directory, "current")
+        XCTAssertEqual(try self.verify(Self.embedding(enforcing, requirements, current, in: program, at: signature), "current", in: directory).lines, [gatekeeper])
+        XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", (directory / "current").path]))
+    }
+
+    /**
      A secure timestamp is read from the signer's token and verified here, with no network: the token's imprint must
      be the signature's digest, and its chain must build to the system's anchors, or to the ones given. A token a
      timestamp authority of the test's own signed, with openssl, verifies under its certificate as the anchor, with its
-     date, and not under the system's; one taken over other bytes does not.
+     date, and not under the system's; one taken over other bytes does not. Security's decoder verifies a token
+     against the system's anchors as part of the signature, so one from the test's authority spliced behind Apple's
+     own signature is an invalid signature to it.
      */
     func testASecureTimestampIsVerifiedOffline() throws {
         let directory = try self.directory("timestamp")
@@ -1741,9 +1847,18 @@ final class VerifierTests: XCTestCase {
         saveFixture(stamped)
         XCTAssertNotNil(Signer.signatureAndToken(in: stamped))
         XCTAssertNil(Signer.timestamp(in: stamped), "the authority is no anchor of the system's")
-        let date = try XCTUnwrap(Signer.timestamp(in: stamped, anchors: [authority]))
+        let date = try XCTUnwrap(Signer.timestamp(in: stamped, anchors: [authority])).date
         XCTAssertLessThan(abs(date.timeIntervalSinceNow), 600)
         let other = try Self.timestamped(cms, with: token(over: Data("other bytes".utf8), "other"))
         XCTAssertNil(Signer.timestamp(in: other, anchors: [authority]), "a token over other bytes")
+
+        // Security's decoder verifies the token too, against the system's anchors: behind Apple's own signature on
+        // ls, a token from the test's authority is an invalid signature to it, before any rule on the token's chain.
+        let ls = try Self.signature(of: "/bin/ls")
+        XCTAssertEqual(try Signer(cms: ls.cms, over: ls.directory).kind, .apple)
+        let appleStamped = try Self.timestamped(ls.cms, with: token(over: XCTUnwrap(Signer.signature(in: ls.cms)), "apple"))
+        XCTAssertThrowsError(try Signer(cms: appleStamped, over: ls.directory)) { error in
+            XCTAssertEqual(error as? Signer.Failure, .invalidSignature)
+        }
     }
 }
