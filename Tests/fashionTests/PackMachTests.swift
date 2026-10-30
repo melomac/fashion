@@ -83,8 +83,9 @@ final class PackMachTests: XCTestCase {
         try Digester(Hasher.parse([path, "--quiet"] + arguments)).lines(for: path, reporter: Reporter(console: Console())).map(\.text)
     }
 
-    /// Each block of `packed`, from UPX's `p_info` up to the original's size: where its bytes lie, its sizes, method
-    /// and filter, as its `b_info` has them.
+    /// Each block of `packed`, from UPX's `p_info` up to the original's size, or up to the padding after the blocks
+    /// of a dylib, whose first segment alone is in blocks: where its bytes lie, its sizes, method and filter, as its
+    /// `b_info` has them.
     private func blocks(of packed: Data) throws -> [(offset: Int, uncompressed: Int, compressed: Int, method: UInt8, filter: UInt8)] {
         let header = try XCTUnwrap(packed.ranges(of: Data("UPX!".utf8)).last).lowerBound
         func word(_ at: Int) -> Int {
@@ -95,7 +96,7 @@ final class PackMachTests: XCTestCase {
         var blocks: [(offset: Int, uncompressed: Int, compressed: Int, method: UInt8, filter: UInt8)] = []
         var cursor = overlay + 12
         var total = 0
-        while total < fileSize {
+        while total < fileSize, cursor + 12 <= packed.count, word(cursor) != 0 {
             let (uncompressed, compressed) = (word(cursor), word(cursor + 4))
             blocks.append((cursor + 12, uncompressed, compressed, packed[cursor + 8], packed[cursor + 9]))
             cursor += 12 + compressed
@@ -1098,6 +1099,87 @@ final class PackMachTests: XCTestCase {
         packed.appendUInt32(UInt32(overlay)) // overlay_offset
         packed.append(Data(count: 16)) // __LINKEDIT
         return try (self.resummed(packed), original)
+    }
+
+    /**
+     A dylib UPX packed, made by hand as UPX lays one out (the installed UPX packs none): an `x86_64` dylib of a
+     `__TEXT` page, a `__DATA_CONST` of 64 bytes, a `__LINKEDIT` of 32 and an `LC_UUID` (canUnpack wants three
+     segments' worth of commands and an entry's, whatever the filetype), the headers in an NRV2B block and the rest
+     of `__TEXT` stored, the other two segments copied page-aligned after the blocks, every command kept, the pack
+     header at the file's end; `p_info` says `fileSize` for the original's size.
+     */
+    private func packedDylibByHand(fileSize: Int) throws -> (packed: Data, original: Data) {
+        let page = 0x1000
+        var original = Data()
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_DYLIB), 4, 240, 0, 0].forEach { original.appendUInt32($0) }
+        func segment(_ name: String, _ offset: Int, _ count: Int, _ prot: Int, into data: inout Data, vmaddr: Int) {
+            data.appendUInt32(UInt32(LC_SEGMENT_64)); data.appendUInt32(72)
+            data.append(Data(name.utf8) + Data(count: 16 - name.utf8.count))
+            [UInt64(vmaddr), UInt64(max(page, (count + 0xfff) & ~0xfff)), UInt64(offset), UInt64(count)].forEach { data.appendUInt64($0) }
+            [prot, prot, 0, 0].forEach { data.appendUInt32(UInt32($0)) }
+        }
+        var uuid = Data()
+        uuid.appendUInt32(UInt32(LC_UUID)); uuid.appendUInt32(24); uuid.append(Data((1 ... 16).map { UInt8($0) }))
+        segment("__TEXT", 0, page, 5, into: &original, vmaddr: 0)
+        segment("__DATA_CONST", page, 64, 3, into: &original, vmaddr: page)
+        segment("__LINKEDIT", page + 64, 32, 1, into: &original, vmaddr: 2 * page)
+        original += uuid
+        let headers = original.count
+        original.append(Data((headers ..< page + 96).map { UInt8(truncatingIfNeeded: $0 * 7 + 1) }))
+
+        var blocks = Data()
+        func block(_ unpacked: Data, as packed: Data) {
+            blocks.appendUInt32(UInt32(unpacked.count)); blocks.appendUInt32(UInt32(packed.count)); blocks.append(contentsOf: [2, 0, 0, 0])
+            blocks += packed
+        }
+        block(original.prefix(headers), as: Self.nrv2b(original.prefix(headers)))
+        block(original[headers ..< page], as: original[headers ..< page])
+
+        var packed = Data()
+        let overlay = 32 + 240 + 12
+        let data = (overlay + 12 + blocks.count + 0xfff) & ~0xfff
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_DYLIB), 4, 240, 0, 0].forEach { packed.appendUInt32($0) }
+        segment("__TEXT", 0, data, 5, into: &packed, vmaddr: 0)
+        segment("__DATA_CONST", data, 64, 3, into: &packed, vmaddr: data)
+        segment("__LINKEDIT", data + 64, 32, 1, into: &packed, vmaddr: data + page)
+        packed += uuid
+        packed.appendUInt32(0); packed.append(Data("UPX!".utf8)); packed.append(contentsOf: [0, 0, 13, 35]) // l_info: checksum, magic, size, version, format
+        [0, UInt32(fileSize), UInt32(page)].forEach { packed.appendUInt32($0) } // p_info: progid, filesize, blocksize
+        packed += blocks
+        packed.append(Data(count: data - packed.count))
+        packed += original[page ..< page + 96]
+        packed.append(Data("UPX!".utf8)); packed.append(contentsOf: [13, 35, 2, 8]) // version, format, method, level
+        let adler = original.prefix(page).withUnsafeBytes { UInt32(adler32(1, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt(page))) }
+        [adler, 0, UInt32(page), UInt32(page - 1), UInt32(fileSize)].forEach { packed.appendUInt32($0) } // u_adler, c_adler, u_len, c_len, u_file_size
+        packed.append(contentsOf: [0, 0, 0, 0]) // filter, cto, n_mru, checksum
+        packed.appendUInt32(UInt32(overlay)) // overlay_offset
+        return try (self.resummed(packed), original)
+    }
+
+    /**
+     A packed dylib's first segment comes out of the blocks, bounded by `p_filesize`; the others are copied to where
+     the original headers place them, which UPX does by seeking its output file there and writing, so a segment
+     placed past `p_filesize` grows the file. Said with `p_filesize` as the original's size and understated to the
+     first segment's, both unpack to the original, as `upx -d` unpacks them when it is there.
+     */
+    func testADylibsCopiedSegmentsLieWhereTheHeadersPlaceThem() throws {
+        let directory = try self.directory("dylib")
+        for (name, fileSize) in [("sound", 0x1060), ("understated", 0x1000)] {
+            let (packed, original) = try self.packedDylibByHand(fileSize: fileSize)
+            let file = directory / name
+            try packed.write(to: file)
+            saveFixture(path: file.path)
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(original))], name)
+            let reporter = Reporter(console: Console())
+            XCTAssertEqual(Unpacker.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_unpacked"], name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), original, name)
+            XCTAssertEqual(reporter.errorCount, 0, name)
+            if let upx = try? self.upx() {
+                let upxd = directory / "\(name)_upx-d"
+                XCTAssertTrue(try execute(upx, ["-q", "-d", "-o", upxd.path, file.path]), name)
+                XCTAssertEqual(try Data(contentsOf: upxd), original, name)
+            }
+        }
     }
 
     /**

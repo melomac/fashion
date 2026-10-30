@@ -636,8 +636,12 @@ struct PackMach {
         }
         let segments = commands.compactMap(\.segment).sorted(by: Segment.precedes)
 
-        // UPX writes a segment wherever its headers place it; it must lie in the image made here.
-        guard segments.allSatisfy({ $0.filesize == 0 || ($0.fileoff <= fileSize && $0.filesize <= fileSize - $0.fileoff) }) else {
+        // UPX writes a segment wherever its headers place it; one decoded from the blocks must lie in the image made
+        // here, p_filesize bytes, as the blocks are bounded by it. A dylib's segments after the first are copied, not
+        // decoded, and UPX seeks to where the headers place them and writes, past p_filesize included: those grow
+        // the image, under this tool's limit, as they do UPX's file.
+        let decoded = self.image.filetype == MH_DYLIB ? Array(segments.first { $0.filesize != 0 }.map { [$0] } ?? []) : segments
+        guard decoded.allSatisfy({ $0.filesize == 0 || ($0.fileoff <= fileSize && $0.filesize <= fileSize - $0.fileoff) }) else {
             throw UnpackError.cantUnpack("file header corrupted")
         }
 
@@ -900,7 +904,8 @@ struct PackMach {
 
     /**
      A dylib's segments after the first, which UPX leaves uncompressed where they lie in the packed image: copied to
-     where the original headers place them, the pointer in `__mod_init_func`, which UPX points at its loader, restored.
+     where the original headers place them, the image grown to hold one placed past its end, as UPX's output file
+     grows, the pointer in `__mod_init_func`, which UPX points at its loader, restored.
      */
     private func copyDylibSegments(_ commands: [Command], into output: inout Data) throws {
         // UPX compares the two headers' ncmds, the packed file's and the original's.
@@ -928,13 +933,14 @@ struct PackMach {
                 }
                 data.replaceSubrange(data.startIndex + at ..< data.startIndex + at + 4, with: original)
             }
-            guard
-                sc.fileoff >= 0,
-                rc.filesize <= output.count - sc.fileoff
-            else {
-                throw UnpackError.cantUnpack("file header corrupted")
+            let end = sc.fileoff.addingReportingOverflow(rc.filesize)
+            guard sc.fileoff >= 0, !end.overflow, end.partialValue <= Self.maxSize else {
+                throw UnpackError.imageTooLarge(size: end.overflow ? Int.max : end.partialValue, limit: Self.maxSize)
             }
-            output.replaceSubrange(sc.fileoff ..< sc.fileoff + rc.filesize, with: data)
+            if end.partialValue > output.count {
+                output.append(Data(count: end.partialValue - output.count))
+            }
+            output.replaceSubrange(sc.fileoff ..< end.partialValue, with: data)
         }
     }
 
