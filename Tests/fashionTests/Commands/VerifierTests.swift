@@ -1248,6 +1248,50 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     The index as the kernel walks it, where Security stops at the first alternate missing: a code directory whose
+     identifier offset is 0, or whose magic is not a directory's, which Security loads and the kernel refuses the
+     signature for; a directory past a gap in the alternates, which Security never loads and the kernel counts, two
+     of one hash type then; and an entry at offset 0.
+     */
+    func testTheIndexAsTheKernelWalksItIsNamed() throws {
+        let directory = try self.directory("index")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let sha256 = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+        /// `program` with a signature of `blobs`, each at its slot, placed in order; a nil blob is an entry at offset 0.
+        func embedded(_ blobs: [(slot: UInt32, blob: Data?)]) -> Data {
+            var blob = Data()
+            var offset = 12 + 8 * blobs.count
+            [0xfade_0cc0, UInt32(offset + blobs.reduce(0) { $0 + ($1.blob?.count ?? 0) }), UInt32(blobs.count)].forEach { blob.appendUInt32BE($0) }
+            for entry in blobs {
+                blob.appendUInt32BE(entry.slot); blob.appendUInt32BE(entry.blob == nil ? 0 : UInt32(offset))
+                offset += entry.blob?.count ?? 0
+            }
+            blobs.forEach { blob += $0.blob ?? Data() }
+            var signed = program
+            signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
+            return signed
+        }
+        var unnamed = sha256
+        unnamed.store(UInt32(0).bigEndian, at: 20)
+        XCTAssertEqual(try self.verify(embedded([(0, unnamed), (2, requirements)]), "unnamed", in: directory).lines, [": the code directory the index places at slot 0x0 is one the kernel refuses the signature for: its identifier offset is 0"])
+        var mismagic = sha256
+        mismagic.store(UInt32(0xfade_0c03).bigEndian, at: 0)
+        XCTAssertEqual(try self.verify(embedded([(0, mismagic), (2, requirements)]), "mismagic", in: directory).lines, [": the code directory the index places at slot 0x0 is one the kernel refuses the signature for: its magic is 0xfade0c03, not 0xfade0c02"])
+        XCTAssertEqual(try self.verify(embedded([(0, sha256), (2, requirements), (0x1001, sha256)]), "gap", in: directory).lines, [
+            ": the code directory the index places at slot 0x1001 lies past a gap in the alternates: Security never loads it, the kernel validates it and may read the signature by it",
+            ": 2 code directories of hash type sha256 in the index, which the kernel refuses the signature for",
+        ])
+        XCTAssertEqual(try self.verify(embedded([(0, sha256), (2, requirements), (0x1000, nil)]), "zero", in: directory).lines, [": the code directory the index places at slot 0x1000 at offset 0, the superblob's own header, which the kernel refuses the signature for"])
+    }
+
+    /**
      A load command shorter than its structure is named, where it fed no rule: an `LC_SEGMENT_64` without room for its
      header, after `__LINKEDIT` where the parser stops checking, and an `LC_BUILD_VERSION` without room for its tool
      count, which does not make the image undated.

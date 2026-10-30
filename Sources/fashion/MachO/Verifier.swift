@@ -1228,6 +1228,8 @@ struct MachOVerifier {
             }
         }
 
+        found += Self.kernelIndexAnomalies(of: superblob)
+
         let sealed: [(slot: UInt32, what: String, blob: Data?)] = [
             (Self.csslotRequirements, "the requirements blob", MachO.component(Self.csslotRequirements, of: superblob)),
             (Self.csslotEntitlements, "the entitlements blob", MachO.component(Self.csslotEntitlements, of: superblob)),
@@ -1324,6 +1326,86 @@ struct MachOVerifier {
     /// The magic a blob of the superblob begins with, big-endian; nil for one too short to hold its header.
     private static func magic(of blob: Data) -> UInt32? {
         blob.count >= 8 ? blob.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) } : nil
+    }
+
+    /// The big-endian word `offset` bytes into `data`, as the signature's blobs lay their fields.
+    private static func bigEndian(_ data: Data, at offset: Int) -> UInt32 {
+        data.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self)) }
+    }
+
+    /**
+     The index as the kernel's `cs_validate_csblob` walks it, where Security reads slot 0 and the alternates up to the
+     first one missing: every entry of a code directory's slot, 0 or 0x1000 to 0x1004, wherever it lies, goes through
+     `cs_validate_codedirectory` and refuses the signature whole when it fails, as do two directories of one hash
+     type, two entries of an entitlements slot, and an entry at offset 0, the superblob's own header. A directory
+     past a gap in the alternates is one Security never loads and the kernel ranks with the others. The checks of a
+     directory are those Security does not make: its length, its magic, its identifier's offset, its linkage.
+     */
+    private static func kernelIndexAnomalies(of superblob: Data) -> [String] {
+        var found: [String] = []
+        var hashTypes: [UInt8: Int] = [:]
+        var entitlements: [UInt32: Int] = [:]
+        // The slots Security loads a directory from: 0, then the alternates up to the first one missing.
+        var loaded: Set<UInt32> = [0]
+        while MachO.component(0x1000 + UInt32(loaded.count - 1), of: superblob) != nil {
+            loaded.insert(0x1000 + UInt32(loaded.count - 1))
+        }
+        for entry in 0 ..< Int(Self.bigEndian(superblob, at: 8)) {
+            let slot = Self.bigEndian(superblob, at: 12 + 8 * entry)
+            let offset = Int(Self.bigEndian(superblob, at: 12 + 8 * entry + 4))
+            if [Self.csslotEntitlements, Self.csslotDEREntitlements].contains(slot) {
+                entitlements[slot, default: 0] += 1
+            }
+            guard slot == 0 || (0x1000 ... 0x1004).contains(slot) else {
+                continue
+            }
+            let name = "the code directory the index places at slot \(slot.hex)"
+            guard offset != 0 else {
+                found.append("\(name) at offset 0, the superblob's own header, which the kernel refuses the signature for")
+                continue
+            }
+            // The index was checked as `signingData` checks it: the blob lies inside, header included.
+            let blob = Data(superblob.bytes(in: offset ..< offset + Int(Self.bigEndian(superblob, at: offset + 4))))
+            if let refusal = Self.kernelRefusal(of: blob) {
+                found.append("\(name) is one the kernel refuses the signature for: \(refusal)")
+                continue
+            }
+            hashTypes[blob[37], default: 0] += 1
+            if !loaded.contains(slot) {
+                found.append("\(name) lies past a gap in the alternates: Security never loads it, the kernel validates it and may read the signature by it")
+            }
+        }
+        for (type, count) in hashTypes.sorted(by: { $0.key < $1.key }) where count > 1 {
+            found.append("\(count) code directories of hash type \(HashType(rawValue: type)?.name ?? "\(type)") in the index, which the kernel refuses the signature for")
+        }
+        for (slot, count) in entitlements.sorted(by: { $0.key < $1.key }) where count > 1 {
+            found.append("\(count) entries for slot \(slot) in the index, which the kernel refuses the signature for")
+        }
+        return found
+    }
+
+    /// Why the kernel's `cs_validate_codedirectory` refuses `blob`, a code directory from its start, among the checks
+    /// Security does not make; nil when it passes them.
+    private static func kernelRefusal(of blob: Data) -> String? {
+        let length = blob.count
+        guard length >= 0x70 else {
+            return "it is \(length.hex) bytes, shorter than the 0x70 the kernel reads"
+        }
+        let magic = Self.bigEndian(blob, at: 0)
+        guard magic == 0xfade_0c02 else {
+            return "its magic is \(magic.hex), not 0xfade0c02"
+        }
+        let identOffset = Self.bigEndian(blob, at: 20)
+        guard identOffset != 0, Int(identOffset) < length else {
+            return identOffset == 0 ? "its identifier offset is 0" : "its identifier offset \(identOffset.hex) is past its end"
+        }
+        if Self.bigEndian(blob, at: 8) > 0x205ff, blob[0x60] != 0 {
+            let (linkageOffset, linkageSize) = (Self.bigEndian(blob, at: 0x64), Self.bigEndian(blob, at: 0x68))
+            if UInt64(linkageOffset) + UInt64(linkageSize) > UInt64(length) {
+                return "its linkage at \(linkageOffset.hex) with size \(linkageSize.hex) lies past its end"
+            }
+        }
+        return nil
     }
 
     /// Whether two entitlement values are one, compared as the property list classes compare them.
