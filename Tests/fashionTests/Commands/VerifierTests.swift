@@ -827,6 +827,22 @@ final class VerifierTests: XCTestCase {
             ": the entitlements and their DER form, which AMFI reads, disagree on com.apple.security.get-task-allow, com.apple.security.get-task-allox",
             ": entitled to opt out of hardening: com.apple.security.cs.disable-library-validation",
         ])
+
+        // The kernel takes each entitlements blob under its magic alone, and refuses the signature otherwise: what
+        // the blob says is granted to nothing, and verify says nothing of it.
+        let xml = try XCTUnwrap(MachO.component(5, of: superblob))
+        var mismagic = weakened
+        mismagic.store(UInt32(0xfade_7170).bigEndian, at: entitledSignature.offset + xml.startIndex)
+        XCTAssertEqual(try self.verify(mismagic, "mismagic", in: directory).lines, [
+            ": the entitlements blob does not hash to its slot in the sha256 code directory",
+            ": the entitlements blob's magic is 0xfade7170, not 0xfade7171, which the kernel refuses the signature for; codesign warns of an invalid entitlements blob",
+        ])
+        var misder = weakened
+        misder.store(UInt32(0xfade_7173).bigEndian, at: entitledSignature.offset + der.startIndex)
+        XCTAssertEqual(try self.verify(misder, "misder", in: directory).lines, [
+            ": the DER entitlements blob does not hash to its slot in the sha256 code directory",
+            ": the DER entitlements blob's magic is 0xfade7173, not 0xfade7172, which the kernel refuses the signature for",
+        ])
     }
 
     /**
@@ -877,6 +893,11 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try self.verify(embedded(altered, signatureBlob), "altered", in: directory).lines, [": the CMS signature does not verify over the sha256 code directory"])
 
         XCTAssertEqual(try self.verify(embedded(adhoc, signatureBlob), "ad hoc", in: directory).lines, [": a CMS signature behind a code directory flagged ad hoc, which Security ignores"])
+        // Security takes the CMS blob under its wrapper's magic alone.
+        var mismagic = embedded(directoryBlob, signatureBlob)
+        let wrapper = try XCTUnwrap(mismagic.range(of: Data([0xfa, 0xde, 0x0b, 0x01])))
+        mismagic.store(UInt32(0xfade_0b02).bigEndian, at: wrapper.lowerBound)
+        XCTAssertEqual(try self.verify(mismagic, "mismagic", in: directory).lines, [": the CMS blob's magic is 0xfade0b02, not 0xfade0b01, which Security refuses the signature for"])
 
         let plist = directory / "entitlements.plist"
         try """

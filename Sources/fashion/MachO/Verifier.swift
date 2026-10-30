@@ -1253,16 +1253,25 @@ struct MachOVerifier {
 
         // The entitlements: the XML plist, and its DER form, which codesign writes beside it since macOS 12 and
         // which AMFI and the kernel read where it is. The verdicts below are read from the DER form when there is one.
+        // The kernel's cs_validate_csblob takes each under its magic alone, 0xfade7171 and 0xfade7172, and refuses
+        // the signature whole otherwise: what such a blob says is granted to nothing.
         var entitled: [String: Any]?
+        var refusedBlob = false
         if let entitlements = MachO.component(Self.csslotEntitlements, of: superblob) {
-            if let plist = try? PropertyListSerialization.propertyList(from: Data(entitlements.dropFirst(8)), format: nil) as? [String: Any] {
+            if let magic = Self.magic(of: entitlements), magic != 0xfade_7171 {
+                found.append("the entitlements blob's magic is \(magic.hex), not 0xfade7171, which the kernel refuses the signature for; codesign warns of an invalid entitlements blob")
+                refusedBlob = true
+            } else if let plist = try? PropertyListSerialization.propertyList(from: Data(entitlements.dropFirst(8)), format: nil) as? [String: Any] {
                 entitled = plist
             } else {
                 found.append("entitlements that do not parse as a plist")
             }
         }
         if let der = MachO.component(Self.csslotDEREntitlements, of: superblob) {
-            if let decoded = DEREntitlements.decode(Data(der.dropFirst(8))) {
+            if let magic = Self.magic(of: der), magic != 0xfade_7172 {
+                found.append("the DER entitlements blob's magic is \(magic.hex), not 0xfade7172, which the kernel refuses the signature for")
+                refusedBlob = true
+            } else if let decoded = DEREntitlements.decode(Data(der.dropFirst(8))) {
                 if let plist = entitled {
                     let differing = Set(plist.keys).union(decoded.keys).filter { !Self.equal(plist[$0], decoded[$0]) }
                     if !differing.isEmpty {
@@ -1274,6 +1283,9 @@ struct MachOVerifier {
                 found.append("DER entitlements that do not decode")
             }
         }
+        if refusedBlob {
+            entitled = nil
+        }
         if let entitled {
             let weakening = Self.weakeningEntitlements.filter { (entitled[$0] as? Bool) == true }
             if !weakening.isEmpty {
@@ -1281,20 +1293,37 @@ struct MachOVerifier {
             }
         }
 
-        // The CMS blob, past its 8-byte header; Security reads it only behind a directory not flagged ad hoc.
-        let cms = MachO.component(Self.csslotSignature, of: superblob).map { Data($0.dropFirst(8)) } ?? Data()
+        // The CMS blob, past its 8-byte header, which Security takes under its magic alone (`EmbeddedSignatureBlob`,
+        // errSecCSSignatureInvalid otherwise), and reads only behind a directory not flagged ad hoc.
+        // codesign writes an empty wrapper, its header alone, behind an ad-hoc signature.
+        let wrapped = MachO.component(Self.csslotSignature, of: superblob).flatMap { $0.count > 8 ? $0 : nil }
+        var cms = Data()
+        if let wrapped {
+            if let magic = Self.magic(of: wrapped), magic != 0xfade_0b01 {
+                found.append("the CMS blob's magic is \(magic.hex), not 0xfade0b01, which Security refuses the signature for")
+            } else {
+                cms = Data(wrapped.dropFirst(8))
+            }
+        }
         if best.flags & Self.csAdhoc != 0 {
-            if !cms.isEmpty {
+            if wrapped != nil {
                 found.append("a CMS signature behind a code directory flagged ad hoc, which Security ignores")
             }
             found += self.restrictedEntitlements(entitled, signedBy: nil)
-        } else if cms.isEmpty {
+        } else if wrapped == nil {
             found.append("no CMS signature behind a code directory not flagged ad hoc")
+            found += self.restrictedEntitlements(entitled, signedBy: nil)
+        } else if cms.isEmpty {
             found += self.restrictedEntitlements(entitled, signedBy: nil)
         } else {
             found += self.signerAnomalies(cms, over: primary, team: best, entitled: entitled)
         }
         return found
+    }
+
+    /// The magic a blob of the superblob begins with, big-endian; nil for one too short to hold its header.
+    private static func magic(of blob: Data) -> UInt32? {
+        blob.count >= 8 ? blob.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) } : nil
     }
 
     /// Whether two entitlement values are one, compared as the property list classes compare them.
