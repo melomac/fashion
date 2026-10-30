@@ -720,6 +720,23 @@ final class MachOTests: XCTestCase {
     }
 
     /**
+     A command shorter than its own 8-byte header, which the kernel and dyld refuse, is no command: Security would
+     read the next header inside it, and a table of 4-byte commands would make twice the commands of its bytes.
+     */
+    func testSliceRejectsCommandShorterThanItsHeader() {
+        var short = Data()
+        short.appendUInt32(UInt32(LC_UUID))
+        short.appendUInt32(4)
+        short.append(Data(count: 8))
+        let data = self.thinHeader(ncmds: 1, sizeofcmds: 16, commands: short)
+
+        XCTAssertThrowsError(try MachO(data)) { error in
+            XCTAssertEqual(error as? ParserError, .invalidLoadCommandTable(size: 16, fileSize: data.count))
+        }
+        XCTAssertEqual(MachO.loadCommands(data: data).count, 0)
+    }
+
+    /**
      A command header declaring cmdsize 0 can never advance the parser; it must not count as a command.
      */
     func testSliceRejectsZeroSizeCommand() {

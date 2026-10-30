@@ -445,12 +445,17 @@ struct MachO {
 
     /**
      The load commands as Security walks them: `MachO::MachO` reads the `sizeofcmds`-byte table, which must hold at least
-     one command header, and `MachOBase::nextCommand` steps by each `cmdsize`, which must not be zero, until it reaches the
-     end of the table; a command it steps onto must fit the table. `ncmds` plays no part. The walk is valid when it ends
-     there, and stops at the first command that breaks those rules otherwise.
+     one command header, and `MachOBase::nextCommand` steps by each `cmdsize` until it reaches the end of the table; a
+     command it steps onto must fit the table. `ncmds` plays no part. The walk is valid when it ends there, and stops at
+     the first command that breaks those rules otherwise.
 
-     `nextCommand` never checks the first command, which Security then reads past its copy of the table when it overruns
-     it: that is refused here too.
+     A `cmdsize` must hold the command's own header, as the kernel (`parse_machfile`) and dyld (`forEachLoadCommand`)
+     require, where Security refuses zero alone and reads the next header inside a shorter command: a table of 4-byte
+     commands would make twice the commands of its bytes. `nextCommand` never checks the first command, which Security
+     then reads past its copy of the table when it overruns it: that is refused here too.
+
+     The table is walked once to count its commands and judge it, then read into an array of that size: a crafted
+     table of millions of commands costs their array and nothing more.
      */
     private static func parseLoadCommands(data: Data, headerSize: Int, sizeofcmds: Int, swap: Bool) -> (commands: [LoadCommand], valid: Bool) {
         let end = headerSize + sizeofcmds
@@ -469,26 +474,37 @@ struct MachO {
             }
         }
 
-        var commands: [LoadCommand] = []
+        var count = 0
+        var valid = false
         var offset = headerSize
         while true {
-            let (cmd, size) = header(at: offset)
+            let size = header(at: offset).size
             guard
-                size > 0,
+                size >= MemoryLayout<load_command>.size,
                 size <= end - offset
             else {
-                return (commands, false)
+                break
             }
-            commands.append(LoadCommand(cmd: cmd, data: data.bytes(in: offset ..< offset + size)))
-
+            count += 1
             offset += size
-            guard offset < end else {
-                return (commands, true)
+            if offset == end {
+                valid = true
+                break
             }
             guard offset + MemoryLayout<load_command>.size <= end else {
-                return (commands, false)
+                break
             }
         }
+
+        var commands: [LoadCommand] = []
+        commands.reserveCapacity(count)
+        offset = headerSize
+        for _ in 0 ..< count {
+            let (cmd, size) = header(at: offset)
+            commands.append(LoadCommand(cmd: cmd, data: data.bytes(in: offset ..< offset + size)))
+            offset += size
+        }
+        return (commands, valid)
     }
 
     /// `<mach-o/loader.h>` filetypes, numbered from `MH_OBJECT` (1).
