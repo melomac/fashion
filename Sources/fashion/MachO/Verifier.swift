@@ -955,6 +955,9 @@ struct MachOVerifier {
         guard let primary = directories.first else {
             return found + ["a signature Security loads no code directory from"]
         }
+        // Security verifies the CMS blob over the first directory, slot 0, and reads the flags and the team from the
+        // best of them, the kernel's choice too (`SecStaticCode::codeDirectory`, `bestHashOf`).
+        let best = directories.max { $0.hashType.rank < $1.hashType.rank } ?? primary
 
         for (directory, checked) in try zip(directories, image.validateExecutables(directories)) {
             let type = "the \(directory.hashType.name) code directory"
@@ -999,22 +1002,39 @@ struct MachOVerifier {
             }
         }
 
+        // The entitlements: the XML plist, and its DER form, which codesign writes beside it since macOS 12 and
+        // which AMFI and the kernel read where it is. The verdicts below are read from the DER form when there is one.
         var entitled: [String: Any]?
         if let entitlements = MachO.component(Self.csslotEntitlements, of: superblob) {
             if let plist = try? PropertyListSerialization.propertyList(from: Data(entitlements.dropFirst(8)), format: nil) as? [String: Any] {
                 entitled = plist
-                let weakening = Self.weakeningEntitlements.filter { (plist[$0] as? Bool) == true }
-                if !weakening.isEmpty {
-                    found.append("entitled to opt out of hardening: \(weakening.joined(separator: ", "))")
-                }
             } else {
                 found.append("entitlements that do not parse as a plist")
+            }
+        }
+        if let der = MachO.component(Self.csslotDEREntitlements, of: superblob) {
+            if let decoded = DEREntitlements.decode(Data(der.dropFirst(8))) {
+                if let plist = entitled {
+                    let differing = Set(plist.keys).union(decoded.keys).filter { !Self.equal(plist[$0], decoded[$0]) }
+                    if !differing.isEmpty {
+                        found.append("the entitlements and their DER form, which AMFI reads, disagree on \(differing.sorted().map(Self.shown).joined(separator: ", "))")
+                    }
+                }
+                entitled = decoded
+            } else {
+                found.append("DER entitlements that do not decode")
+            }
+        }
+        if let entitled {
+            let weakening = Self.weakeningEntitlements.filter { (entitled[$0] as? Bool) == true }
+            if !weakening.isEmpty {
+                found.append("entitled to opt out of hardening: \(weakening.joined(separator: ", "))")
             }
         }
 
         // The CMS blob, past its 8-byte header; Security reads it only behind a directory not flagged ad hoc.
         let cms = MachO.component(Self.csslotSignature, of: superblob).map { Data($0.dropFirst(8)) } ?? Data()
-        if primary.flags & Self.csAdhoc != 0 {
+        if best.flags & Self.csAdhoc != 0 {
             if !cms.isEmpty {
                 found.append("a CMS signature behind a code directory flagged ad hoc, which Security ignores")
             }
@@ -1023,17 +1043,27 @@ struct MachOVerifier {
             found.append("no CMS signature behind a code directory not flagged ad hoc")
             found += self.restrictedEntitlements(entitled, signedBy: nil)
         } else {
-            found += self.signerAnomalies(cms, over: primary, entitled: entitled)
+            found += self.signerAnomalies(cms, over: primary, team: best, entitled: entitled)
         }
         return found
     }
 
+    /// Whether two entitlement values are one, compared as the property list classes compare them.
+    private static func equal(_ lhs: Any?, _ rhs: Any?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): true
+        case let (lhs?, rhs?): (lhs as AnyObject).isEqual(rhs)
+        default: false
+        }
+    }
+
     /**
      Who signed, as `Signer` verifies and classes the CMS blob over `primary`: what fails to verify, in one line, else
-     the chain Gatekeeper refuses or runs without a ticket, and a team identifier the certificate does not bear, which
-     Security refuses (`errSecCSBadTeamIdentifier`); then the entitlements AMFI reserves, given who signed.
+     the chain Gatekeeper refuses or runs without a ticket, and a team identifier in `best`, the directory Security
+     reads it from, that the certificate does not bear, which Security refuses (`errSecCSBadTeamIdentifier`); then the
+     entitlements AMFI reserves, given who signed.
      */
-    private func signerAnomalies(_ cms: Data, over primary: EmbeddedCodeDirectory, entitled: [String: Any]?) -> [String] {
+    private func signerAnomalies(_ cms: Data, over primary: EmbeddedCodeDirectory, team best: EmbeddedCodeDirectory, entitled: [String: Any]?) -> [String] {
         let type = "the \(primary.hashType.name) code directory"
         let signer: Signer
         do {
@@ -1043,29 +1073,30 @@ struct MachOVerifier {
             case .undecodable: "a CMS signature Security cannot decode"
             case .unsigned: "a CMS signature with no signer"
             case .invalidSignature: "the CMS signature does not verify over \(type)"
-            case let .chain(reason): "the signer's certificate chain does not build: \(reason)"
+            case let .chain(reason): "the signer's certificate chain does not build: \(Self.shown(reason))"
             }
             return [line] + self.restrictedEntitlements(entitled, signedBy: nil)
         }
 
         var found: [String] = []
+        let summary = Self.shown(signer.summary)
         switch signer.kind {
         case .apple, .appStore:
             break
         case .developerID:
             if signer.isLegacyDeveloperID, let timestamp = signer.timestamp {
-                found.append("a Developer ID signature by \(signer.summary) timestamped \(timestamp.formatted(.iso8601.year().month().day())), before notarization: Gatekeeper runs it without a ticket")
+                found.append("a Developer ID signature by \(summary) timestamped \(timestamp.formatted(.iso8601.year().month().day())), before notarization: Gatekeeper runs it without a ticket")
             }
         case .development:
-            found.append("signed with a development or App Store submission certificate, \(signer.summary), which Gatekeeper refuses")
+            found.append("signed with a development or App Store submission certificate, \(summary), which Gatekeeper refuses")
         case .otherApple:
-            found.append("signed with an Apple-issued certificate not for code, \(signer.summary), which AMFI refuses")
+            found.append("signed with an Apple-issued certificate not for code, \(summary), which AMFI refuses")
         case .outsideApple:
-            found.append("signed outside Apple's chains by \(signer.summary), which Gatekeeper refuses")
+            found.append("signed outside Apple's chains by \(summary), which Gatekeeper refuses")
         }
         // Security checks the team only behind the certificates Apple issues to developers (`isAppleDeveloperCert`).
-        if [.developerID, .development].contains(signer.kind), let team = primary.teamID, let unit = signer.teamID, team != unit {
-            found.append("team identifier \(team) in \(type) is not the certificate's \(unit), which Security refuses")
+        if [.developerID, .development].contains(signer.kind), let team = best.teamID, let unit = signer.teamID, team != unit {
+            found.append("team identifier \(Self.shown(team)) in the \(best.hashType.name) code directory is not the certificate's \(Self.shown(unit)), which Security refuses")
         }
         return found + self.restrictedEntitlements(entitled, signedBy: signer.kind)
     }

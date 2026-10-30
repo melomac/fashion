@@ -1,3 +1,4 @@
+import CryptoKit
 @testable import fashion
 import MachO
 import XCTest
@@ -683,11 +684,34 @@ final class VerifierTests: XCTestCase {
         try self.program("x86_64", in: directory).write(to: entitled)
         _ = try codesign(["-s", "-", "--entitlements", plist.path, entitled.path])
         let weakened = try Data(contentsOf: entitled)
-        XCTAssertEqual(try self.verify(weakened, "weakened", in: directory).lines, [": entitled to opt out of hardening: com.apple.security.cs.disable-library-validation, com.apple.security.get-task-allow"])
+        let hardening = ": entitled to opt out of hardening: com.apple.security.cs.disable-library-validation, com.apple.security.get-task-allow"
+        XCTAssertEqual(try self.verify(weakened, "weakened", in: directory).lines, [hardening])
+        // The XML broken, the DER form, which codesign wrote beside it, still says what the code is entitled to.
         var tampered = weakened
         let flag = try XCTUnwrap(weakened.range(of: Data("<true/>".utf8)))
         tampered.replaceSubrange(flag, with: "<trux/>".utf8)
-        XCTAssertEqual(try self.verify(tampered, "tampered", in: directory).lines, [": the entitlements blob does not hash to its slot in the sha256 code directory", ": entitlements that do not parse as a plist"])
+        XCTAssertEqual(try self.verify(tampered, "tampered", in: directory).lines, [": the entitlements blob does not hash to its slot in the sha256 code directory", ": entitlements that do not parse as a plist", hardening])
+
+        // The DER form changed to disagree with the XML and sealed again: the disagreement is named, and the verdict
+        // is the DER form's, which AMFI reads.
+        let entitledImage = try XCTUnwrap(MachO(File(data: weakened)))
+        let entitledSignature = try XCTUnwrap(entitledImage.findCodeSignature())
+        let superblob = try entitledImage.signingData(entitledSignature)
+        let der = try XCTUnwrap(MachO.component(7, of: superblob), "codesign wrote no DER entitlements")
+        let codeDirectory = try XCTUnwrap(MachO.component(0, of: superblob))
+        var disagreeing = weakened
+        let key = try XCTUnwrap(der.range(of: Data("com.apple.security.get-task-allow".utf8)))
+        disagreeing[entitledSignature.offset + key.upperBound - 1] = UInt8(ascii: "x")
+        let hashOffset = Int(UInt32(bigEndian: codeDirectory.load(UInt32.self, at: 16))) // from the slice's start
+        let hashSize = Int(codeDirectory[codeDirectory.startIndex + 36])
+        XCTAssertGreaterThanOrEqual(UInt32(bigEndian: codeDirectory.load(UInt32.self, at: 24)), 7, "the directory seals the DER slot")
+        let slot = entitledSignature.offset + codeDirectory.startIndex + hashOffset - 7 * hashSize
+        let resealed = SHA256.hash(data: disagreeing[entitledSignature.offset + der.startIndex ..< entitledSignature.offset + der.endIndex])
+        disagreeing.replaceSubrange(slot ..< slot + hashSize, with: Data(resealed).prefix(hashSize))
+        XCTAssertEqual(try self.verify(disagreeing, "disagreeing", in: directory).lines, [
+            ": the entitlements and their DER form, which AMFI reads, disagree on com.apple.security.get-task-allow, com.apple.security.get-task-allox",
+            ": entitled to opt out of hardening: com.apple.security.cs.disable-library-validation",
+        ])
     }
 
     /**
@@ -870,5 +894,64 @@ final class VerifierTests: XCTestCase {
         [UInt32(LC_ID_DYLIB), UInt32(24 + install.count), 24, 0, 0x10000, 0x10000].forEach { id.appendUInt32($0) }
         id.append(install)
         XCTAssertEqual(try self.verify(self.appending(id, to: program), "id", in: directory).lines, [": LC_ID_DYLIB \"/tmp/evil\\n.dylib\" in an MH_EXECUTE"])
+    }
+
+    /**
+     Security verifies the CMS blob over the first code directory, slot 0, and reads the ad-hoc flag from the best of
+     them, the kernel's choice: with two directories that disagree on the flag, the CMS blob is ignored behind a best
+     directory flagged ad hoc though slot 0 is not, and verified behind one that is not though slot 0 is.
+     */
+    func testTheAdHocFlagIsReadFromTheDirectoryTheKernelTakes() throws {
+        let directory = try self.directory("best")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--digest-algorithm=sha1,sha256", "--signature-size", "12000", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let sha1 = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        let sha256 = try Data(XCTUnwrap(MachO.component(0x1000, of: superblob)))
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+        XCTAssertEqual([sha1[37], sha256[37]], [1, 2], "SHA-1 in slot 0, SHA-256 in the first alternate slot")
+        func cleared(_ blob: Data) -> Data {
+            var blob = blob
+            blob.store((UInt32(bigEndian: blob.load(UInt32.self, at: 12)) & ~UInt32(2)).bigEndian, at: 12) // CS_ADHOC out
+            return blob
+        }
+
+        let (configuration, key, certificate) = (directory / "certificate.cnf", directory / "key.pem", directory / "certificate.pem")
+        try "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n[dn]\nCN = Fashion Self\n[ext]\nextendedKeyUsage = codeSigning\nkeyUsage = digitalSignature\nbasicConstraints = CA:FALSE\n".write(to: configuration, atomically: true, encoding: .utf8)
+        try XCTSkipUnless(execute("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key.path, "-out", certificate.path, "-config", configuration.path, "-days", "30"]), "cannot make a certificate")
+        /// A CMS blob, wrapped as the signature holds it, signed over `content` by the certificate.
+        func cms(over content: Data, _ name: String) throws -> Data {
+            let (input, output) = (directory / "\(name).bin", directory / "\(name).der")
+            try content.write(to: input)
+            try XCTSkipUnless(execute("/usr/bin/openssl", ["cms", "-sign", "-binary", "-in", input.path, "-signer", certificate.path, "-inkey", key.path, "-outform", "DER", "-out", output.path]), "cannot sign")
+            let cms = try Data(contentsOf: output)
+            var wrapped = Data()
+            [0xfade_0b01, UInt32(8 + cms.count)].forEach { wrapped.appendUInt32BE($0) }
+            return wrapped + cms
+        }
+        /// The program with a superblob of `blobs`, each in its slot, in the room the signature left.
+        func embedded(_ blobs: [(slot: UInt32, blob: Data)]) -> Data {
+            var blob = Data()
+            var offset = 12 + 8 * blobs.count
+            [0xfade_0cc0, UInt32(offset + blobs.reduce(0) { $0 + $1.blob.count }), UInt32(blobs.count)].forEach { blob.appendUInt32BE($0) }
+            for entry in blobs {
+                blob.appendUInt32BE(entry.slot); blob.appendUInt32BE(UInt32(offset))
+                offset += entry.blob.count
+            }
+            blobs.forEach { blob += $0.blob }
+            XCTAssertLessThanOrEqual(blob.count, signature.size)
+            var signed = program
+            signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
+            return signed
+        }
+
+        let ignored = try embedded([(0, cleared(sha1)), (2, requirements), (0x1000, sha256), (0x10000, cms(over: cleared(sha1), "ignored"))])
+        XCTAssertEqual(try self.verify(ignored, "ignored", in: directory).lines, [": a CMS signature behind a code directory flagged ad hoc, which Security ignores"])
+        let refused = try embedded([(0, sha1), (2, requirements), (0x1000, cleared(sha256)), (0x10000, cms(over: sha1, "refused"))])
+        XCTAssertEqual(try self.verify(refused, "refused", in: directory).lines, [": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
     }
 }

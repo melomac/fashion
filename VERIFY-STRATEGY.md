@@ -180,7 +180,9 @@ left out, with the reason.
 | Ad hoc (`CS_ADHOC`), linker signed (`CS_LINKER_SIGNED`), no hardened runtime | not named: every arm64 build has one, and Apple's own platform binaries lack the hardened-runtime flag | |
 | A CMS blob missing behind a directory not flagged ad hoc | identity: an `ldid`-style signature | |
 | A CMS blob behind a directory flagged ad hoc | Security `verifySignature` returns before reading it: "ad-hoc signed code is considered validly signed by definition" | |
+| The ad-hoc flag and the team identifier read from the best code directory, the kernel's choice, where the CMS blob is verified over slot 0: two directories that disagree are read as Security reads them | Security `codeDirectory()` picks by `hashPriorities`, `teamID()` reads it, the detached content is the slot-0 blob (26B118 `validateDirectory`) | |
 | Entitlements that opt out of hardening: `com.apple.security.cs.allow-unsigned-executable-memory`, `allow-jit`, `allow-dyld-environment-variables`, `disable-library-validation`, `disable-executable-page-protection`, `get-task-allow`, `cs.debugger` | identity | ran, "valid on disk" |
+| The DER entitlements (slot 7) decoded, the entitlement verdicts read from them, and a disagreement with the XML form named by key | AMFI and the kernel read the DER form, which codesign writes beside the XML since macOS 12; `verify` decodes CoreFoundation's DER plist | |
 
 ### The signer
 
