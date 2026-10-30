@@ -652,54 +652,74 @@ struct MachOVerifier {
      */
     private func sectionAnomalies() -> [String] {
         var found: [String] = []
+        // The lines of a few sections, or pairs of them, named one by one, the rest counted: a crafted table holds
+        // hundreds of thousands of sections, each tripping every rule.
+        var (named, more, moreLines) = (0, 0, 0)
+        func add(_ lines: [String]) {
+            guard !lines.isEmpty else {
+                return
+            }
+            if named < Self.listed {
+                found += lines
+                named += 1
+            } else {
+                more += 1
+                moreLines += lines.count
+            }
+        }
         let recent = self.isDyldManaged && (self.sdkMajor ?? 0) >= 27
         for segment in self.segments {
             for section in segment.sections {
+                var lines: [String] = []
                 let what = "section \(segment.name),\(section.name)"
                 let end = section.addr.addingReportingOverflow(section.size)
                 if segment.vmsize == 0 {
                     // Not mapped: its addresses are the linker's own business.
                 } else if end.overflow || section.addr < segment.vmaddr || end.partialValue > segment.vmend {
-                    found.append("\(what)'s address range \(section.addr.hex)...\(end.partialValue.hex) lies outside its segment's \(segment.vmaddr.hex)...\(segment.vmend.hex)")
+                    lines.append("\(what)'s address range \(section.addr.hex)...\(end.partialValue.hex) lies outside its segment's \(segment.vmaddr.hex)...\(segment.vmend.hex)")
                 } else if section.hasContent, segment.filesize > 0 {
                     // Where the address lays it may lie past 2^64, in a segment that maps most of the address space.
                     let expected = segment.fileoff.addingReportingOverflow(section.addr - segment.vmaddr)
                     if expected.overflow || UInt64(section.offset) != expected.partialValue {
-                        found.append("\(what)'s file offset \(section.offset.hex) is not where its address lays it, \(expected.overflow ? "past 2^64" : expected.partialValue.hex)")
+                        lines.append("\(what)'s file offset \(section.offset.hex) is not where its address lays it, \(expected.overflow ? "past 2^64" : expected.partialValue.hex)")
                     }
                 }
                 if section.hasContent, section.fileend < UInt64(section.offset) || section.fileend > UInt64(self.image.length) {
-                    found.append("\(what) at \(section.offset.hex) with size \(section.size.hex) lies outside the image")
+                    lines.append("\(what) at \(section.offset.hex) with size \(section.size.hex) lies outside the image")
                 }
                 if segment.vmsize > 0, section.addr % (1 << UInt64(min(section.align, 63))) != 0 {
-                    found.append("\(what)'s address \(section.addr.hex) is not aligned to the 2^\(section.align) its align field declares")
+                    lines.append("\(what)'s address \(section.addr.hex) is not aligned to the 2^\(section.align) its align field declares")
                 }
                 if section.offset == 0, section.hasContent {
-                    found.append("\(what) has no file offset though it is not zero-fill")
+                    lines.append("\(what) has no file offset though it is not zero-fill")
                 }
                 // The live dyld's validSemanticsSingleSegment, of an image it manages built against the SDK of
                 // fall 2026 or later: a zero-fill section has no file offset, and every section a name.
                 if recent {
                     if section.isZeroFill, section.offset != 0 {
-                        found.append("\(what) is zero-fill with a file offset \(section.offset.hex), which dyld refuses")
+                        lines.append("\(what) is zero-fill with a file offset \(section.offset.hex), which dyld refuses")
                     }
                     if section.field.prefix(16).allSatisfy({ $0 == 0 }) {
-                        found.append("a section of \(segment.name) with an empty name, which dyld refuses")
+                        lines.append("a section of \(segment.name) with an empty name, which dyld refuses")
                     }
                 }
                 if section.segname != segment.name {
-                    found.append("\(what) carries the segment name \(section.segname)")
+                    lines.append("\(what) carries the segment name \(section.segname)")
                 }
-                found += Self.nameAnomalies(section.field.prefix(16), of: what)
+                lines += Self.nameAnomalies(section.field.prefix(16), of: what)
+                add(lines)
             }
             let placed = segment.sections.filter(\.hasContent).sorted { $0.offset < $1.offset }
             for (before, after) in zip(placed, placed.dropFirst()) where UInt64(after.offset) < before.fileend {
-                found.append("sections \(segment.name),\(before.name) and \(segment.name),\(after.name) overlap in the file")
+                add(["sections \(segment.name),\(before.name) and \(segment.name),\(after.name) overlap in the file"])
             }
             let mapped = segment.sections.filter { $0.size > 0 }.sorted { $0.addr < $1.addr }
             for (before, after) in zip(mapped, mapped.dropFirst()) where after.addr < before.addr &+ before.size {
-                found.append("sections \(segment.name),\(before.name) and \(segment.name),\(after.name) overlap in memory")
+                add(["sections \(segment.name),\(before.name) and \(segment.name),\(after.name) overlap in memory"])
             }
+        }
+        if more > 0 {
+            found.append("and \(String(moreLines, pluralizing: "more line")) on \(String(more, pluralizing: "more section")) or pair of them")
         }
         return found
     }

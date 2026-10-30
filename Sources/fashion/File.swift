@@ -130,7 +130,10 @@ final class File {
      architecture from the descriptor at its offset. Throws when the file no longer holds the range.
      */
     func stream(_ range: Range<Int>, _ consume: (UnsafeRawBufferPointer) throws -> Void) throws {
-        var chunk = try Self.mapped(Self.chunkSize)
+        // A buffer the range's size up to a chunk, mapped from the kernel past a page as `read` maps one: a gap of a
+        // few bytes between tables, which verify reads by the hundred thousand, costs no map.
+        let count = min(Self.chunkSize, range.count)
+        var chunk = count > Int(getpagesize()) ? try Self.mapped(count) : Data(count: count)
         try chunk.withUnsafeMutableBytes { buffer in
             var offset = range.lowerBound
             while offset < range.upperBound {

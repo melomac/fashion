@@ -109,15 +109,26 @@ enum DER {
         return encoded + content
     }
 
+    /// The calendar a GeneralizedTime counts in: Gregorian, UTC.
+    private static let utc: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }()
+
     /// A GeneralizedTime's date, `YYYYMMDDHHMMSSZ`, a fraction of a second dropped; nil for any other form.
     static func generalizedTime(_ content: Data) -> Date? {
-        guard let string = String(data: content, encoding: .utf8), string.hasSuffix("Z"), string.count >= 15 else {
+        guard content.count >= 15, content.last == UInt8(ascii: "Z"), content.prefix(14).allSatisfy({ (0x30 ... 0x39).contains($0) }) else {
             return nil
         }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyyMMddHHmmss"
-        return formatter.date(from: String(string.prefix(14)))
+        let digits = content.prefix(14).map { Int($0 - 0x30) }
+        func field(_ start: Int, _ count: Int) -> Int {
+            digits[start ..< start + count].reduce(0) { $0 * 10 + $1 }
+        }
+        let components = DateComponents(year: field(0, 4), month: field(4, 2), day: field(6, 2), hour: field(8, 2), minute: field(10, 2), second: field(12, 2))
+        guard components.isValidDate(in: self.utc) else {
+            return nil
+        }
+        return self.utc.date(from: components)
     }
 }

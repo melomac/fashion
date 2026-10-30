@@ -1620,6 +1620,35 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     The sections' lines name a few sections and count the rest, as the table's lines do: twelve sections laid outside
+     their segment name eight and count the other four, where a crafted table of a million would be six lines each.
+     */
+    func testTheSectionLinesAreCounted() throws {
+        let directory = try self.directory("sections")
+        let count = 12
+        var segment = Data()
+        [UInt32(LC_SEGMENT_64), UInt32(72 + count * 80)].forEach { segment.appendUInt32($0) }
+        segment.append(Data("__TEXT".utf8)); segment.append(Data(count: 10))
+        [UInt64(0x1000), 0x1000, 0, 0x1000].forEach { segment.appendUInt64($0) }
+        [UInt32(5), 5, UInt32(count), 0].forEach { segment.appendUInt32($0) }
+        for index in 0 ..< count {
+            let name = Data("__s\(index)".utf8)
+            segment.append(name); segment.append(Data(count: 16 - name.count))
+            segment.append(Data("__TEXT".utf8)); segment.append(Data(count: 10))
+            [UInt64(0x5000_0000) + UInt64(index) * 0x10, 0x10].forEach { segment.appendUInt64($0) }
+            [UInt32(0x100 + index * 0x10), 0, 0, 0, 0, 0, 0, 0].forEach { segment.appendUInt32($0) } // offset, align, reloff, nreloc, flags, reserved
+        }
+        let file = try self.crafted("sections", in: directory, size: 0x1000, segments: [], commands: [segment])
+        self.assertVerify(file.path, (0 ..< 8).map { "\(file.path): section __TEXT,__s\($0)'s address range \((0x5000_0000 + $0 * 0x10).hex)...\((0x5000_0010 + $0 * 0x10).hex) lies outside its segment's 0x1000...0x2000" } + [
+            "\(file.path): and 4 more lines on 4 more sections or pair of them",
+            "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
+            "\(file.path): no LC_UUID",
+            "\(file.path): no MH_DYLDLINK: a static executable",
+            "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+        ])
+    }
+
+    /**
      The table's lines name a few commands and count the rest: a crafted table of ten odd-sized commands, sized other
      than their structure, names eight of each and counts the others, where a line each would be millions. Hidden
      from the loaders, the ten are named by the hiding line alone: no loader reads them, so none of their rules apply.
