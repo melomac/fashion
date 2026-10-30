@@ -5,7 +5,8 @@
 #
 #   Fuzz/fuzz.sh build            build .build/fuzz/bin/fuzz-* from Sources/, Bridges/ and the harnesses here
 #   Fuzz/fuzz.sh seed             seed .build/fuzz/corpus/* from the test fixtures, /bin/ls and a XAR
-#   Fuzz/fuzz.sh run [seconds] [harness...]   run the harnesses named, all by default, for that long (900), FUZZ_JOBS workers each (2)
+#   Fuzz/fuzz.sh run [seconds] [harness...]   run the harnesses named, all by default, for that long (900) each, FUZZ_JOBS
+#                                             workers each (2), as many binaries at a time as the cores hold
 #   Fuzz/fuzz.sh summary [harness...]         what the last run did: runs, executions per second, coverage, artifacts
 #
 set -eo pipefail
@@ -17,8 +18,11 @@ bin=$build/bin
 corpus=$build/corpus
 artifacts=$build/artifacts
 logs=$build/logs
-# Workers per binary: every binary run gets this many, so their product should stay near the cores (run warns past it).
+# Workers per binary, and the cores they run on: run launches cores / jobs binaries at a time and the rest when those
+# finish, so the workers never outnumber the cores (libFuzzer's -timeout counts wall time: oversubscribed, a slow unit
+# passes for a hung one). FUZZ_CORES=$(sysctl -n hw.perflevel0.logicalcpu) keeps the efficiency cores out of it.
 jobs=${FUZZ_JOBS:-2}
+cores=${FUZZ_CORES:-$(sysctl -n hw.ncpu)}
 
 # The harnesses: each is Fuzz/<name>.swift, with an LLVMFuzzerTestOneInput, and fuzzes corpus/<name>.
 harnesses="macho cdhash xar symhash diff bytehash unpack decompress verify signer"
@@ -326,13 +330,22 @@ run() {
     if [ ! -d "$corpus" ]; then
         seed
     fi
-    # libFuzzer's -timeout counts wall time: oversubscribed, a slow unit passes for a hung one.
-    count=$(binaries "$@" | wc -l | tr -d ' ')
-    if [ $((jobs * count)) -gt "$(sysctl -n hw.ncpu)" ]; then
-        echo "warning: $jobs workers on each of $count binaries, $((jobs * count)) on $(sysctl -n hw.ncpu) cores; set FUZZ_JOBS lower, or name fewer harnesses" >&2
+    # The binaries go in waves of cores / jobs, each wave waited for before the next starts, so that the workers never
+    # outnumber the cores; a jobs past the cores gets a binary at a time, and a warning.
+    local slots=$((cores / jobs)) count waves started=0
+    if [ "$slots" -lt 1 ]; then
+        slots=1
+        echo "warning: $jobs workers on $cores cores; set FUZZ_JOBS lower" >&2
     fi
-    echo "Running ${*:-every harness} for $seconds seconds with $jobs workers each..."
+    count=$(binaries "$@" | wc -l | tr -d ' ')
+    waves=$(((count + slots - 1) / slots))
+    echo "Running ${*:-every harness}: $count binaries, $slots at a time with $jobs workers each, $seconds seconds a wave, $waves waves..."
     for name in $(binaries "$@"); do
+        if [ "$started" -eq "$slots" ]; then
+            wait
+            started=0
+        fi
+        started=$((started + 1))
         harness=${name#fuzz-}
         harness=${harness%-segments}
         dict=()

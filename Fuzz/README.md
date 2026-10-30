@@ -26,16 +26,19 @@ Package.swift): `fuzz-macho`, `fuzz-cdhash`, `fuzz-unpack` and `fuzz-verify` wit
 ## Running
 
 ```sh
-make fuzz-run                 # build, seed, then fuzz every harness for 15 minutes, 2 workers each
+make fuzz-run                 # build, seed, then fuzz every harness for 15 minutes each, 2 workers each
 make fuzz-run FUZZ_SECONDS=60 # shorter
 make fuzz-run FUZZ_HARNESSES="unpack diff" FUZZ_JOBS=8   # some harnesses, more workers each
+make fuzz-run FUZZ_CORES=4    # fewer binaries at a time
 make fuzz                     # build only
 make fuzz-seed                # seed only
 ```
 
-`fuzz.sh` does the work and documents its steps. `FUZZ_JOBS` sets the workers per binary, every binary run getting that
-many, so their product should stay near the cores: libFuzzer's 10-second limit counts wall time, and on an
-oversubscribed machine a slow unit passes for a hung one; the script warns past it. Everything lands under
+`fuzz.sh` does the work and documents its steps. `FUZZ_JOBS` sets the workers per binary and `FUZZ_CORES` the cores
+they share (all of them by default): the binaries run as many at a time as the cores hold, the rest once those finish,
+so a run of every harness takes a few times `FUZZ_SECONDS`, fewer on a machine with more cores. The workers never
+outnumber the cores because libFuzzer's 10-second limit counts wall time, and on an oversubscribed machine a slow unit
+passes for a hung one. Everything lands under
 `.build/fuzz/`, which git ignores: the binaries in `bin/`, the corpora in `corpus/<harness>/`, each run's logs in
 `logs/<binary>/` and what it found in `artifacts/<binary>/`. `Fuzz/fuzz.sh summary` reads the last run's logs back.
 
