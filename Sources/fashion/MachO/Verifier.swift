@@ -280,6 +280,38 @@ struct MachOVerifier {
 
     private static let versionMinCommands = [LC_VERSION_MIN_MACOSX, LC_VERSION_MIN_IPHONEOS, LC_VERSION_MIN_TVOS, LC_VERSION_MIN_WATCHOS].map { UInt32(bitPattern: $0) }
 
+    /// The commands of a fixed structure, and its size, which dyld's `validStructureLoadCommands` asks exactly
+    /// ("load command size wrong") where the parser asks that the structure fit.
+    private static let fixedSizes: [UInt32: Int] = Dictionary(uniqueKeysWithValues: [
+        (LC_SYMTAB, MemoryLayout<symtab_command>.size),
+        (LC_DYSYMTAB, MemoryLayout<dysymtab_command>.size),
+        (LC_UUID, MemoryLayout<uuid_command>.size),
+        (LC_DYLD_INFO, MemoryLayout<dyld_info_command>.size),
+        (LC_ENCRYPTION_INFO, MemoryLayout<encryption_info_command>.size),
+        (LC_ENCRYPTION_INFO_64, MemoryLayout<encryption_info_command_64>.size),
+        (LC_ROUTINES, MemoryLayout<routines_command>.size),
+        (LC_ROUTINES_64, MemoryLayout<routines_command_64>.size),
+        (LC_SOURCE_VERSION, MemoryLayout<source_version_command>.size),
+        (LC_VERSION_MIN_MACOSX, MemoryLayout<version_min_command>.size),
+        (LC_VERSION_MIN_IPHONEOS, MemoryLayout<version_min_command>.size),
+        (LC_VERSION_MIN_TVOS, MemoryLayout<version_min_command>.size),
+        (LC_VERSION_MIN_WATCHOS, MemoryLayout<version_min_command>.size),
+        (LC_CODE_SIGNATURE, MemoryLayout<linkedit_data_command>.size),
+        (LC_SEGMENT_SPLIT_INFO, MemoryLayout<linkedit_data_command>.size),
+        (LC_FUNCTION_STARTS, MemoryLayout<linkedit_data_command>.size),
+        (LC_DATA_IN_CODE, MemoryLayout<linkedit_data_command>.size),
+        (LC_DYLIB_CODE_SIGN_DRS, MemoryLayout<linkedit_data_command>.size),
+        (LC_LINKER_OPTIMIZATION_HINT, MemoryLayout<linkedit_data_command>.size),
+        (LC_ATOM_INFO, MemoryLayout<linkedit_data_command>.size),
+        (LC_FUNCTION_VARIANTS, MemoryLayout<linkedit_data_command>.size),
+        (LC_FUNCTION_VARIANT_FIXUPS, MemoryLayout<linkedit_data_command>.size),
+    ].map { (UInt32(bitPattern: $0.0), $0.1) } + [
+        (LC_DYLD_INFO_ONLY, MemoryLayout<dyld_info_command>.size),
+        (LC_MAIN, MemoryLayout<entry_point_command>.size),
+        (LC_DYLD_EXPORTS_TRIE, MemoryLayout<linkedit_data_command>.size),
+        (LC_DYLD_CHAINED_FIXUPS, MemoryLayout<linkedit_data_command>.size),
+    ])
+
     /// How many commands a line names one by one, where a crafted table holds millions: the rest are counted.
     private static let listed = 8
 
@@ -287,10 +319,13 @@ struct MachOVerifier {
      The table as the loaders walk it: `ncmds` commands, where Security and this parser walk `sizeofcmds` (the
      kernel's `parse_machfile`, dyld's `forEachLoadCommand`), so `ncmds` short of the table hides commands from the
      loaders alone; a command size that is not pointer sized, which dyld's `Header::validLoadCommands` refuses (the
-     published `forEachLoadCommand` asks a multiple of 4 alone); a segment command of the other ABI, which the kernel
-     refuses; a
-     command the loaders take once, twice; `LC_DYSYMTAB` without `LC_SYMTAB`, two fixup encodings, two entry points,
-     two version commands in an executable; a filetype no loader knows; the header field no loader reads.
+     published `forEachLoadCommand` asks a multiple of 4 alone); a command dyld does not know, flagged `LC_REQ_DYLD`,
+     where one without the flag is skipped; a command of a fixed structure sized otherwise, whose extra bytes no
+     loader reads, or `LC_BUILD_VERSION` sized other than its tools; a segment command of the other ABI, which the
+     kernel refuses; a command the loaders take once, twice; `LC_DYSYMTAB` without `LC_SYMTAB`, or partitioning the
+     symbol table other than as the linker lays it, locals, then externals, then undefined; `LC_LINKER_OPTION`
+     outside an object; two fixup encodings, two entry points, two version commands in an executable; a filetype no
+     loader knows; the header field no loader reads.
      */
     private func tableAnomalies() -> [String] {
         let image = self.image
@@ -311,6 +346,30 @@ struct MachOVerifier {
         }
         if unaligned.count > Self.listed {
             found.append("and \(String(unaligned.count - Self.listed, pluralizing: "more load command")) with a size that is not a multiple of \(pointer)")
+        }
+
+        // dyld's validStructureLoadCommands: a command it does not know is skipped, unless the command is flagged
+        // LC_REQ_DYLD ("unknown required load command"); a command of a fixed structure is exactly that size ("load
+        // command size wrong"), as is LC_BUILD_VERSION for its tools: the bytes past the structure are a place no
+        // loader reads, as the header pad is.
+        let required = image.loadCommands.enumerated().filter { !$0.element.isKnown && $0.element.cmd & UInt32(LC_REQ_DYLD) != 0 }
+        for (index, command) in required.prefix(Self.listed) {
+            found.append("load command #\(index), \(command.name), is unknown and flagged LC_REQ_DYLD, which dyld refuses")
+        }
+        if required.count > Self.listed {
+            found.append("and \(String(required.count - Self.listed, pluralizing: "more unknown load command")) flagged LC_REQ_DYLD")
+        }
+        let sized = image.loadCommands.enumerated().compactMap { index, command -> (Int, MachO.LoadCommand, Int)? in
+            let expected = command.cmd == UInt32(LC_BUILD_VERSION)
+                ? command.payload(as: build_version_command.self).map { MemoryLayout<build_version_command>.size + Int(image.sw($0.ntools)) * MemoryLayout<build_tool_version>.size }
+                : Self.fixedSizes[command.cmd]
+            return expected.flatMap { $0 == command.data.count ? nil : (index, command, $0) }
+        }
+        for (index, command, expected) in sized.prefix(Self.listed) {
+            found.append("load command #\(index), \(command.name), is \(command.data.count.hex) bytes, not its structure's \(expected.hex), which dyld refuses")
+        }
+        if sized.count > Self.listed {
+            found.append("and \(String(sized.count - Self.listed, pluralizing: "more load command")) sized other than their structure")
         }
         let counts = Dictionary(image.loadCommands.map { ($0.cmd, 1) }, uniquingKeysWith: +)
         if image.is64, counts[UInt32(LC_SEGMENT)] != nil {
@@ -340,6 +399,24 @@ struct MachOVerifier {
         }
         if counts[UInt32(LC_DYSYMTAB)] != nil, counts[UInt32(LC_SYMTAB)] == nil {
             found.append("LC_DYSYMTAB without LC_SYMTAB")
+        }
+        // dyld's parse_dysymtab_command: the symbol table partitioned as the linker lays it, the locals first, the
+        // externals where they end, the undefined where those end ("ilocalsym != 0", "iextdefsym != nlocalsym",
+        // "iundefsym != iextdefsym+nextdefsym"), which an edit of the table after linking breaks.
+        if let dysymtab = image.findCommand(UInt32(LC_DYSYMTAB))?.payload(as: dysymtab_command.self) {
+            let (ilocalsym, nlocalsym, iextdefsym, nextdefsym, iundefsym) = (image.sw(dysymtab.ilocalsym), image.sw(dysymtab.nlocalsym), image.sw(dysymtab.iextdefsym), image.sw(dysymtab.nextdefsym), image.sw(dysymtab.iundefsym))
+            if ilocalsym != 0 {
+                found.append("LC_DYSYMTAB's local symbols start at \(ilocalsym), not 0, which dyld refuses")
+            }
+            if iextdefsym != nlocalsym {
+                found.append("LC_DYSYMTAB's external symbols start at \(iextdefsym), not after the \(String(Int(nlocalsym), pluralizing: "local")) at \(ilocalsym), which dyld refuses")
+            }
+            if iundefsym != iextdefsym &+ nextdefsym {
+                found.append("LC_DYSYMTAB's undefined symbols start at \(iundefsym), not after the \(String(Int(nextdefsym), pluralizing: "external")) at \(iextdefsym), which dyld refuses")
+            }
+        }
+        if image.filetype != UInt32(MH_OBJECT), counts[UInt32(LC_LINKER_OPTION)] != nil {
+            found.append("LC_LINKER_OPTION in an \(image.filetypeName), which dyld refuses: the compiler writes it in an object, for the linker")
         }
         if counts[UInt32(LC_DYLD_INFO)] != nil || counts[LC_DYLD_INFO_ONLY] != nil, counts[LC_DYLD_CHAINED_FIXUPS] != nil {
             found.append("LC_DYLD_INFO and LC_DYLD_CHAINED_FIXUPS both")
@@ -1221,8 +1298,10 @@ struct MachOVerifier {
     /**
      What is odd about the image against its entry in a universal file's table, as dyld's `isValidSlice` reads them:
      the entry naming another cputype or cpusubtype than the image's header, and the image off its own page, 16 KiB
-     for the arm64 family and 4 KiB otherwise. An image no loader maps says nothing of its page, as a Metal library
-     packs its GPU slices as it likes.
+     for the arm64 family and armv7k, as `lipo` has it (`uses16KPages`), 4 KiB otherwise. An image no loader maps
+     says nothing of its page, as a Metal library packs its GPU slices as it likes; `lipo` asks the page of what dyld
+     maps alone, a dylib, a bundle, a dynamically linked executable, where the kernel maps a static executable's
+     slice too.
      */
     func anomalies(slice arch: Universal.Architecture) -> [String] {
         let image = self.image
@@ -1231,7 +1310,7 @@ struct MachOVerifier {
         if image.cpuType != arch.cpuType || image.cpuSubtype & mask != arch.cpuSubtype & mask {
             found.append("slice \(arch.name) by the table is \(Universal.archName(cpuType: image.cpuType, cpuSubtype: image.cpuSubtype)) by its header")
         }
-        let page = [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(image.cpuType) ? 0x4000 : 0x1000
+        let page = image.uses16KPages ? 0x4000 : 0x1000
         if !self.isUnmapped, arch.offset % page != 0 {
             found.append("slice \(arch.name) at \(arch.offset.hex) is not page aligned")
         }

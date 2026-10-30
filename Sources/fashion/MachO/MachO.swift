@@ -432,6 +432,23 @@ struct MachO {
         Self.filetypeNames.indices.contains(Int(self.filetype) - 1) ? Self.filetypeNames[Int(self.filetype) - 1] : "unknown(\(self.filetype))"
     }
 
+    // MARK: - Page
+
+    /**
+     Whether the loaders map the image on 16 KiB pages, as `lipo` has it (`uses16KPages`): the arm64 family, and
+     armv7k, the 32-bit ARM of watchOS; 4 KiB for every other architecture.
+     */
+    var uses16KPages: Bool {
+        switch self.cpuType {
+        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32:
+            true
+        case CPU_TYPE_ARM:
+            self.cpuSubtype & ~cpu_subtype_t(bitPattern: CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM_V7K
+        default:
+            false
+        }
+    }
+
     // MARK: - Private
 
     /**
@@ -616,6 +633,11 @@ extension MachO.LoadCommand {
 
     static func name(_ cmd: UInt32) -> String {
         self.names[cmd] ?? "load command \(cmd.hex)"
+    }
+
+    /// Whether `<mach-o/loader.h>` defines the command.
+    var isKnown: Bool {
+        Self.names[self.cmd] != nil
     }
 
     private static let names: [UInt32: String] = Dictionary(uniqueKeysWithValues: [

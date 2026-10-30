@@ -392,9 +392,11 @@ final class VerifierTests: XCTestCase {
 
     /**
      The table as the loaders walk it: `ncmds` short of the commands the table holds names the commands hidden from
-     the loaders, one more than it holds is named too, as is a command size that is not a multiple of 4, a 32-bit
-     `LC_SEGMENT` in a 64-bit image, the reserved field holding anything, a command the loaders take once twice,
-     `LC_DYSYMTAB` without `LC_SYMTAB`, and `LC_MAIN` beside `LC_UNIXTHREAD`.
+     the loaders, one more than it holds is named too, as is a command size that is not a multiple of 4, a command of
+     a fixed structure sized otherwise, a command dyld does not know when it is flagged `LC_REQ_DYLD` and not when it
+     is not, a 32-bit `LC_SEGMENT` in a 64-bit image, the reserved field holding anything, a command the loaders take
+     once twice, `LC_DYSYMTAB` without `LC_SYMTAB` or partitioning the symbol table other than as the linker lays it,
+     `LC_LINKER_OPTION` in an executable, and `LC_MAIN` beside `LC_UNIXTHREAD`.
      */
     func testTheTableAsTheLoadersWalkItIsNamed() throws {
         let directory = try self.directory("table")
@@ -408,11 +410,43 @@ final class VerifierTests: XCTestCase {
         long.store(UInt32(commands.count + 1), at: 16)
         XCTAssertEqual(try self.verify(long, "long", in: directory).lines, [": ncmds \(commands.count + 1) exceeds the \(commands.count) commands the table holds"])
 
+        // The last command clang's linker writes is LC_DATA_IN_CODE, 16 bytes of fixed structure.
         var odd = program
         let last = try XCTUnwrap(commands.last)
         odd.store(UInt32(last.data.count + 2), at: last.data.startIndex + 4)
         try odd.store(UInt32(XCTUnwrap(MachO(File(data: program))).sizeofcmds + 2), at: 20)
-        XCTAssertEqual(try self.verify(odd, "odd", in: directory).lines, [": load command #\(commands.count - 1), \(last.name), has a size \((last.data.count + 2).hex) that is not a multiple of 8"])
+        XCTAssertEqual(try self.verify(odd, "odd", in: directory).lines, [
+            ": load command #\(commands.count - 1), \(last.name), has a size \((last.data.count + 2).hex) that is not a multiple of 8",
+            ": load command #\(commands.count - 1), \(last.name), is \((last.data.count + 2).hex) bytes, not its structure's \(last.data.count.hex), which dyld refuses",
+        ])
+        var padded = program
+        padded.store(UInt32(last.data.count + 8), at: last.data.startIndex + 4)
+        try padded.store(UInt32(XCTUnwrap(MachO(File(data: program))).sizeofcmds + 8), at: 20)
+        XCTAssertEqual(try self.verify(padded, "padded", in: directory).lines, [": load command #\(commands.count - 1), \(last.name), is \((last.data.count + 8).hex) bytes, not its structure's \(last.data.count.hex), which dyld refuses"])
+
+        var unknown = Data()
+        [UInt32(0x7f), 16, 0, 0].forEach { unknown.appendUInt32($0) }
+        XCTAssertEqual(try self.verify(self.appending(unknown, to: program), "unknown", in: directory).lines, [])
+        var required = Data()
+        [UInt32(LC_REQ_DYLD) | 0x7f, 16, 0, 0].forEach { required.appendUInt32($0) }
+        XCTAssertEqual(try self.verify(self.appending(required, to: program), "required", in: directory).lines, [": load command #\(commands.count), load command 0x8000007f, is unknown and flagged LC_REQ_DYLD, which dyld refuses"])
+
+        let dysymtab = try self.command(UInt32(LC_DYSYMTAB), in: program)
+        let fields = try dysymtab.load(dysymtab_command.self)
+        var locals = program
+        locals.store(UInt32(1), at: dysymtab.data.startIndex + 8)
+        XCTAssertEqual(try self.verify(locals, "locals", in: directory).lines, [": LC_DYSYMTAB's local symbols start at 1, not 0, which dyld refuses"])
+        var externals = program
+        externals.store(fields.iextdefsym + 1, at: dysymtab.data.startIndex + 16)
+        XCTAssertEqual(try self.verify(externals, "externals", in: directory).lines, [
+            ": LC_DYSYMTAB's external symbols start at \(fields.iextdefsym + 1), not after the \(String(Int(fields.nlocalsym), pluralizing: "local")) at 0, which dyld refuses",
+            ": LC_DYSYMTAB's undefined symbols start at \(fields.iundefsym), not after the \(String(Int(fields.nextdefsym), pluralizing: "external")) at \(fields.iextdefsym + 1), which dyld refuses",
+        ])
+
+        var option = Data()
+        [UInt32(LC_LINKER_OPTION), 16, 1].forEach { option.appendUInt32($0) }
+        option.append(Data("-lz".utf8)); option.append(Data(count: 1))
+        XCTAssertEqual(try self.verify(self.appending(option, to: program), "option", in: directory).lines, [": LC_LINKER_OPTION in an MH_EXECUTE, which dyld refuses: the compiler writes it in an object, for the linker"])
 
         var segment32 = Data()
         segment32.appendUInt32(UInt32(LC_SEGMENT)); segment32.appendUInt32(56); segment32.append(Data(count: 48))
@@ -861,6 +895,12 @@ final class VerifierTests: XCTestCase {
         var declared = makeUniversal([X86])
         declared.store(UInt32(14).bigEndian, at: 8 + 16)
         XCTAssertEqual(try self.verify(declared, "declared", in: directory).lines, [": slice x86_64 at 0x1000 is not aligned to the 2^14 its entry declares"])
+        // armv7k is mapped on 16 KiB pages too: the x86_64 program's header relabeled, laid on a 4 KiB page.
+        var v7k = x86
+        v7k.store(CPU_TYPE_ARM, at: 4)
+        v7k.store(CPU_SUBTYPE_ARM_V7K, at: 8)
+        XCTAssertEqual(try self.verify(makeUniversal([(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7K, v7k, 12)]), "v7k", in: directory).lines, [": slice armv7k at 0x1000 is not page aligned"])
+        XCTAssertEqual(try self.verify(makeUniversal([(CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7K, v7k, 14)]), "v7k16", in: directory).lines, [])
     }
 
     /**
@@ -1069,7 +1109,8 @@ final class VerifierTests: XCTestCase {
 
     /**
      The table's lines name a few commands and count the rest: a crafted table of ten odd-sized commands, hidden from
-     the loaders too, names eight of each and counts the others, where a line each would be millions.
+     the loaders too and sized other than their structure, names eight of each and counts the others, where a line
+     each would be millions.
      */
     func testTheTableLinesAreCounted() throws {
         let directory = try self.directory("counted")
@@ -1083,6 +1124,8 @@ final class VerifierTests: XCTestCase {
             "\(file.path): ncmds 1 hides the last 10 commands of 11 from the loaders: \(Array(repeating: "LC_UUID", count: 8).joined(separator: ", "))…",
         ] + (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, has a size 0x1c that is not a multiple of 8" } + [
             "\(file.path): and 2 more load commands with a size that is not a multiple of 8",
+        ] + (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, is 0x1c bytes, not its structure's 0x18, which dyld refuses" } + [
+            "\(file.path): and 2 more load commands sized other than their structure",
             "\(file.path): 10 LC_UUID commands",
             "\(file.path): __TEXT has no sections",
             "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
