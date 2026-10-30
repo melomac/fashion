@@ -19,8 +19,11 @@ private extension Data {
 }
 
 final class VerifierTests: XCTestCase {
+    /// The package root, which the fixtures are kept under whatever the test process's working directory.
+    private static let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+
     private func directory(_ name: String) throws -> URL {
-        let url = URL(fileURLWithPath: ".build/tests/VerifierTests/\(name)")
+        let url = Self.root / ".build/tests/VerifierTests/\(name)"
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url

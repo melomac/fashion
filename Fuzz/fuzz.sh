@@ -190,7 +190,11 @@ build() {
 
 seed() {
     local harness
-    rm -rf "${build:?}/fixtures" "${corpus:?}"
+    # Seeded beside its name and moved into it once whole, so that a seeding that fails leaves no corpus for a later
+    # run to take as complete.
+    local final=$corpus
+    corpus=$final.seeding
+    rm -rf "${build:?}/fixtures" "$corpus" "${final:?}"
     mkdir -p "$build/fixtures"
     for harness in $harnesses; do
         mkdir -p "$corpus/$harness"
@@ -338,11 +342,20 @@ PYTHON
     for harness in $harnesses; do
         echo "$corpus/$harness: $(ls "$corpus/$harness" | wc -l | tr -d ' ') files"
     done
+    mv "$corpus" "$final"
+    corpus=$final
 }
 
 run() {
-    local seconds=${1:-900} name harness dict count
-    shift || true
+    # The seconds are optional, a number; what follows names the harnesses.
+    local seconds=900 name harness dict count
+    case ${1:-} in
+        '' | *[!0-9]*) ;;
+        *)
+            seconds=$1
+            shift
+            ;;
+    esac
     for harness in "$@"; do
         case " $harnesses " in
             *" $harness "*) ;;

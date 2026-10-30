@@ -194,19 +194,20 @@ final class MatchingTests: XCTestCase {
     }
 
     /**
-     Use real TLSH hashes from different data
+     A TLSH distance past the threshold is no match: two digests some distance apart match under that distance and
+     under none smaller, the distance read from a match under a threshold no distance exceeds.
      */
     func testTLSHNoMatchAboveThreshold() throws {
         let data1 = Data((0 ..< 1024).map { UInt8($0 % 256) })
         let data2 = Data((0 ..< 1024).map { UInt8(($0 * 7 + 13) % 256) })
         let h1 = try XCTUnwrap(ByteHash.tlsh.digest(data1))
         let h2 = try XCTUnwrap(ByteHash.tlsh.digest(data2))
-
-        let result = Targets([h2]).match(h1, algorithm: .tlsh, threshold: 0)
-        // Distance is likely > 0, so threshold 0 means only exact distance 0 matches
-        if result != nil {
-            XCTAssertEqual(result?.score, 0)
-        }
+        XCTAssertNotEqual(h1, h2)
+        let distance = try XCTUnwrap(Targets([h2]).match(h1, algorithm: .tlsh, threshold: Int.max)?.score)
+        XCTAssertGreaterThan(distance, 0)
+        XCTAssertNil(Targets([h2]).match(h1, algorithm: .tlsh, threshold: distance - 1))
+        XCTAssertNil(Targets([h2]).match(h1, algorithm: .tlsh, threshold: 0))
+        XCTAssertEqual(Targets([h2]).match(h1, algorithm: .tlsh, threshold: distance)?.score, distance)
     }
 
     // MARK: - CDHash prefix matching
