@@ -1600,6 +1600,80 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     The signature's lines, each from an entitled ad hoc signature taken apart and put back with one thing wrong: a
+     code directory not flagged ad hoc with no CMS signature behind it, as ldid signs; the requirements blob's
+     special slot left zero; the entitlements and their DER form sealed by the directory but missing from the
+     signature; a DER form that does not decode, which AMFI refuses; a code limit past the image; a scattered
+     directory; a page size the kernel does not take.
+     */
+    func testTheSignatureLinesAreNamed() throws {
+        let directory = try self.directory("signature-lines")
+        let plist = directory / "entitlements.plist"
+        try Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict><key>com.apple.security.get-task-allow</key><true/></dict></plist>
+        """.utf8).write(to: plist)
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", "--entitlements", plist.path, signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let (cd, requirements, entitlements, der) = try (Data(XCTUnwrap(MachO.component(0, of: superblob))), Data(XCTUnwrap(MachO.component(2, of: superblob))), Data(XCTUnwrap(MachO.component(5, of: superblob))), Data(XCTUnwrap(MachO.component(7, of: superblob))))
+        let baseline = [": entitled to opt out of hardening: com.apple.security.get-task-allow"]
+        XCTAssertEqual(try self.verify(program, "baseline", in: directory).lines, baseline)
+        /// `program` with a signature of `blobs`.
+        func embedded(_ blobs: [(slot: UInt32, blob: Data?)]) -> Data {
+            let blob = Self.superblob(blobs)
+            var signed = program
+            signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
+            return signed
+        }
+        /// `cd` with `value` stored big-endian at `offset`.
+        func edited<T: FixedWidthInteger>(_ value: T, at offset: Int) -> Data {
+            var edited = cd
+            edited.store(value.bigEndian, at: offset)
+            return edited
+        }
+        let hashOffset = Int(UInt32(bigEndian: cd.load(UInt32.self, at: 16)))
+        let nCodeSlots = Int(UInt32(bigEndian: cd.load(UInt32.self, at: 28)))
+        /// `cd` covering `codeLimit` in pages of 2^`pageSizeLog`, its code slots, which end the blob, as many as
+        /// Security wants of it, the new ones zero.
+        func reshaped(codeLimit: Int, pageSizeLog: UInt8 = 12) -> Data {
+            let slots = ((codeLimit - 1) >> Int(pageSizeLog)) + 1
+            var edited = cd.prefix(hashOffset + 32 * min(slots, nCodeSlots)) + Data(count: 32 * max(0, slots - nCodeSlots))
+            edited.store(UInt32(edited.count).bigEndian, at: 4)
+            edited.store(UInt32(slots).bigEndian, at: 28)
+            edited.store(UInt32(codeLimit).bigEndian, at: 32)
+            edited[39] = pageSizeLog
+            return edited
+        }
+        /// `cd` with a scatter vector at its end, one run of its pages from the start, then the zero entry.
+        var scattered = cd
+        scattered.store(UInt32(cd.count).bigEndian, at: 44)
+        scattered.appendUInt32BE(UInt32(nCodeSlots)); scattered.appendUInt32BE(0); scattered.appendUInt64(0); scattered.appendUInt64(0)
+        scattered.append(Data(count: 24))
+        scattered.store(UInt32(scattered.count).bigEndian, at: 4)
+        var unsealed = cd
+        unsealed.replaceSubrange(hashOffset - 64 ..< hashOffset - 32, with: Data(count: 32))
+        var undecodable = der
+        undecodable.replaceSubrange(8 ..< der.count, with: Data(repeating: 0xff, count: der.count - 8))
+        let type = "the sha256 code directory"
+        for (name, blobs, expected) in [
+            ("ldid", [(0, edited(UInt32(bigEndian: cd.load(UInt32.self, at: 12)) & ~UInt32(2), at: 12)), (2, requirements), (5, entitlements), (7, der)], baseline + [": no CMS signature behind a code directory not flagged ad hoc"]),
+            ("unsealed", [(0, unsealed), (2, requirements), (5, entitlements), (7, der)], [": the requirements blob is not sealed by \(type)"] + baseline),
+            ("missing", [(0, cd), (2, requirements)], [": \(type) seals the entitlements blob, which the signature does not hold", ": \(type) seals the DER entitlements blob, which the signature does not hold"]),
+            ("undecodable", [(0, cd), (2, requirements), (5, entitlements), (7, undecodable)], [": the DER entitlements blob does not hash to its slot in \(type)", ": DER entitlements holding no element to read, which AMFI refuses the code for"]),
+            ("past", [(0, reshaped(codeLimit: program.count + 0x100)), (2, requirements), (5, entitlements), (7, der)], [": \(type) covers \((program.count + 0x100).hex) bytes, past the image's \(program.count.hex)"] + baseline),
+            ("scattered", [(0, scattered), (2, requirements), (5, entitlements), (7, der)], [": \(type) is scattered, which is not checked here"] + baseline),
+            ("pagesize", [(0, reshaped(codeLimit: Int(cd.load(UInt32.self, at: 32).bigEndian), pageSizeLog: 13)), (2, requirements), (5, entitlements), (7, der)], [": page 0 of the code does not hash to \(type)", ": \(type)'s page size, 2^13, is neither the 4 KiB nor the 16 KiB the kernel takes"] + baseline),
+        ] as [(String, [(slot: UInt32, blob: Data?)], [String])] {
+            XCTAssertEqual(try self.verify(embedded(blobs), name, in: directory).lines, expected, name)
+        }
+    }
+
+    /**
      The index as the kernel walks it, where Security stops at the first alternate missing: a code directory whose
      identifier offset is 0, or whose magic is not a directory's, which Security loads and the kernel refuses the
      signature for; a directory past a gap in the alternates, which Security never loads and the kernel counts, two
@@ -1618,14 +1692,7 @@ final class VerifierTests: XCTestCase {
         let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
         /// `program` with a signature of `blobs`, each at its slot, placed in order; a nil blob is an entry at offset 0.
         func embedded(_ blobs: [(slot: UInt32, blob: Data?)]) -> Data {
-            var blob = Data()
-            var offset = 12 + 8 * blobs.count
-            [0xfade_0cc0, UInt32(offset + blobs.reduce(0) { $0 + ($1.blob?.count ?? 0) }), UInt32(blobs.count)].forEach { blob.appendUInt32BE($0) }
-            for entry in blobs {
-                blob.appendUInt32BE(entry.slot); blob.appendUInt32BE(entry.blob == nil ? 0 : UInt32(offset))
-                offset += entry.blob?.count ?? 0
-            }
-            blobs.forEach { blob += $0.blob ?? Data() }
+            let blob = Self.superblob(blobs)
             var signed = program
             signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
             return signed
@@ -1850,6 +1917,19 @@ final class VerifierTests: XCTestCase {
         var signed = program
         signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
         return signed
+    }
+
+    /// A superblob of `blobs`, each at its slot, placed in order; a nil blob is an entry at offset 0.
+    private static func superblob(_ blobs: [(slot: UInt32, blob: Data?)]) -> Data {
+        var blob = Data()
+        var offset = 12 + 8 * blobs.count
+        [0xfade_0cc0, UInt32(offset + blobs.reduce(0) { $0 + ($1.blob?.count ?? 0) }), UInt32(blobs.count)].forEach { blob.appendUInt32BE($0) }
+        for entry in blobs {
+            blob.appendUInt32BE(entry.slot); blob.appendUInt32BE(entry.blob == nil ? 0 : UInt32(offset))
+            offset += entry.blob?.count ?? 0
+        }
+        blobs.forEach { blob += $0.blob ?? Data() }
+        return blob
     }
 
     /// The first slice's code directory and CMS signature of the signed file at `path`.
