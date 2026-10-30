@@ -101,7 +101,7 @@ left out, with the reason.
 | Two of `LC_SYMTAB`, `LC_DYSYMTAB`, `LC_DYLD_INFO`, `LC_DYLD_EXPORTS_TRIE`, `LC_DYLD_CHAINED_FIXUPS`, `LC_SEGMENT_SPLIT_INFO`, `LC_FUNCTION_STARTS`, `LC_DATA_IN_CODE`, `LC_CODE_SIGNATURE`, `LC_UUID`, `LC_VERSION_MIN_*`, `LC_ENCRYPTION_INFO(_64)` | dyld `getLinkEditLoadCommands` "multiple … load commands"; Rosetta "multiple LC_LOAD_SIGNATURE / LC_UUID"; the kernel takes the first signature blob, `codesign --remove-signature` the last | two signatures: Rosetta refused; two symtabs: ran |
 | Two of `LC_BUILD_VERSION`/`LC_VERSION_MIN_*`, `LC_LOAD_DYLINKER`, `LC_MAIN`/`LC_UNIXTHREAD`, in an executable | kernel `found_version_cmd`, `dlp`, `thread_count` → `LOAD_BADMACHO`/`LOAD_FAILURE`; dyld "only one LC_MAIN or LC_UNIXTHREAD"; not named outside executables: zippered dylibs carry two `LC_BUILD_VERSION`, and the kernel's rule is for the executable it loads | `LC_MAIN` + `LC_UNIXTHREAD`: killed |
 | Two of `LC_ID_DYLIB`, `LC_ROUTINES`, `LC_ATOM_INFO`, `LC_FUNCTION_VARIANTS`, `LC_FUNCTION_VARIANT_FIXUPS`, `LC_TARGET_TRIPLE` | live dyld "multiple LC_… load commands found" | |
-| An `lc_str` starting inside its command's fixed fields | live dyld "string start offset too small" | |
+| An `lc_str` starting inside its command's fixed fields, a dylib command's 24 bytes, the others' 12: named with the offset | live dyld "string start offset too small" | |
 | `LC_DYSYMTAB` without `LC_SYMTAB`; `LC_DYLD_INFO` with `LC_DYLD_CHAINED_FIXUPS` | dyld | ran |
 | No `LC_UUID` | dyld `validLinkedit` "missing LC_UUID" (SDK ≥ 14) | dyld aborted |
 | No `LC_LOAD_DYLIB` at all | dyld "must link with at least libSystem.dylib" (SDK ≥ 13) | dyld aborted |

@@ -704,8 +704,14 @@ struct MachOVerifier {
         var installName: String?
         var dylibs = 0
         for command in image.loadCommands where Self.stringCommands.contains(command.cmd) {
-            guard let string = command.string(swap: image.swap) else {
-                found.append("\(command.name)'s name is not terminated inside the command")
+            // The fixed fields the name must start past: a dylib command's 24 bytes, the others' 12.
+            let fixed = Self.dylibCommands.contains(command.cmd) || command.cmd == UInt32(LC_ID_DYLIB) ? MemoryLayout<dylib_command>.size : MemoryLayout<dylinker_command>.size
+            guard let string = command.string(swap: image.swap, fixed: fixed) else {
+                if let offset = command.stringOffset(swap: image.swap), offset < fixed {
+                    found.append("\(command.name)'s name starts \(offset.hex) bytes in, inside the command's \(fixed.hex) fixed bytes, which dyld refuses")
+                } else {
+                    found.append("\(command.name)'s name is not terminated inside the command")
+                }
                 continue
             }
             switch command.cmd {

@@ -598,6 +598,10 @@ final class VerifierTests: XCTestCase {
         let offset = Int(program.load(UInt32.self, at: dylib.data.startIndex + 8))
         unterminated.replaceSubrange(dylib.data.startIndex + offset ..< dylib.data.endIndex, with: Data(repeating: UInt8(ascii: "x"), count: dylib.data.count - offset))
         XCTAssertEqual(try self.verify(unterminated, "unterminated", in: directory).lines, [": LC_LOAD_DYLIB's name is not terminated inside the command", ": links no dylib"])
+        // A name starting inside the command's fixed fields, 24 bytes for a dylib command, which dyld refuses.
+        var early = program
+        early.store(UInt32(16), at: dylib.data.startIndex + 8)
+        XCTAssertEqual(try self.verify(early, "early", in: directory).lines, [": LC_LOAD_DYLIB's name starts 0x10 bytes in, inside the command's 0x18 fixed bytes, which dyld refuses", ": links no dylib"])
 
         var id = Data()
         let install = Data("/tmp/evil.dylib".utf8) + Data(count: 1)

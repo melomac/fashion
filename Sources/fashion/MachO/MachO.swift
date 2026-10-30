@@ -572,16 +572,22 @@ extension MachO.LoadCommand {
         String(decoding: self.data.dropFirst(8).prefix(16).prefix { $0 != 0 }, as: UTF8.self)
     }
 
-    /// The `lc_str` a dylib, dylinker, rpath or environment command carries, its offset byte-swapped when `swap`:
-    /// nil unless it starts past the command's fixed fields and ends inside the command, as dyld requires ("string
-    /// start offset too small", "string extends beyond end of load command").
-    func string(swap: Bool) -> String? {
+    /// Where the `lc_str` of a dylib, dylinker, rpath or environment command says its string starts, from the
+    /// command's start, byte-swapped when `swap`; nil for a command too short to say.
+    func stringOffset(swap: Bool) -> Int? {
         guard self.data.count >= 12 else {
             return nil
         }
         let raw = self.data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 8, as: UInt32.self) }
-        let offset = Int(swap ? raw.byteSwapped : raw)
-        guard offset >= 12, offset < self.data.count, let end = self.data.dropFirst(offset).firstIndex(of: 0) else {
+        return Int(swap ? raw.byteSwapped : raw)
+    }
+
+    /// The `lc_str` a dylib, dylinker, rpath or environment command carries, its offset byte-swapped when `swap`:
+    /// nil unless it starts past the command's `fixed` fields, 12 bytes unless the command has more, as a dylib
+    /// command's 24, and ends inside the command, as dyld requires ("string start offset too small", "string extends
+    /// beyond end of load command").
+    func string(swap: Bool, fixed: Int = 12) -> String? {
+        guard let offset = self.stringOffset(swap: swap), offset >= fixed, offset < self.data.count, let end = self.data.dropFirst(offset).firstIndex(of: 0) else {
             return nil
         }
         return String(decoding: self.data.dropFirst(offset).prefix(upTo: end), as: UTF8.self)
