@@ -106,7 +106,7 @@ struct Signer {
 
         var time: CFAbsoluteTime = 0
         self.signingTime = CMSDecoderCopySignerSigningTime(decoder, 0, &time) == errSecSuccess ? Date(timeIntervalSinceReferenceDate: time) : nil
-        self.timestamp = CMSDecoderCopySignerTimestampWithPolicy(decoder, nil, 0, &time) == errSecSuccess ? Date(timeIntervalSinceReferenceDate: time) : nil
+        self.timestamp = Self.timestamp(in: cms)
 
         SecTrustSetNetworkFetchAllowed(trust, false)
         SecTrustSetOptions(trust, [.allowExpired, .allowExpiredRoot, .implicitAnchors])
@@ -120,6 +120,130 @@ struct Signer {
         self.chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] ?? []
         self.leafFields = Self.fields(of: self.chain.first)
         self.issuerFields = Self.fields(of: self.chain.dropFirst().first)
+    }
+
+    // MARK: - Timestamp
+
+    /// The OIDs of the CMS signed-data content type, of the timestamp token attribute (`id-aa-timeStampToken`), and
+    /// of the digests a token's imprint may be taken with.
+    private static let signedDataType = Data([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02])
+    private static let timeStampTokenType = Data([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x10, 0x02, 0x0e])
+    private static let imprintDigests: [Data: HashType] = [
+        Data([0x2b, 0x0e, 0x03, 0x02, 0x1a]): .sha1,
+        Data([0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]): .sha256,
+        Data([0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02]): .sha384,
+        Data([0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03]): .sha512,
+    ]
+
+    /**
+     The secure timestamp in `cms`: the token a timestamp authority signed over the signer's signature, carried as an
+     unsigned attribute of the signer. Its date, when the token's imprint is the signature's digest, its own
+     signature verifies, and its chain builds under Apple's timestamping policy to the system's anchors, or to
+     `anchors`, as of the date it certifies, with no network. Security's `CMSDecoderCopySignerTimestampWithPolicy`
+     does as much through trustd, which may fetch an issuer over the network for the token's chain, where it fetches
+     none for the signer's; this fetches none. The decoder digests no content of the token's type, `TSTInfo`, as it
+     reads it, so the content is handed back to it as detached for the signer's digest. Nil without a token that
+     holds.
+     */
+    static func timestamp(in cms: Data, anchors: [SecCertificate]? = nil) -> Date? {
+        guard let (signature, token) = signatureAndToken(in: cms) else {
+            return nil
+        }
+        var created: CMSDecoder?
+        var content: CFData?
+        var status = CMSSignerStatus.unsigned
+        var built: SecTrust?
+        guard
+            CMSDecoderCreate(&created) == errSecSuccess, let decoder = created,
+            token.withUnsafeBytes({ $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, token.count) } ?? errSecParam }) == errSecSuccess,
+            CMSDecoderFinalizeMessage(decoder) == errSecSuccess,
+            CMSDecoderCopyContent(decoder, &content) == errSecSuccess, let info = content as Data?,
+            let imprinted = Self.tstInfo(info), imprinted.digest.digest(signature) == imprinted.imprint,
+            CMSDecoderSetDetachedContent(decoder, info as CFData) == errSecSuccess,
+            let policy = SecPolicyCreateWithProperties(kSecPolicyAppleTimeStamping, nil),
+            CMSDecoderCopySignerStatus(decoder, 0, [policy] as CFArray, false, &status, &built, nil) == errSecSuccess,
+            status == .valid, let trust = built
+        else {
+            return nil
+        }
+        SecTrustSetNetworkFetchAllowed(trust, false)
+        if let anchors {
+            SecTrustSetAnchorCertificates(trust, anchors as CFArray)
+        }
+        SecTrustSetVerifyDate(trust, imprinted.date as CFDate)
+        return SecTrustEvaluateWithError(trust, nil) ? imprinted.date : nil
+    }
+
+    /**
+     The fields of the first signer in `cms`, as the encoding lays them: a ContentInfo of SignedData, whose last field
+     is the signers, each a SignerInfo of a version, the signer's identifier, a digest algorithm, signed attributes,
+     a signature algorithm, the signature, an OCTET STRING, and unsigned attributes, when it has them, last in a
+     context tag 1. Nil for anything else.
+     */
+    private static func signerInfo(in cms: Data) -> [DER.Element]? {
+        var reader = DER.Reader(cms)
+        guard
+            let contentInfo = reader.next(), contentInfo.tag == 0x30,
+            let parts = DER.elements(of: contentInfo.content), parts.count == 2,
+            parts[0].tag == 0x06, parts[0].content == Self.signedDataType, parts[1].tag == 0xa0,
+            let signedData = DER.elements(of: parts[1].content)?.first, signedData.tag == 0x30,
+            let signerInfos = DER.elements(of: signedData.content)?.last, signerInfos.tag == 0x31,
+            let signerInfo = DER.elements(of: signerInfos.content)?.first, signerInfo.tag == 0x30
+        else {
+            return nil
+        }
+        return DER.elements(of: signerInfo.content)
+    }
+
+    /// The first signer's signature in `cms`, what a timestamp token is taken over; nil for anything else.
+    static func signature(in cms: Data) -> Data? {
+        self.signerInfo(in: cms)?.last(where: { $0.tag == 0x04 }).map { Data($0.content) }
+    }
+
+    /**
+     The first signer's signature in `cms`, and the timestamp token among its unsigned attributes, the value of the
+     `id-aa-timeStampToken` one, a ContentInfo of its own. Nil without the token.
+     */
+    static func signatureAndToken(in cms: Data) -> (signature: Data, token: Data)? {
+        guard
+            let fields = signerInfo(in: cms),
+            let unsigned = fields.last, unsigned.tag == 0xa1,
+            let signature = fields.last(where: { $0.tag == 0x04 }),
+            let attributes = DER.elements(of: unsigned.content)
+        else {
+            return nil
+        }
+        for attribute in attributes where attribute.tag == 0x30 {
+            guard
+                let pair = DER.elements(of: attribute.content), pair.count == 2,
+                pair[0].tag == 0x06, pair[0].content == Self.timeStampTokenType,
+                pair[1].tag == 0x31, let token = DER.elements(of: pair[1].content)?.first
+            else {
+                continue
+            }
+            return (Data(signature.content), Data(token.raw))
+        }
+        return nil
+    }
+
+    /**
+     What a token's `TSTInfo` certifies: its date, and the imprint of what it was taken over, with the digest it was
+     taken with. Version, policy, the imprint, a serial number and the time, in that order; nil for any other form.
+     */
+    private static func tstInfo(_ der: Data) -> (date: Date, digest: HashType, imprint: Data)? {
+        var reader = DER.Reader(der)
+        guard
+            let info = reader.next(), info.tag == 0x30,
+            let fields = DER.elements(of: info.content), fields.count >= 5,
+            fields[0].tag == 0x02, fields[1].tag == 0x06, fields[2].tag == 0x30, fields[3].tag == 0x02, fields[4].tag == 0x18,
+            let imprint = DER.elements(of: fields[2].content), imprint.count == 2, imprint[0].tag == 0x30, imprint[1].tag == 0x04,
+            let algorithm = DER.elements(of: imprint[0].content)?.first, algorithm.tag == 0x06,
+            let digest = Self.imprintDigests[Data(algorithm.content)],
+            let date = DER.generalizedTime(fields[4].content)
+        else {
+            return nil
+        }
+        return (date, digest, Data(imprint[1].content))
     }
 
     /// The leaf's subject summary, its common name for the certificates Apple issues.

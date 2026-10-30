@@ -1001,4 +1001,92 @@ final class VerifierTests: XCTestCase {
             }
         }
     }
+
+    /// `cms` with `token` as its signer's `id-aa-timeStampToken` unsigned attribute, the enclosing lengths rewritten.
+    private static func timestamped(_ cms: Data, with token: Data) throws -> Data {
+        func parts(_ data: Data) throws -> [DER.Element] {
+            try XCTUnwrap(DER.elements(of: data))
+        }
+        var reader = DER.Reader(cms)
+        let contentInfo = try XCTUnwrap(reader.next())
+        let outer = try parts(contentInfo.content)
+        let signedData = try XCTUnwrap(parts(outer[1].content).first)
+        var fields = try parts(signedData.content)
+        let signerInfos = try XCTUnwrap(fields.popLast())
+        let signerInfo = try XCTUnwrap(parts(signerInfos.content).first)
+        let attribute = DER.encode(0x30, DER.encode(0x06, Data([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x10, 0x02, 0x0e])) + DER.encode(0x31, token))
+        let rewritten = DER.encode(0x31, DER.encode(0x30, signerInfo.content + DER.encode(0xa1, attribute)))
+        return DER.encode(0x30, outer[0].raw + DER.encode(0xa0, DER.encode(0x30, fields.map(\.raw).reduce(Data(), +) + rewritten)))
+    }
+
+    /**
+     A secure timestamp is read from the signer's token and verified here, with no network: the token's imprint must
+     be the signature's digest, and its chain must build to the system's anchors, or to the ones given. A token a
+     timestamp authority of the test's own signed, with openssl, verifies under its certificate as the anchor, with its
+     date, and not under the system's; one taken over other bytes does not.
+     */
+    func testASecureTimestampIsVerifiedOffline() throws {
+        let directory = try self.directory("timestamp")
+        let openssl = "/usr/bin/openssl"
+        let (signerKey, signerCertificate, tsaKey, tsaCertificate) = (directory / "signer.key", directory / "signer.pem", directory / "tsa.key", directory / "tsa.pem")
+        let signerConfiguration = directory / "signer.cnf"
+        try "[req]\ndistinguished_name = dn\nx509_extensions = ext\nprompt = no\n[dn]\nCN = Fashion Self\n[ext]\nextendedKeyUsage = codeSigning\nkeyUsage = digitalSignature\nbasicConstraints = CA:FALSE\n".write(to: signerConfiguration, atomically: true, encoding: .utf8)
+        let tsaConfiguration = directory / "tsa.cnf"
+        try """
+        [req]
+        distinguished_name = dn
+        x509_extensions = ext
+        prompt = no
+        [dn]
+        CN = Fashion Timestamps
+        [ext]
+        extendedKeyUsage = critical,timeStamping
+        keyUsage = digitalSignature
+        basicConstraints = CA:FALSE
+        [tsa]
+        default_tsa = stamps
+        [stamps]
+        dir = \(directory.path)
+        serial = $dir/serial
+        signer_cert = $dir/tsa.pem
+        signer_key = $dir/tsa.key
+        default_policy = 1.2.3.4
+        other_policies = 1.2.3.4
+        digests = sha256
+        accuracy = secs:1
+        ordering = no
+        tsa_name = no
+        ess_cert_id_chain = no
+
+        """.write(to: tsaConfiguration, atomically: true, encoding: .utf8)
+        try "01\n".write(to: directory / "serial", atomically: true, encoding: .utf8)
+        try XCTSkipUnless(execute(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", signerKey.path, "-out", signerCertificate.path, "-config", signerConfiguration.path, "-days", "30"]), "cannot make a certificate")
+        try XCTSkipUnless(execute(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", tsaKey.path, "-out", tsaCertificate.path, "-config", tsaConfiguration.path, "-days", "30"]), "cannot make a certificate")
+        try XCTSkipUnless(execute(openssl, ["x509", "-in", tsaCertificate.path, "-outform", "DER", "-out", (directory / "tsa.der").path]), "cannot convert a certificate")
+        let authority = try XCTUnwrap(SecCertificateCreateWithData(nil, Data(contentsOf: directory / "tsa.der") as CFData))
+
+        let (content, cmsFile) = (directory / "content.bin", directory / "cms.der")
+        try Data("the code directory".utf8).write(to: content)
+        try XCTSkipUnless(execute(openssl, ["cms", "-sign", "-binary", "-in", content.path, "-signer", signerCertificate.path, "-inkey", signerKey.path, "-outform", "DER", "-out", cmsFile.path]), "cannot sign")
+        let cms = try Data(contentsOf: cmsFile)
+        XCTAssertNil(Signer.timestamp(in: cms), "no token yet")
+
+        /// A token over `data`, from the test's authority, with its certificate in it.
+        func token(over data: Data, _ name: String) throws -> Data {
+            let (input, query, reply, token) = (directory / "\(name).bin", directory / "\(name).tsq", directory / "\(name).tsr", directory / "\(name).tst")
+            try data.write(to: input)
+            try XCTSkipUnless(execute(openssl, ["ts", "-query", "-data", input.path, "-sha256", "-no_nonce", "-cert", "-out", query.path]), "cannot ask for a timestamp")
+            try XCTSkipUnless(execute(openssl, ["ts", "-reply", "-queryfile", query.path, "-config", tsaConfiguration.path, "-out", reply.path]), "cannot timestamp")
+            try XCTSkipUnless(execute(openssl, ["ts", "-reply", "-in", reply.path, "-token_out", "-out", token.path]), "cannot take the token out")
+            return try Data(contentsOf: token)
+        }
+        let signature = try XCTUnwrap(Signer.signature(in: cms))
+        let stamped = try Self.timestamped(cms, with: token(over: signature, "signature"))
+        XCTAssertNotNil(Signer.signatureAndToken(in: stamped))
+        XCTAssertNil(Signer.timestamp(in: stamped), "the authority is no anchor of the system's")
+        let date = try XCTUnwrap(Signer.timestamp(in: stamped, anchors: [authority]))
+        XCTAssertLessThan(abs(date.timeIntervalSinceNow), 600)
+        let other = try Self.timestamped(cms, with: token(over: Data("other bytes".utf8), "other"))
+        XCTAssertNil(Signer.timestamp(in: other, anchors: [authority]), "a token over other bytes")
+    }
 }
