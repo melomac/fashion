@@ -46,12 +46,12 @@ final class XARParserTests: XCTestCase {
             "Invalid XAR: table of contents at offset 0x1c with length 0x3e8 is outside the 0x1c-byte file",
         )
         XCTAssertEqual(
-            XARParser.XARError.tocTooLarge(size: 1 << 30).errorDescription,
-            "Invalid XAR: table of contents declares 1073741824 bytes uncompressed, beyond the 134217728-byte limit",
+            XARParser.XARError.tocTooLarge(limit: 1 << 30).errorDescription,
+            "Invalid XAR: table of contents inflates past the 1073741824-byte limit",
         )
         XCTAssertEqual(
             XARParser.XARError.tocDoesNotDecompress(size: 2000).errorDescription,
-            "Invalid XAR: table of contents does not decompress to its declared 2000 bytes",
+            "Invalid XAR: table of contents does not inflate to its end, declared 2000 bytes",
         )
     }
 
@@ -131,14 +131,14 @@ final class XARParserTests: XCTestCase {
     }
 
     /**
-     A tiny compressed TOC claiming a huge uncompressed size must be rejected before allocation.
+     A table of contents that inflates past the limit, a byte more of zeros, is refused as it inflates, whatever the
+     header declares of it, 22 bytes here.
      */
     func testHashTocDecompressionBombThrows() throws {
-        let toc = Data("<xar><toc></toc></xar>".utf8)
-        let file = try File(data: xarArchive(toc: deflate(toc), size: XARParser.maxUncompressedTocSize + 1)) // one past the cap
+        let file = try File(data: xarArchive(toc: deflate(Data(count: XARParser.maxUncompressedTocSize + 1)), size: 22))
 
         XCTAssertThrowsError(try XARParser.hashToc(file, algorithm: .sha256, decompress: true)) { error in
-            XCTAssertEqual(error as? XARParser.XARError, .tocTooLarge(size: UInt64(XARParser.maxUncompressedTocSize + 1)))
+            XCTAssertEqual(error as? XARParser.XARError, .tocTooLarge(limit: XARParser.maxUncompressedTocSize))
         }
         // The compressed TOC itself is still hashed without --decompress.
         XCTAssertNotNil(try XARParser.hashToc(file, algorithm: .sha256, decompress: false))
@@ -162,14 +162,14 @@ final class XARParserTests: XCTestCase {
     }
 
     /**
-     The header declares more than the table inflates to.
+     libxar never reads the length the header declares for the table of contents, inflating it as a stream to its
+     end, and `xar` lists an archive whatever the field says: so does this, off by one, by far, or zero.
      */
-    func testHashTocDecompressSizeMismatchThrows() throws {
+    func testHashTocIgnoresTheDeclaredLengthAsLibxarDoes() throws {
         let toc = Data("<xar><toc></toc></xar>".utf8)
-        let file = try File(data: xarArchive(toc: deflate(toc), size: toc.count + 999))
-
-        XCTAssertThrowsError(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), "decompressed size must match the header") { error in
-            XCTAssertEqual(error as? XARParser.XARError, .tocDoesNotDecompress(size: UInt64(toc.count + 999)))
+        for size in [toc.count + 1, toc.count + 999, 0, Int(UInt32.max)] {
+            let file = try File(data: xarArchive(toc: deflate(toc), size: size))
+            XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(toc), "\(size)")
         }
     }
 
@@ -203,19 +203,12 @@ final class XARParserTests: XCTestCase {
     }
 
     /**
-     uncompress gives an empty output a 1-byte buffer and reports nothing of it: a stream of up to one byte
-     inflates to an empty table, a longer one does not decompress.
+     A table declared empty inflates to what it holds, as libxar reads it: nothing, a byte, two.
      */
-    func testDecompressToNothingAsUncompressDoes() throws {
-        for (content, decompresses) in [(Data(), true), (Data("x".utf8), true), (Data("xy".utf8), false)] {
+    func testDecompressToWhatTheStreamHolds() throws {
+        for content in [Data(), Data("x".utf8), Data("xy".utf8)] {
             let file = try File(data: xarArchive(toc: deflate(content), size: 0))
-            if decompresses {
-                XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(Data()))
-            } else {
-                XCTAssertThrowsError(try XARParser.hashToc(file, algorithm: .sha256, decompress: true)) { error in
-                    XCTAssertEqual(error as? XARParser.XARError, .tocDoesNotDecompress(size: 0))
-                }
-            }
+            XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(content))
         }
     }
 }

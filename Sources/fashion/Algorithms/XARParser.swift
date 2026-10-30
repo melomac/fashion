@@ -24,7 +24,7 @@ enum XARParser {
         case invalidMagic
         case headerTooShort
         case tocOutsideFile(offset: UInt64, length: UInt64, fileSize: Int)
-        case tocTooLarge(size: UInt64)
+        case tocTooLarge(limit: Int)
         case tocDoesNotDecompress(size: UInt64)
 
         var errorDescription: String? {
@@ -35,10 +35,10 @@ enum XARParser {
                 "XAR header too short"
             case let .tocOutsideFile(offset, length, fileSize):
                 "Invalid XAR: table of contents at offset \(offset.hex) with length \(length.hex) is outside the \(fileSize.hex)-byte file"
-            case let .tocTooLarge(size):
-                "Invalid XAR: table of contents declares \(size) bytes uncompressed, beyond the \(XARParser.maxUncompressedTocSize)-byte limit"
+            case let .tocTooLarge(limit):
+                "Invalid XAR: table of contents inflates past the \(limit)-byte limit"
             case let .tocDoesNotDecompress(size):
-                "Invalid XAR: table of contents does not decompress to its declared \(size) bytes"
+                "Invalid XAR: table of contents does not inflate to its end, declared \(size) bytes"
             }
         }
     }
@@ -107,10 +107,8 @@ enum XARParser {
             return try ByteHash.digests(algorithms, file, range: toc, caveat: caveat)
         }
 
-        guard header.uncompressedTocLength <= UInt64(self.maxUncompressedTocSize) else {
-            throw XARError.tocTooLarge(size: header.uncompressedTocLength)
-        }
-        guard let tocData = try self.inflate(file, range: toc, size: Int(header.uncompressedTocLength)) else {
+        // libxar inflates the table of contents as a stream and never reads the length the header declares for it.
+        guard let tocData = try self.inflate(file, range: toc, limit: self.maxUncompressedTocSize) else {
             throw XARError.tocDoesNotDecompress(size: header.uncompressedTocLength)
         }
         if let xml = String(data: tocData, encoding: .utf8) {
@@ -123,12 +121,11 @@ enum XARParser {
     // MARK: - Zlib Decompression
 
     /**
-     The `size` bytes the zlib stream at `range` of the file inflates to, as zlib's `uncompress` would decompress the
-     range from memory: nil unless the stream ends within the range, having filled exactly `size` bytes. Bytes after the
-     end of the stream are ignored. An empty output gets a 1-byte buffer, as in `uncompress`, which reports nothing of
-     what lands there.
+     The bytes the zlib stream at `range` of the file inflates to, as libxar inflates a table of contents: the stream
+     run to its end, whatever length the header declares, the output grown as it comes; nil unless the stream ends
+     within the range, and `limit` bytes of output throw `tocTooLarge`. Bytes after the end of the stream are ignored.
      */
-    private static func inflate(_ file: File, range: Range<Int>, size: Int) throws -> Data? {
+    private static func inflate(_ file: File, range: Range<Int>, limit: Int) throws -> Data? {
         var stream = z_stream()
         guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
             return nil
@@ -137,32 +134,37 @@ enum XARParser {
             inflateEnd(&stream)
         }
 
-        var output = Data(count: max(size, 1))
+        var output = Data()
         var status = Z_OK
-        try output.withUnsafeMutableBytes { buffer in
-            stream.next_out = buffer.baseAddress?.assumingMemoryBound(to: Bytef.self)
-            stream.avail_out = uInt(buffer.count)
-            // Once the stream ends or fails, the rest of the range is not part of it, and is not read.
-            var offset = range.lowerBound
-            while status == Z_OK, offset < range.upperBound {
-                let chunk = try file.read(at: offset, count: min(File.chunkSize, range.upperBound - offset))
-                offset += chunk.count
-                chunk.withUnsafeBytes { bytes in
-                    stream.next_in = UnsafeMutablePointer(mutating: bytes.baseAddress?.assumingMemoryBound(to: Bytef.self))
-                    stream.avail_in = uInt(bytes.count)
-                    repeat {
-                        status = zlib.inflate(&stream, Z_NO_FLUSH)
-                    } while status == Z_OK && stream.avail_in > 0
-                }
+        // Once the stream ends or fails, the rest of the range is not part of it, and is not read.
+        var offset = range.lowerBound
+        while status == Z_OK, offset < range.upperBound {
+            let chunk = try file.read(at: offset, count: min(File.chunkSize, range.upperBound - offset))
+            offset += chunk.count
+            try chunk.withUnsafeBytes { bytes in
+                stream.next_in = UnsafeMutablePointer(mutating: bytes.baseAddress?.assumingMemoryBound(to: Bytef.self))
+                stream.avail_in = uInt(bytes.count)
+                repeat {
+                    // Room for what comes, a chunk at a time, up to the limit.
+                    let produced = Int(stream.total_out)
+                    if produced == output.count {
+                        guard produced < limit else {
+                            throw XARError.tocTooLarge(limit: limit)
+                        }
+                        output.count = min(produced + File.chunkSize, limit)
+                    }
+                    status = output.withUnsafeMutableBytes { buffer in
+                        stream.next_out = buffer.baseAddress!.advanced(by: produced).assumingMemoryBound(to: Bytef.self)
+                        stream.avail_out = uInt(buffer.count - produced)
+                        return zlib.inflate(&stream, Z_NO_FLUSH)
+                    }
+                } while status == Z_OK && (stream.avail_in > 0 || stream.avail_out == 0)
             }
         }
 
-        guard
-            status == Z_STREAM_END,
-            size == 0 || stream.total_out == size
-        else {
+        guard status == Z_STREAM_END else {
             return nil
         }
-        return output.prefix(size)
+        return output.prefix(Int(stream.total_out))
     }
 }

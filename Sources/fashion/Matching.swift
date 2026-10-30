@@ -90,9 +90,12 @@ struct Targets {
      */
     static func fits(_ target: String, _ algorithm: Algorithm?) -> Bool {
         guard let algorithm else {
-            return self.shape(of: target) != nil
+            return self.shape(of: target).map { self.fits(target, $0) } ?? false
         }
         return switch algorithm {
+        // libfuzzy refuses a chunk over 64 characters once its runs are cut, and a block size past what strtoul reads,
+        // with -1 from every comparison: a target it refuses against itself matches nothing.
+        case .ssdeep: self.shape(of: target) == .ssdeep && SSDeepBridge.compare(target, target) >= 0
         case .git: self.shape(of: target) == .sha1
         case .git256: self.shape(of: target) == .sha256
         case .cdhash: self.cdhashHexLengths.contains(target.utf8.count) && target.utf8.allSatisfy(self.isHexDigit)

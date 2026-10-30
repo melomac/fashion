@@ -123,6 +123,7 @@ enum SymHash {
         var open: [Int] = []
         var pending = Data()
         var pendingStart = 0
+        var total = 0
         var windowStart = order.first.map { indexes[$0] } ?? tableSize
         windows: while windowStart < tableSize {
             // A window reaches 16 KiB past the last name wanted, where the names of real tables end; a longer name
@@ -156,23 +157,26 @@ enum SymHash {
                 }
                 at = end
                 if nul != nil {
-                    for symbol in open {
-                        names[symbol] = pending[(indexes[symbol] - pendingStart)...]
-                    }
-                    open.removeAll()
+                    try close()
                     at += 1
                 }
             }
             windowStart = at
         }
         // Names still open run to the end of the table.
-        for symbol in open {
-            names[symbol] = pending[(indexes[symbol] - pendingStart)...]
-        }
+        try close()
 
-        let total = names.reduce(0) { $0 + $1.count }
-        guard total <= self.maxSymbolNamesLength else {
-            throw ParserError.symbolNamesTooLong(limit: self.maxSymbolNamesLength)
+        /// The names open, each a copy of its bytes, since a slice would keep the group's whole buffer alive, counted
+        /// against the limit as they close rather than at the end, so that no more than the limit is ever held.
+        func close() throws {
+            for symbol in open {
+                names[symbol] = Data(pending[(indexes[symbol] - pendingStart)...])
+                total += names[symbol].count
+                guard total <= self.maxSymbolNamesLength else {
+                    throw ParserError.symbolNamesTooLong(limit: self.maxSymbolNamesLength)
+                }
+            }
+            open.removeAll()
         }
         if let badIndex {
             throw badIndex

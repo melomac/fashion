@@ -15,6 +15,7 @@ private enum HashOptionError: Error, Equatable {
     case unpackWithXarToc
     case decompressWithoutXarToc
     case negativeScore
+    case scoreAboveSSDeep
     case targetOfNoShape(String)
     case targetNotOfAlgorithm(String, Algorithm)
     case xlenWithoutTLSHTarget
@@ -42,6 +43,8 @@ extension HashOptionError: LocalizedError {
             "--decompress requires --xar-toc."
         case .negativeScore:
             "--score must be zero or greater."
+        case .scoreAboveSSDeep:
+            "--score above 100 matches no ssdeep digest, whose similarity is 100 at most."
         case let .targetOfNoShape(target):
             "--match '\(target)' is not shaped like MD5, SHA-1, SHA-2, ssdeep or TLSH digests; git, git256 and cdhash take --algo."
         case let .targetNotOfAlgorithm(target, algorithm):
@@ -203,6 +206,9 @@ struct Hasher: ParsableCommand {
         }
         if self.matchOptions.score < 0 {
             throw ValidationError(HashOptionError.negativeScore)
+        }
+        if self.matchOptions.score > 100, Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.ssdeep) {
+            throw ValidationError(HashOptionError.scoreAboveSSDeep)
         }
         if self.matchOptions.negate, self.matchOptions.match.isEmpty {
             throw ValidationError(HashOptionError.negateWithoutMatch)

@@ -99,4 +99,17 @@ final class HasherTests: XCTestCase {
         XCTAssertEqual(status, 64) // EX_USAGE
         XCTAssertEqual(errors.first, "Error: " + noShape("zzz"))
     }
+
+    /**
+     `--score` above 100 matches no ssdeep digest, whose similarity is 100 at most: refused with an ssdeep target, as a
+     negative one is, where a TLSH distance may run past 100.
+     */
+    func testAScoreAboveOneHundredIsRefusedForSSDeep() throws {
+        let tlsh = "T1" + String(repeating: "0", count: 70)
+        XCTAssertThrowsError(try Hasher.parse(["x", "--match", "3:abc:def", "--score", "101"])) { error in
+            XCTAssertEqual(Hasher.message(for: error), "--score above 100 matches no ssdeep digest, whose similarity is 100 at most.")
+        }
+        XCTAssertNoThrow(try Hasher.parse(["x", "--match", "3:abc:def", "--score", "100"]))
+        XCTAssertNoThrow(try Hasher.parse(["x", "--match", tlsh, "--score", "101"]))
+    }
 }

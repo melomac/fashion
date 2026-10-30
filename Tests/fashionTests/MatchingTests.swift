@@ -112,6 +112,22 @@ final class MatchingTests: XCTestCase {
     }
 
     /**
+     libfuzzy refuses an ssdeep signature whose chunk runs past 64 characters once its runs are cut, or whose block
+     size is past what `strtoul` reads, with -1 from every comparison: such a target fits nothing, where one of 64
+     fits, so that `validate()` refuses the run rather than scan everything and match nothing.
+     */
+    func testSSDeepTargetsLibfuzzyRefusesFitNothing() {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        let chunk = { (count: Int) in String((0 ..< count).map { alphabet[$0 % alphabet.count] }) }
+        XCTAssertTrue(Targets.fits("3:\(chunk(64)):\(chunk(32))", .ssdeep))
+        XCTAssertTrue(Targets.fits("3:\(chunk(64)):\(chunk(32))", nil))
+        XCTAssertFalse(Targets.fits("3:\(chunk(65)):\(chunk(32))", .ssdeep))
+        XCTAssertFalse(Targets.fits("3:\(chunk(65)):\(chunk(32))", nil))
+        XCTAssertFalse(Targets.fits("99999999999999999999999:abc:def", .ssdeep))
+        XCTAssertTrue(Targets.fits(self.ssdeep, .ssdeep))
+    }
+
+    /**
      `validate()` refuses the run over them first; typed anyway, they match nothing rather than everything.
      */
     func testTargetsOfNoShapeAreLeftOut() {
