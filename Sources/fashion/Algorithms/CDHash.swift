@@ -279,15 +279,21 @@ extension MachO {
     }
 
     /**
-     Whether the code still hashes to each directory's code slots, like `SecStaticCode::validateExecutable`: each page
-     up to the code limit, the last one shorter, against its slot. False when a byte of code changed since signing,
-     which `codesign --verify` reports as "code or signature have been modified", or when the slice ends before the code
-     limit. The slice streams once for all the directories, each page through its hasher as it arrives, however large
-     the directory declares its pages, and no further than the last slot still to check. A scattered directory, whose
-     slots map to the pages its scatter vector places, is not checked.
+     Whether the code still hashes to each directory's code slots, like `SecStaticCode::validateExecutable`: the pages
+     are cut by one directory's code limit and page size, the one of the lowest hash type, first in the map Security
+     keeps them in, and every directory's slot at each page's index must be that page's hash, a directory with fewer
+     slots failing at the first it lacks; the other directories' own limits and page sizes do not enter into it.
+     False when a byte of code changed since signing, which `codesign --verify` reports as "code or signature have
+     been modified", or when the slice ends before the code limit. The slice streams once for all the directories,
+     each page through each directory's hasher as it arrives, however large the pages, and no further than the last
+     slot still to check. A scattered directory, whose slots map to the pages its scatter vector places, is not
+     checked, and sets no geometry.
      */
     func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [(valid: Bool, failedSlot: Int?)] {
-        var validators = directories.map { SlotValidator($0, length: self.length) }
+        guard let geometry = Self.geometry(of: directories) else {
+            return []
+        }
+        var validators = directories.map { SlotValidator($0, geometry: geometry, length: self.length) }
         let limit = validators.filter(\.checking).map(\.limit).max() ?? 0
         do {
             try self.stream(0 ..< limit) { chunk in
@@ -300,6 +306,12 @@ extension MachO {
             }
         } catch is SlotValidator.Done {}
         return validators.map { ($0.valid, $0.failedSlot) }
+    }
+
+    /// The directory whose code limit and page size Security cuts every directory's pages by: the one of the lowest
+    /// hash type, the first in the map `SecStaticCode` keeps them in (`validateExecutableSlots`).
+    static func geometry(of directories: [EmbeddedCodeDirectory]) -> EmbeddedCodeDirectory? {
+        directories.min { $0.hashType.rawValue < $1.hashType.rawValue }
     }
 
     // MARK: - Ad-hoc synthesis
@@ -502,6 +514,7 @@ struct EmbeddedCodeDirectory {
     /// The directory's flags: `CS_ADHOC` among them.
     let flags: UInt32
     let nSpecialSlots: Int
+    let nCodeSlots: Int
     /// log2 of the page size, zero for a directory that is not paged.
     let pageSizeLog: UInt8
     /// The team identifier the signer wrote, nil when none or before version 0x20200 held one.
@@ -612,6 +625,7 @@ struct EmbeddedCodeDirectory {
         self.scattered = scatterOffset != 0
         self.flags = blob.bigEndianUInt32(at: 12)
         self.nSpecialSlots = nSpecialSlots
+        self.nCodeSlots = nCodeSlots
         self.pageSizeLog = pageSizeLog
         let teamOffset = version >= 0x20200 ? Int(blob.bigEndianUInt32(at: 48)) : 0
         self.teamID = teamOffset == 0 ? nil : String(decoding: blob.bytes(in: teamOffset ..< length).prefix { $0 != 0 }, as: UTF8.self)
@@ -639,8 +653,9 @@ struct EmbeddedCodeDirectory {
 
 /**
  One code directory's slots checked as the code streams by: each page hashed as its bytes arrive, the last one shorter,
- against its slot, until one fails or the code limit is reached. A directory the slice cannot hold fails outright; a
- scattered one is taken as it is.
+ against its slot, until one fails or the code limit is reached, the pages cut as the `geometry` directory lays them,
+ which Security takes for every directory. A directory with fewer slots than pages fails at the first it lacks. A
+ geometry the slice cannot hold fails every directory outright; a scattered one is taken as it is.
  */
 private struct SlotValidator {
     /// Thrown through the stream once no slot is left to check.
@@ -659,13 +674,13 @@ private struct SlotValidator {
     /// The first code slot the code did not hash to, when one did not.
     private(set) var failedSlot: Int?
 
-    init(_ directory: EmbeddedCodeDirectory, length: Int) {
-        let valid = directory.codeLimit <= UInt64(length)
+    init(_ directory: EmbeddedCodeDirectory, geometry: EmbeddedCodeDirectory, length: Int) {
+        let valid = geometry.codeLimit <= UInt64(length)
         self.directory = directory
         self.hasher = directory.hashType.hasher()
         self.valid = valid
-        self.limit = valid && !directory.scattered ? Int(directory.codeLimit) : 0
-        self.pageSize = valid ? Int(min(directory.pageSize, directory.codeLimit)) : 0
+        self.limit = valid && !geometry.scattered ? Int(geometry.codeLimit) : 0
+        self.pageSize = valid ? Int(min(geometry.pageSize, geometry.codeLimit)) : 0
     }
 
     /// Whether a slot is left to check.
@@ -684,7 +699,7 @@ private struct SlotValidator {
             self.offset += count
             self.filled += count
             if self.filled == page {
-                self.valid = self.directory.validateSlot(Data(self.hasher.finalize()), self.slot)
+                self.valid = self.slot < self.directory.nCodeSlots && self.directory.validateSlot(Data(self.hasher.finalize()), self.slot)
                 if !self.valid {
                     self.failedSlot = self.slot
                 }

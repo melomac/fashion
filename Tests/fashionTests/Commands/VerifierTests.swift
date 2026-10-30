@@ -1248,6 +1248,39 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     Security cuts the pages of every code directory by one directory's geometry, the lowest hash type's, and checks
+     each directory's slots at those pages: a SHA-1 directory covering two whole pages beside a SHA-256 one covering
+     three, the third slot of which is wrong, is valid to codesign, which never cuts a third page, where the third
+     page hashed to nothing over the SHA-256 directory's own geometry here. The disagreement is named.
+     */
+    func testThePagesAreCutByOneDirectoryForAll() throws {
+        let directory = try self.directory("geometry")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--digest-algorithm=sha1,sha256", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let sha1 = try XCTUnwrap(MachO.component(0, of: superblob))
+        let sha256 = try XCTUnwrap(MachO.component(0x1000, of: superblob))
+        XCTAssertEqual([sha1[sha1.startIndex + 37], sha256[sha256.startIndex + 37]], [1, 2], "SHA-1 at slot 0, SHA-256 the alternate")
+        try XCTSkipUnless(UInt32(bigEndian: sha1.load(UInt32.self, at: 28)) == 3, "a program of three pages")
+        var paged = program
+        paged.store(UInt32(2).bigEndian, at: signature.offset + sha1.startIndex + 28) // nCodeSlots
+        paged.store(UInt32(0x2000).bigEndian, at: signature.offset + sha1.startIndex + 32) // codeLimit
+        let hashOffset = Int(UInt32(bigEndian: sha256.load(UInt32.self, at: 16)))
+        paged[signature.offset + sha256.startIndex + hashOffset + 2 * 32] ^= 0xff
+        let file = directory / "paged"
+        try paged.write(to: file)
+        try XCTSkipUnless(execute("/usr/bin/codesign", ["--verify", "--strict", file.path]), "codesign refuses the file Security takes")
+        self.assertVerify(file.path, [
+            "\(file.path): the sha1 code directory covers 0x2000 bytes, 0x110 short of the signature at \(signature.offset.hex): the rest is unsigned",
+            "\(file.path): the sha256 code directory cuts \(signature.offset.hex) bytes of code into pages of 0x1000, where the sha1 code directory cuts 0x2000 into 0x1000: Security checks every directory by the latter, the kernel by the directory it ranks first",
+        ])
+    }
+
+    /**
      The index as the kernel walks it, where Security stops at the first alternate missing: a code directory whose
      identifier offset is 0, or whose magic is not a directory's, which Security loads and the kernel refuses the
      signature for; a directory past a gap in the alternates, which Security never loads and the kernel counts, two

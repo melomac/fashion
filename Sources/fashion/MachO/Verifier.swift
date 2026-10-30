@@ -1203,12 +1203,18 @@ struct MachOVerifier {
         // best of them, the kernel's choice too (`SecStaticCode::codeDirectory`, `bestHashOf`).
         let best = directories.max { $0.hashType.rank < $1.hashType.rank } ?? primary
 
+        // Security cuts every directory's pages by one directory's code limit and page size, the lowest hash type's;
+        // the kernel cuts by the directory it ranks first, with that one's own.
+        let geometry = MachO.geometry(of: directories) ?? primary
         for (directory, checked) in try zip(directories, image.validateExecutables(directories)) {
             let type = "the \(directory.hashType.name) code directory"
             if let slot = checked.failedSlot {
                 found.append("page \(slot) of the code does not hash to \(type)")
             } else if !checked.valid {
                 found.append("\(type) covers \(directory.codeLimit.hex) bytes, past the image's \(image.length.hex)")
+            }
+            if directory.hashType != geometry.hashType, directory.pageSize != geometry.pageSize || directory.codeLimit != geometry.codeLimit {
+                found.append("\(type) cuts \(directory.codeLimit.hex) bytes of code into pages of \(directory.pageSize.hex), where the \(geometry.hashType.name) code directory cuts \(geometry.codeLimit.hex) into \(geometry.pageSize.hex): Security checks every directory by the latter, the kernel by the directory it ranks first")
             }
             if directory.codeLimit < UInt64(signature.offset) {
                 found.append("\(type) covers \(directory.codeLimit.hex) bytes, \((UInt64(signature.offset) - directory.codeLimit).hex) short of the signature at \(signature.offset.hex): the rest is unsigned")
