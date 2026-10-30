@@ -6,7 +6,8 @@
 #   Fuzz/fuzz.sh build            build .build/fuzz/bin/fuzz-* from Sources/, Bridges/ and the harnesses here
 #   Fuzz/fuzz.sh seed             seed .build/fuzz/corpus/* from the test fixtures, /bin/ls and a XAR
 #   Fuzz/fuzz.sh run [seconds] [harness...]   run the harnesses named, all by default, for that long (900) each, FUZZ_JOBS
-#                                             workers each (2), as many binaries at a time as the cores hold
+#                                             workers each (2), as many binaries at a time as the cores hold, each
+#                                             wave reported as it ends
 #   Fuzz/fuzz.sh summary [harness...]         what the last run did: runs, executions per second, coverage, artifacts
 #
 set -eo pipefail
@@ -356,49 +357,59 @@ run() {
     fi
     # The binaries go in waves of cores / jobs, each wave waited for before the next starts, so that the workers never
     # outnumber the cores; a jobs past the cores gets a binary at a time, and a warning.
-    local slots=$((cores / jobs)) count waves started=0
+    local slots=$((cores / jobs)) count waves
     if [ "$slots" -lt 1 ]; then
         slots=1
         echo "warning: $jobs workers on $cores cores; set FUZZ_JOBS lower" >&2
     fi
-    count=$(binaries "$@" | wc -l | tr -d ' ')
+    local all=($(binaries "$@")) wave=1 i
+    count=${#all[@]}
     waves=$(((count + slots - 1) / slots))
     echo "Running ${*:-every harness}: $count binaries, $slots at a time with $jobs workers each, $seconds seconds a wave, $waves waves..."
-    for name in $(binaries "$@"); do
-        if [ "$started" -eq "$slots" ]; then
-            wait
-            started=0
-        fi
-        started=$((started + 1))
-        harness=${name#fuzz-}
-        harness=${harness%-segments}
-        dict=()
-        if [ -f "$root/Fuzz/$harness.dict" ]; then
-            dict=(-dict="$root/Fuzz/$harness.dict")
-        fi
-        rm -rf "${logs:?}/${name:?}"
-        mkdir -p "$artifacts/$name" "$logs/$name"
-        (cd "$logs/$name" && "$bin/$name" -jobs="$jobs" -workers="$jobs" -max_total_time="$seconds" -timeout=10 \
-            -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" -use_value_profile=1 -print_final_stats=1 \
-            -max_len="$(max_len "$harness")" ${dict[@]+"${dict[@]}"} -artifact_prefix="$artifacts/$name/" \
-            "$corpus/$harness" > "$name.log" 2>&1) &
+    for ((i = 0; i < count; i += slots)); do
+        local names=("${all[@]:i:slots}")
+        echo "wave $wave of $waves, until about $(date -v "+${seconds}S" '+%H:%M'): ${names[*]}"
+        for name in "${names[@]}"; do
+            harness=${name#fuzz-}
+            harness=${harness%-segments}
+            dict=()
+            if [ -f "$root/Fuzz/$harness.dict" ]; then
+                dict=(-dict="$root/Fuzz/$harness.dict")
+            fi
+            rm -rf "${logs:?}/${name:?}"
+            mkdir -p "$artifacts/$name" "$logs/$name"
+            (cd "$logs/$name" && "$bin/$name" -jobs="$jobs" -workers="$jobs" -max_total_time="$seconds" -timeout=10 \
+                -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" -use_value_profile=1 -print_final_stats=1 \
+                -max_len="$(max_len "$harness")" ${dict[@]+"${dict[@]}"} -artifact_prefix="$artifacts/$name/" \
+                "$corpus/$harness" > "$name.log" 2>&1) &
+        done
+        wait
+        for name in "${names[@]}"; do
+            report "$name"
+        done
+        wave=$((wave + 1))
     done
-    wait
-    summary "$@"
 }
 
-# Each worker's log (fuzz-<n>.log, next to the parent's) ends with its final stats: the runs and executions per second
-# are summed over the workers, the coverage is the most edges any of them reached.
+# What the last run of one binary did. Each worker's log (fuzz-<n>.log, next to the parent's) ends with its final
+# stats: the runs and executions per second are summed over the workers, the coverage is the most edges any of them
+# reached.
+report() {
+    local name=$1 runs rate cov found
+    [ -d "$logs/$name" ] || return 0
+    runs=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::number_of_executed_units/ { sum += $2 } END { print sum + 0 }')
+    rate=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::average_exec_per_sec/ { sum += $2 } END { print sum + 0 }')
+    cov=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | grep -o 'cov: [0-9]*' | awk '{ if ($2 > max) max = $2 } END { print max + 0 }' || true)
+    found=$(ls "$artifacts/$name" 2>/dev/null | wc -l | tr -d ' ')
+    printf '%-24s %12s runs %8s exec/s  cov %-6s artifacts %s\n' "$name" "$runs" "$rate" "$cov" "$found"
+    ls "$artifacts/$name" 2>/dev/null | sed 's/^/    /'
+}
+
+# What the last run did, binary by binary: every harness's, or those named.
 summary() {
-    local name runs rate cov found
+    local name
     for name in $(binaries "$@"); do
-        [ -d "$logs/$name" ] || continue
-        runs=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::number_of_executed_units/ { sum += $2 } END { print sum + 0 }')
-        rate=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::average_exec_per_sec/ { sum += $2 } END { print sum + 0 }')
-        cov=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | grep -o 'cov: [0-9]*' | awk '{ if ($2 > max) max = $2 } END { print max + 0 }' || true)
-        found=$(ls "$artifacts/$name" 2>/dev/null | wc -l | tr -d ' ')
-        printf '%-24s %12s runs %8s exec/s  cov %-6s artifacts %s\n' "$name" "$runs" "$rate" "$cov" "$found"
-        ls "$artifacts/$name" 2>/dev/null | sed 's/^/    /'
+        report "$name"
     done
 }
 

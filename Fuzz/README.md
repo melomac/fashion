@@ -38,7 +38,8 @@ make fuzz-seed                # seed only
 
 `fuzz.sh` does the work and documents its steps. `FUZZ_JOBS` sets the workers per binary and `FUZZ_CORES` the cores
 they share (all of them by default): the binaries run as many at a time as the cores hold, the rest once those finish,
-so a run of every harness takes a few times `FUZZ_SECONDS`, fewer on a machine with more cores. The workers never
+so a run of every harness takes a few times `FUZZ_SECONDS`, fewer on a machine with more cores; each wave is announced
+with the time it should end and reported, binary by binary, when it does. The workers never
 outnumber the cores because libFuzzer's 10-second limit counts wall time, and on an oversubscribed machine a slow unit
 passes for a hung one. Everything lands under
 `.build/fuzz/`, which git ignores: the binaries in `bin/`, the corpora in `corpus/<harness>/`, each run's logs in
