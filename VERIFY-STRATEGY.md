@@ -135,14 +135,14 @@ left out, with the reason.
 | A section's `offset + size` past the file, overlapping sections | static tools | |
 | A zero-fill section with a file offset; a section with an empty name | live dyld `validSemanticsSingleSegment` "has a zero-fill section type, but offset field is not zero", "has an empty section name": images dyld manages, built against the fall-2026 SDK or later (`Policy`, epoch 0x4F29), on the path that maps from disk | |
 | A section's address not aligned to its align field; a section with content and no file offset; two sections sharing addresses; in a segment that is mapped (Go's `__DWARF` has no vmsize) | live dyld `Header::validSections` "align field does not match address", "has offset=0 but is not a zero-fill section type", "start address overlaps previous section" | |
-| A section's align field past 2^15 | live dyld "too large for VM to support"; not named: Tor Browser's and numpy's dylibs declare 2^16 and run | |
+| A section's align field past 2^15 | live dyld "too large for VM to support"; not named: Tor Browser's and numpy's dylibs declare 2^16 and run; the padding exempted before a section stops at a page whatever the field says, so a field of 20 hides no payload | |
 | `__DATA_CONST` without `SG_READ_ONLY` | live dyld "__DATA_CONST segment missing SG_READ_ONLY flag"; not named: 177 of Apple's own slices lack it (`libccid`, the toolchain's Swift libraries), so dyld does not refuse it | |
 | `__TEXT` without sections | research: packers, crafted stubs | |
 | `__TEXT`'s `vmsize` more than a page past its `filesize` | research: room to unpack into (UPX) | killed only because it overlapped `__DATA_CONST` |
 | A segment both writable and executable; an executable segment not `__TEXT` (nor `__TEXT_EXEC` in a kext) | kernel on arm64 "curprot cannot be write+execute"; research on x86_64: Keydnap's `__TEXT` is rwx; the i386 linker's `__IMPORT` is rwx by design and not named | ran, unsigned x86_64 |
 | A segment or section name with bytes after its NUL, or not printable ASCII (`__TEXT\0junk`, a Cyrillic е in `__text`); shown quoted | `strncmp` readers and prefix readers disagree; lookalikes | ran, "valid on disk" when signed |
 | `mach_header_64.reserved` not zero | no reader | ran |
-| A segment flagged `SG_PROTECTED_VERSION_1`: the kernel decrypts its pages past the first three as it maps them (`unprotect_dsmos_segment`, Apple's protection of a few 10.4 to 10.6 binaries), so a third party's code reads encrypted on disk | kernel `load_segment`; static tools read the file | |
+| A segment flagged `SG_PROTECTED_VERSION_1`: the kernel decrypts its pages as it maps them, but for the image's first three, `APPLE_UNPROTECTED_HEADER_SIZE` counted from the image's start (`unprotect_dsmos_segment`, Apple's protection of a few 10.4 to 10.6 binaries), so a third party's code reads encrypted on disk; the line counts what of the segment stays clear | kernel `load_segment`; static tools read the file | |
 
 ### Entry point
 
@@ -157,7 +157,7 @@ left out, with the reason.
 | Rule | Authority | Launch |
 |:--|:--|:--|
 | A table (`LC_SYMTAB`, `LC_DYSYMTAB`, `LC_DYLD_INFO`, exports trie, chained fixups, function starts, data in code, split info, atom info, signature) outside `__LINKEDIT`, or two overlapping | dyld `Image::isValidLinkeditLayout` "LINKEDIT content extends beyond end of segment", "LINKEDIT overlap" | ran: not enforced at launch for a main executable |
-| `__LINKEDIT` not ending the image; `LC_SYMTAB` strings not ending it in a ppc image | Security `validateStructure` "invalid structure" (strict) | |
+| `__LINKEDIT` not ending the image; `LC_SYMTAB` strings not ending it in a ppc image; neither a `__LINKEDIT` nor an `LC_SYMTAB` in the image, which nothing then ends | Security `validateStructure` "invalid structure" (strict), codesign refusing to sign or verify | |
 | Bytes inside `__LINKEDIT` no table references, not zero | research: a payload signed over when signed after | ran; "valid on disk" when signed |
 
 ### Padding

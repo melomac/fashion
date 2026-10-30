@@ -118,6 +118,8 @@ struct MachOVerifier {
         let nsects: UInt32
         let flags: UInt32
         let cmdsize: Int
+        /// Whether the command is an `LC_SEGMENT_64`, whose structures are the wide ones whatever the image's.
+        let wide: Bool
         let sections: [Section]
 
         var protection: String {
@@ -193,11 +195,11 @@ struct MachOVerifier {
             switch command.cmd {
             case UInt32(LC_SEGMENT):
                 command.payload(as: segment_command.self).map {
-                    Segment(name: Self.shown(command.data.bytes(in: 8 ..< 24)), field: command.data.bytes(in: 8 ..< 24), vmaddr: UInt64(image.sw($0.vmaddr)), vmsize: UInt64(image.sw($0.vmsize)), fileoff: UInt64(image.sw($0.fileoff)), filesize: UInt64(image.sw($0.filesize)), maxprot: image.sw($0.maxprot), initprot: image.sw($0.initprot), nsects: image.sw($0.nsects), flags: image.sw($0.flags), cmdsize: command.data.count, sections: self.sections(of: command, in: image, header: MemoryLayout<segment_command>.size, count: Int(image.sw($0.nsects)), wide: false))
+                    Segment(name: Self.shown(command.data.bytes(in: 8 ..< 24)), field: command.data.bytes(in: 8 ..< 24), vmaddr: UInt64(image.sw($0.vmaddr)), vmsize: UInt64(image.sw($0.vmsize)), fileoff: UInt64(image.sw($0.fileoff)), filesize: UInt64(image.sw($0.filesize)), maxprot: image.sw($0.maxprot), initprot: image.sw($0.initprot), nsects: image.sw($0.nsects), flags: image.sw($0.flags), cmdsize: command.data.count, wide: false, sections: self.sections(of: command, in: image, header: MemoryLayout<segment_command>.size, count: Int(image.sw($0.nsects)), wide: false))
                 }
             case UInt32(LC_SEGMENT_64):
                 command.payload(as: segment_command_64.self).map {
-                    Segment(name: Self.shown(command.data.bytes(in: 8 ..< 24)), field: command.data.bytes(in: 8 ..< 24), vmaddr: image.sw($0.vmaddr), vmsize: image.sw($0.vmsize), fileoff: image.sw($0.fileoff), filesize: image.sw($0.filesize), maxprot: image.sw($0.maxprot), initprot: image.sw($0.initprot), nsects: image.sw($0.nsects), flags: image.sw($0.flags), cmdsize: command.data.count, sections: self.sections(of: command, in: image, header: MemoryLayout<segment_command_64>.size, count: Int(image.sw($0.nsects)), wide: true))
+                    Segment(name: Self.shown(command.data.bytes(in: 8 ..< 24)), field: command.data.bytes(in: 8 ..< 24), vmaddr: image.sw($0.vmaddr), vmsize: image.sw($0.vmsize), fileoff: image.sw($0.fileoff), filesize: image.sw($0.filesize), maxprot: image.sw($0.maxprot), initprot: image.sw($0.initprot), nsects: image.sw($0.nsects), flags: image.sw($0.flags), cmdsize: command.data.count, wide: true, sections: self.sections(of: command, in: image, header: MemoryLayout<segment_command_64>.size, count: Int(image.sw($0.nsects)), wide: true))
                 }
             default:
                 nil
@@ -516,7 +518,8 @@ struct MachOVerifier {
         let page = UInt64(image.segmentAlignment)
         let mappedPage = (try? image.pageSizeLog()).map { UInt64(1) << UInt64($0) } ?? page
         for segment in segments {
-            if segment.sections.count != Int(segment.nsects) || (segment.cmdsize - (image.is64 ? MemoryLayout<segment_command_64>.size : MemoryLayout<segment_command>.size)) % (image.is64 ? MemoryLayout<section_64>.size : MemoryLayout<section>.size) != 0 {
+            // Measured by the command's own structures, which a command of the other ABI keeps.
+            if segment.sections.count != Int(segment.nsects) || (segment.cmdsize - (segment.wide ? MemoryLayout<segment_command_64>.size : MemoryLayout<segment_command>.size)) % (segment.wide ? MemoryLayout<section_64>.size : MemoryLayout<section>.size) != 0 {
                 found.append("segment \(segment.name)'s command size \(segment.cmdsize.hex) does not hold its \(String(Int(segment.nsects), pluralizing: "section"))")
             }
             if self.isLoadable, segment.fileoff % mappedPage != 0 {
@@ -589,10 +592,12 @@ struct MachOVerifier {
         }
 
         // The kernel's load_segment hands a segment flagged SG_PROTECTED_VERSION_1 to unprotect_dsmos_segment, which
-        // decrypts its pages past the first three as it maps them: Apple's own protection of a few 10.4 to 10.6
+        // decrypts its pages as it maps them, but for the image's first three pages, APPLE_UNPROTECTED_HEADER_SIZE,
+        // counted from the image's start and not the segment's: Apple's own protection of a few 10.4 to 10.6
         // binaries, which a third party's image can claim too, so that its code reads encrypted on disk.
         for segment in segments where segment.flags & UInt32(SG_PROTECTED_VERSION_1) != 0 {
-            found.append("segment \(segment.name) is Apple-protected (SG_PROTECTED_VERSION_1): the kernel decrypts it past its first 0x3000 bytes as it maps it")
+            let clear = segment.fileoff < 0x3000 ? 0x3000 - segment.fileoff : 0
+            found.append("segment \(segment.name) is Apple-protected (SG_PROTECTED_VERSION_1): the kernel decrypts it \(clear > 0 ? "past its first \(clear.hex) bytes" : "whole") as it maps it, the image's first 0x3000 bytes left clear")
         }
 
         for segment in segments {
@@ -979,6 +984,11 @@ struct MachOVerifier {
         if end < image.length {
             found.append("\((image.length - end).hex) bytes appended past the image's end at \(end.hex)")
         }
+        // Security's validateStructure ends the image at the first __LINKEDIT or LC_SYMTAB it meets, and an image with
+        // neither is "invalid structure" to it, which codesign's strict validation, its default, refuses.
+        if !image.loadCommands.contains(where: { $0.isSegment(named: "__LINKEDIT") || $0.cmd == UInt32(LC_SYMTAB) }) {
+            found.append("neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses")
+        }
 
         // codesign rounds __LINKEDIT's vmsize up to 16 KiB when it signs, and leaves it so when it removes the
         // signature, where ld64 and strip round it as `linkeditSizeRounding` says: more than that, on an image without a
@@ -1030,13 +1040,14 @@ struct MachOVerifier {
     ]
 
     /**
-     The tables as dyld's `isValidLinkeditLayout` lays them: each inside `__LINKEDIT`, the first of that name as dyld
-     takes it, none overlapping another; and the bytes of `__LINKEDIT` no table references, which the linker and
-     codesign leave as zeros: a payload otherwise, signed over when the image was signed after.
+     The tables as dyld's `isValidLinkeditLayout` lays them: each inside `__LINKEDIT`, the last of that name as dyld
+     takes it, so a decoy before it silences nothing, none overlapping another; and the bytes of `__LINKEDIT` no table
+     references, which the linker and codesign leave as zeros: a payload otherwise, signed over when the image was
+     signed after.
      */
     private func linkeditAnomalies() -> [String] {
         let image = self.image
-        guard let linkedit = self.segments.first(where: { $0.name == "__LINKEDIT" }), linkedit.filesize > 0 else {
+        guard let linkedit = self.segments.last(where: { $0.name == "__LINKEDIT" }), linkedit.filesize > 0 else {
             return []
         }
         var found: [String] = []
@@ -1099,7 +1110,9 @@ struct MachOVerifier {
             var cursor = segment.fileoff == 0 ? min(headerEnd, segment.fileend) : segment.fileoff
             for section in segment.sections.filter(\.hasContent).sorted(by: { $0.offset < $1.offset }) {
                 let start = min(max(UInt64(section.offset), segment.fileoff), segment.fileend)
-                if start > cursor, start - cursor >= 1 << min(section.align, 63) {
+                // The linker's padding before a section, up to its alignment, a page at most: the field is the
+                // image's own, and a larger one would hide a payload behind it.
+                if start > cursor, start - cursor >= 1 << min(section.align, 14) {
                     gaps.append(Int(cursor) ..< Int(start))
                 }
                 cursor = max(cursor, min(section.fileend, segment.fileend))

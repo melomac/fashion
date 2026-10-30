@@ -145,6 +145,7 @@ final class VerifierTests: XCTestCase {
         self.assertVerify(file.path, [
             "\(file.path): filetype unknown(3740925954), which no loader knows",
             "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+            "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses",
         ])
     }
 
@@ -162,6 +163,7 @@ final class VerifierTests: XCTestCase {
             "\(file.path): no LC_UUID",
             "\(file.path): no MH_DYLDLINK: a static executable",
             "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+            "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses",
         ])
     }
 
@@ -494,7 +496,6 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try self.verify(reserved, "reserved", in: directory).lines, [
             ": LC_SEGMENT in a 64-bit image",
             ": the header's reserved field holds 0xdeadbeef",
-            ": segment 's command size 0x38 does not hold its 0 sections",
             ": a segment with an empty name",
             ": __LINKEDIT is not the last segment",
         ])
@@ -572,7 +573,14 @@ final class VerifierTests: XCTestCase {
 
         var protected = program
         protected.store(program.load(UInt32.self, at: text + 68) | UInt32(SG_PROTECTED_VERSION_1), at: text + 68)
-        XCTAssertEqual(try self.verify(protected, "protected", in: directory).lines, [": segment __TEXT is Apple-protected (SG_PROTECTED_VERSION_1): the kernel decrypts it past its first 0x3000 bytes as it maps it"])
+        XCTAssertEqual(try self.verify(protected, "protected", in: directory).lines, [": segment __TEXT is Apple-protected (SG_PROTECTED_VERSION_1): the kernel decrypts it past its first 0x3000 bytes as it maps it, the image's first 0x3000 bytes left clear"])
+        // The three pages left clear are the image's first, not each segment's: a protected segment past them is
+        // decrypted whole, one inside them for what lies past them.
+        let linkeditOffset = try XCTUnwrap(XCTUnwrap(MachO(File(data: program))).findSegment("__LINKEDIT")).load(segment_command_64.self).fileoff
+        var protectedLinkedit = program
+        protectedLinkedit.store(program.load(UInt32.self, at: linkedit + 68) | UInt32(SG_PROTECTED_VERSION_1), at: linkedit + 68)
+        let clear = linkeditOffset < 0x3000 ? 0x3000 - linkeditOffset : 0
+        XCTAssertEqual(try self.verify(protectedLinkedit, "protected-linkedit", in: directory).lines, [": segment __LINKEDIT is Apple-protected (SG_PROTECTED_VERSION_1): the kernel decrypts it \(clear > 0 ? "past its first \(clear.hex) bytes" : "whole") as it maps it, the image's first 0x3000 bytes left clear"])
 
         // The live dyld's validSemanticsSingleSegment: __DATA_CONST maps rw- in an image dyld manages.
         var constant = program
@@ -1237,6 +1245,7 @@ final class VerifierTests: XCTestCase {
             "\(file.path): no LC_UUID",
             "\(file.path): no MH_DYLDLINK: a static executable",
             "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+            "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses",
         ])
     }
 
@@ -1253,7 +1262,7 @@ final class VerifierTests: XCTestCase {
         data.store(UInt32(MH_PRELOAD), at: 12) // no loader maps it: its segments are held to no page
         try data.write(to: file)
         let start = ContinuousClock.now
-        self.assertVerify(file.path, ["\(file.path): \(count) segments with an empty name", "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it"])
+        self.assertVerify(file.path, ["\(file.path): \(count) segments with an empty name", "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it", "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses"])
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(10), "every pair of segments compared")
     }
 
@@ -1620,6 +1629,54 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     Security's `validateStructure` ends the image at the first `__LINKEDIT` or `LC_SYMTAB`: an image with neither is
+     "invalid structure" to it, which codesign refuses under its default strict validation, signing and verifying
+     alike.
+     */
+    func testAnImageNothingEndsIsNamed() throws {
+        let directory = try self.directory("structure")
+        let file = try self.crafted("structure", in: directory, size: 0x1000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5)])
+        XCTAssertTrue(self.verify(file.path).lines.contains("\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses"))
+        XCTAssertFalse(try execute("/usr/bin/codesign", ["-s", "-", file.path]))
+    }
+
+    /**
+     dyld takes the last segment named `__LINKEDIT`, so an empty decoy before the real one silences none of the
+     `__LINKEDIT` rules: a symbol table outside the last one is named, where the first, empty, said nothing of it.
+     */
+    func testADecoyLinkeditSilencesNothing() throws {
+        let directory = try self.directory("decoy")
+        var symtab = Data()
+        [UInt32(LC_SYMTAB), 24, 0x800, 1, 0x1800, 0x10].forEach { symtab.appendUInt32($0) }
+        let file = try self.crafted("decoy", in: directory, size: 0x2000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5), ("__LINKEDIT", 0x3000, 0, 0x2000, 0, 1), ("__LINKEDIT", 0x2000, 0x1000, 0x1000, 0x1000, 1)], commands: [symtab])
+        let lines = self.verify(file.path).lines
+        XCTAssertTrue(lines.contains("\(file.path): 2 segments named __LINKEDIT"), lines.joined(separator: "\n"))
+        XCTAssertTrue(lines.contains("\(file.path): the symbol table at 0x800 with size 0x10 lies outside __LINKEDIT"), lines.joined(separator: "\n"))
+    }
+
+    /**
+     The padding the linker leaves before a section, up to its alignment, is no payload; a section's align field is
+     the image's own, so the exemption stops at a page: a megabyte of bytes before a section aligned to 2^20 is named.
+     */
+    func testAnAlignFieldHidesNoPayload() throws {
+        let directory = try self.directory("align")
+        var segment = Data()
+        [UInt32(LC_SEGMENT_64), 72 + 80].forEach { segment.appendUInt32($0) }
+        segment.append(Data("__TEXT".utf8)); segment.append(Data(count: 10))
+        [UInt64(0x1000), 0x101000, 0, 0x101000].forEach { segment.appendUInt64($0) }
+        [UInt32(5), 5, 1, 0].forEach { segment.appendUInt32($0) }
+        segment.append(Data("__text".utf8)); segment.append(Data(count: 10))
+        segment.append(Data("__TEXT".utf8)); segment.append(Data(count: 10))
+        [UInt64(0x101000), 0x10].forEach { segment.appendUInt64($0) }
+        [UInt32(0x100000), 20, 0, 0, 0x8000_0400, 0, 0, 0].forEach { segment.appendUInt32($0) } // offset, align 2^20, reloff, nreloc, flags, reserved
+        let file = try self.crafted("align", in: directory, size: 0x101000, segments: [], commands: [segment])
+        var data = try Data(contentsOf: file)
+        data.replaceSubrange(0x1000 ..< 0x100000, with: Data(repeating: 0x41, count: 0xff000))
+        try data.write(to: file)
+        XCTAssertTrue(self.verify(file.path).lines.contains("\(file.path): 0xff000 bytes of __TEXT that no section covers are not zero, the first at 0x1000"))
+    }
+
+    /**
      The sections' lines name a few sections and count the rest, as the table's lines do: twelve sections laid outside
      their segment name eight and count the other four, where a crafted table of a million would be six lines each.
      */
@@ -1645,6 +1702,7 @@ final class VerifierTests: XCTestCase {
             "\(file.path): no LC_UUID",
             "\(file.path): no MH_DYLDLINK: a static executable",
             "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+            "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses",
         ])
     }
 
@@ -1663,6 +1721,7 @@ final class VerifierTests: XCTestCase {
             "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
             "\(file.path): no MH_DYLDLINK: a static executable",
             "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+            "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses",
         ]
         self.assertVerify(file.path, (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, has a size 0x1c that is not a multiple of 8" } + [
             "\(file.path): and 2 more load commands with a size that is not a multiple of 8",
