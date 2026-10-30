@@ -229,6 +229,29 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
+     An artifact in a directory the user cannot write to is reported with the system's word, per artifact, and
+     counted, the run exiting 2: the temporary file beside the name cannot be opened. `unsign` likewise.
+     */
+    func testAnArtifactThatCannotBeWrittenIsReported() throws {
+        try XCTSkipIf(getuid() == 0, "root writes anywhere")
+        let directory = try self.directory("readonly")
+        defer {
+            chmod(directory.path, 0o755)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let (ls, _, slices) = try self.universalLs(in: directory)
+        XCTAssertEqual(chmod(directory.path, 0o555), 0)
+
+        let (status, errors) = try runFashion(["thinr", "--write", ls.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors, slices.map { "fashion: \(ls.path)_\($0.name): Permission denied" })
+        let (unsigning, unsigned) = try runFashion(["unsign", ls.path])
+        XCTAssertEqual(unsigning, 2)
+        XCTAssertEqual(unsigned, ["fashion: \(ls.path)_unsigned: Permission denied"])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["ls"], "nothing written, no temporary left")
+    }
+
+    /**
      A thin Mach-O has nothing to extract, nor has any other file: no artifact, no line, exit 0.
      */
     func testThinAndOtherFilesAreLeftAlone() throws {

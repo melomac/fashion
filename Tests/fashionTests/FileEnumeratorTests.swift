@@ -53,6 +53,36 @@ final class FileEnumeratorTests: XCTestCase {
         XCTAssertEqual(self.sortedWalk([dir.path]), [(dir / "sub" / "f").path])
     }
 
+    /**
+     With -L every symlink is followed: a link to a directory elsewhere in the tree is walked as that directory, a
+     link to a file is the file, a link to nothing is skipped without a word, and a link to the directory it lies
+     in, or to an ancestor, is a cycle fts stops at, logged and skipped. Without -L the inner links are skipped as
+     links.
+     */
+    func testFollowingWalksLinksAndStopsAtCycles() throws {
+        let dir = FileManager.default.temporaryDirectory / "fashion-follow-\(UUID())"
+        try FileManager.default.createDirectory(at: dir / "sub", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dir / "other", withIntermediateDirectories: true)
+        try Data("hi".utf8).write(to: dir / "sub" / "f")
+        try Data("hi".utf8).write(to: dir / "other" / "g")
+        try FileManager.default.createSymbolicLink(at: dir / "sub" / "sibling", withDestinationURL: dir / "other")
+        try FileManager.default.createSymbolicLink(at: dir / "sub" / "link", withDestinationURL: dir / "sub")
+        try FileManager.default.createSymbolicLink(at: dir / "sub" / "up", withDestinationURL: dir)
+        try FileManager.default.createSymbolicLink(atPath: (dir / "sub" / "dangling").path, withDestinationPath: "nowhere")
+        try FileManager.default.createSymbolicLink(at: dir / "sub" / "file", withDestinationURL: dir / "sub" / "f")
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        XCTAssertEqual(self.sortedWalk([dir.path]), [(dir / "other" / "g").path, (dir / "sub" / "f").path])
+        let followed = [(dir / "other" / "g").path, (dir / "sub" / "f").path, (dir / "sub" / "file").path, (dir / "sub" / "sibling" / "g").path]
+        XCTAssertEqual(Array(FileWalker(paths: [dir.path], follow: true, sorted: true)), followed)
+        XCTAssertEqual(Set(FileWalker(paths: [dir.path], follow: true)), Set(followed))
+        let (status, errors) = try runFashion(["-L", "--sort", "-q", dir.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [])
+    }
+
     func testSortedWalkMissingPathReturnsEmpty() {
         let paths = self.sortedWalk(["/tmp/fashion-nonexistent-\(UUID())"])
         XCTAssertTrue(paths.isEmpty)

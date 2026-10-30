@@ -1,8 +1,25 @@
+import CryptoKit
 @testable import fashion
 import MachO
 import XCTest
 
 final class SymHashTests: XCTestCase {
+    /**
+     The external symbols joined by the separator, sorted in byte order unless told otherwise, where the table's
+     own order is the linker's: `_b` before `_a` here, which only the unsorted digest tells.
+     */
+    func testSymbolsAreJoinedSortedOrAsTheTableHasThem() throws {
+        var data = self.makeMachO(symoff: 64, nsyms: 2, stroff: 56, strsize: 8)
+        data.append(Data("\0_b\0_a\0\0".utf8))
+        for strx in [UInt32(1), 4] {
+            data.appendUInt32(strx); data.append(contentsOf: [0x01, 0, 0, 0]); data.appendUInt64(0) // n_type N_EXT
+        }
+        let md5 = { (joined: String) in Insecure.MD5.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined() }
+        XCTAssertEqual(try SymHash.compute(File(data: data), algorithm: .md5, separator: ",", sortSymbols: true).map(\.digest), [md5("_a,_b")])
+        XCTAssertEqual(try SymHash.compute(File(data: data), algorithm: .md5, separator: ",", sortSymbols: false).map(\.digest), [md5("_b,_a")])
+        XCTAssertEqual(try SymHash.compute(File(data: data), algorithm: .md5, separator: "\n", sortSymbols: true).map(\.digest), [md5("_a\n_b")])
+    }
+
     func testMalformedSymbolTableThrows() throws {
         let data = self.makeMachO(symoff: 4096, nsyms: 1, stroff: 56, strsize: 0)
 
