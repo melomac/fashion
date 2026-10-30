@@ -181,6 +181,7 @@ left out, with the reason.
 | A special slot not hashing its blob: requirements, entitlements, DER entitlements; not Info.plist, whose slot seals a bundle's plist as often as the `__info_plist` section's, and which a signer may leave at zero (Apple's own `fairplayd`) | kernel `csblob_find_special_slot_blob` for entitlements and DER (`EBADEXEC`); Security `validateComponent` for all | killed |
 | Two code directories of one hash type: refused red, as hash mode refuses it | kernel "multiple hash=%d CodeDirectories; rejecting"; Security `loadCodeDirectories` throws `errSecCSSignatureInvalid` (26B118), codesign "invalid or unsupported format for signature" | |
 | A page size other than 4 KiB or 16 KiB | kernel `cs_validate_codedirectory` "disallowing unsupported code signature page shift" | |
+| A SHA-512 code directory | Security `hashPriorities` [5, 4, 2, 3, 1]: ranked first, the flags, team and CDHash read by it, as hash mode orders the directories; kernel `cs_validate_codedirectory` knows no hash type 5 and refuses the signature; codesign writes none (`--digest-algorithm` takes no sha512) | |
 | A scattered code directory | Security only; not checked, named | |
 | Ad hoc (`CS_ADHOC`), linker signed (`CS_LINKER_SIGNED`), no hardened runtime | not named: every arm64 build has one, and Apple's own platform binaries lack the hardened-runtime flag | |
 | A CMS blob missing behind a directory not flagged ad hoc | identity: an `ldid`-style signature | |

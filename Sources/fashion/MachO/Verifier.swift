@@ -1221,6 +1221,11 @@ struct MachOVerifier {
             if ![12, 14].contains(directory.pageSizeLog) {
                 found.append("\(type)'s page size, 2^\(directory.pageSizeLog), is neither the 4 KiB nor the 16 KiB the kernel takes")
             }
+            // Security ranks SHA-512 first and reads the signature by it; the kernel knows no such hash type and
+            // refuses the signature whole (`cs_validate_codedirectory`).
+            if directory.hashType == .sha512 {
+                found.append("\(type) is of a hash type the kernel does not know: Security reads the signature by it, the kernel refuses the signature")
+            }
         }
 
         let sealed: [(slot: UInt32, what: String, blob: Data?)] = [

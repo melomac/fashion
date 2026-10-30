@@ -328,7 +328,8 @@ final class AdhocCDHashTests: XCTestCase {
 
     /**
      `SecStaticCode::loadCodeDirectories` reads the primary slot, then alternates from 0x1000 up to the first one
-     missing, and the magic is never checked. SHA-512, which xnu does not know, ranks last.
+     missing, and the magic is never checked. SHA-512 ranks first, as Security's `hashPriorities` has it, and verify
+     names it as the hash type the kernel does not know.
      */
     func testCodeDirectoriesLoadLikeSecurity() throws {
         let sha1 = self.codeDirectory(hashType: 1)
@@ -338,13 +339,20 @@ final class AdhocCDHashTests: XCTestCase {
         let cases: [(name: String, slots: [(UInt32, Data)], expected: [String])] = [
             ("alternate after a gap", [(0, sha1), (0x1001, sha256)], [Insecure.SHA1.hash(data: sha1).hexString]),
             ("wrong magic", [(0, badMagic)], [SHA256.hash(data: badMagic).hexString]),
-            ("SHA-512 alternate", [(0, sha1), (0x1000, self.codeDirectory(hashType: 5))], [Insecure.SHA1.hash(data: sha1).hexString, SHA512.hash(data: self.codeDirectory(hashType: 5)).hexString]),
+            ("SHA-512 alternate", [(0, sha1), (0x1000, self.codeDirectory(hashType: 5))], [SHA512.hash(data: self.codeDirectory(hashType: 5)).hexString, Insecure.SHA1.hash(data: sha1).hexString]),
         ]
 
         for (name, slots, expected) in cases {
             let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: slots))))
             XCTAssertEqual(try slice.codeDirectoryHashes(exact: false).hashes.map(\.hash), expected, name)
         }
+
+        let url = FileManager.default.temporaryDirectory / "fashion-sha512-\(UUID())"
+        try self.makeSignedMachO(signature: self.superblob(slots: [(0, sha1), (0x1000, self.codeDirectory(hashType: 5))])).write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        XCTAssertTrue(Verify.lines(for: url.path, reporter: Reporter(console: Console())).map(\.text).contains("\(url.path): the sha512 code directory is of a hash type the kernel does not know: Security reads the signature by it, the kernel refuses the signature"))
     }
 
     /**

@@ -834,15 +834,16 @@ enum HashType: UInt8 {
         }
     }
 
-    /// Order among code directories, higher first, as xnu chooses (`bsd/kern/ubc_subr.c`). SHA-512, which Security loads
-    /// but xnu does not know, comes last.
+    /// Order among code directories, higher first, as Security chooses (`hashPriorities`, which
+    /// `SecStaticCode::codeDirectory` and codesign's CDHash follow) and xnu among the types it knows
+    /// (`bsd/kern/ubc_subr.c`): SHA-512 first, which xnu does not know and refuses the signature for.
     var rank: Int {
         switch self {
-        case .sha512: 0
-        case .sha1: 1
-        case .sha256Truncated: 2
-        case .sha256: 3
+        case .sha512: 5
         case .sha384: 4
+        case .sha256: 3
+        case .sha256Truncated: 2
+        case .sha1: 1
         }
     }
 
