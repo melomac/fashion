@@ -280,6 +280,9 @@ struct MachOVerifier {
 
     private static let versionMinCommands = [LC_VERSION_MIN_MACOSX, LC_VERSION_MIN_IPHONEOS, LC_VERSION_MIN_TVOS, LC_VERSION_MIN_WATCHOS].map { UInt32(bitPattern: $0) }
 
+    /// How many commands a line names one by one, where a crafted table holds millions: the rest are counted.
+    private static let listed = 8
+
     /**
      The table as the loaders walk it: `ncmds` commands, where Security and this parser walk `sizeofcmds` (the
      kernel's `parse_machfile`, dyld's `forEachLoadCommand`), so `ncmds` short of the table hides commands from the
@@ -294,14 +297,20 @@ struct MachOVerifier {
         var found: [String] = []
         let held = image.loadCommands.count
         if image.ncmds < held {
-            let unread = image.loadCommands[image.ncmds...].map(\.name).joined(separator: ", ")
+            // The hidden commands named, up to a few: a crafted table hides millions.
+            let hidden = image.loadCommands[image.ncmds...]
+            let unread = hidden.prefix(Self.listed).map(\.name).joined(separator: ", ") + (hidden.count > Self.listed ? "…" : "")
             found.append("ncmds \(image.ncmds) hides the last \(String(held - image.ncmds, pluralizing: "command")) of \(held) from the loaders: \(unread)")
         } else if image.ncmds > held {
             found.append("ncmds \(image.ncmds) exceeds the \(String(held, pluralizing: "command")) the table holds")
         }
         let pointer = image.is64 ? 8 : 4
-        for (index, command) in image.loadCommands.enumerated() where command.data.count % pointer != 0 {
+        let unaligned = image.loadCommands.enumerated().filter { $0.element.data.count % pointer != 0 }
+        for (index, command) in unaligned.prefix(Self.listed) {
             found.append("load command #\(index), \(command.name), has a size \(command.data.count.hex) that is not a multiple of \(pointer)")
+        }
+        if unaligned.count > Self.listed {
+            found.append("and \(String(unaligned.count - Self.listed, pluralizing: "more load command")) with a size that is not a multiple of \(pointer)")
         }
         let counts = Dictionary(image.loadCommands.map { ($0.cmd, 1) }, uniquingKeysWith: +)
         if image.is64, counts[UInt32(LC_SEGMENT)] != nil {

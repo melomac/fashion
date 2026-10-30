@@ -1042,6 +1042,30 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(errors, ["fashion: \(file.path): \(refusal)"])
     }
 
+    /**
+     The table's lines name a few commands and count the rest: a crafted table of ten odd-sized commands, hidden from
+     the loaders too, names eight of each and counts the others, where a line each would be millions.
+     */
+    func testTheTableLinesAreCounted() throws {
+        let directory = try self.directory("counted")
+        var odd = Data()
+        odd.appendUInt32(UInt32(LC_UUID)); odd.appendUInt32(28); odd.append(Data(count: 20))
+        let file = try self.crafted("counted", in: directory, size: 0x1000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5)], commands: Array(repeating: odd, count: 10))
+        var data = try Data(contentsOf: file)
+        data.store(UInt32(1), at: 16) // ncmds: the segment alone
+        try data.write(to: file)
+        self.assertVerify(file.path, [
+            "\(file.path): ncmds 1 hides the last 10 commands of 11 from the loaders: \(Array(repeating: "LC_UUID", count: 8).joined(separator: ", "))…",
+        ] + (1 ... 8).map { "\(file.path): load command #\($0), LC_UUID, has a size 0x1c that is not a multiple of 8" } + [
+            "\(file.path): and 2 more load commands with a size that is not a multiple of 8",
+            "\(file.path): 10 LC_UUID commands",
+            "\(file.path): __TEXT has no sections",
+            "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
+            "\(file.path): no MH_DYLDLINK: a static executable",
+            "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
+        ])
+    }
+
     /// `cms` with `token` as its signer's `id-aa-timeStampToken` unsigned attribute, the enclosing lengths rewritten.
     private static func timestamped(_ cms: Data, with token: Data) throws -> Data {
         func parts(_ data: Data) throws -> [DER.Element] {
