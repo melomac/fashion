@@ -852,4 +852,23 @@ final class VerifierTests: XCTestCase {
         self.assertVerify(file.path, ["\(file.path): \(count) segments with an empty name", "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it"])
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(10), "every pair of segments compared")
     }
+
+    /**
+     What the image says of itself is quoted when it is not printable ASCII: a dylinker or a dylib named with a
+     newline stays on its line, where it would make a line of its own off a terminal.
+     */
+    func testWhatTheImageSaysStaysOnItsLine() throws {
+        let directory = try self.directory("quoted")
+        let program = try self.program("x86_64", in: directory)
+        var dylinker = program
+        let command = try self.command(UInt32(LC_LOAD_DYLINKER), in: program)
+        let name = try XCTUnwrap(program.range(of: Data("/usr/lib/dyld".utf8), in: command.data.startIndex ..< command.data.endIndex))
+        dylinker.replaceSubrange(name, with: "/usr/lib/dy\nd".utf8)
+        XCTAssertEqual(try self.verify(dylinker, "dylinker", in: directory).lines, [": LC_LOAD_DYLINKER names \"/usr/lib/dy\\nd\", not /usr/lib/dyld"])
+        var id = Data()
+        let install = Data("/tmp/evil\n.dylib".utf8) + Data(count: 8)
+        [UInt32(LC_ID_DYLIB), UInt32(24 + install.count), 24, 0, 0x10000, 0x10000].forEach { id.appendUInt32($0) }
+        id.append(install)
+        XCTAssertEqual(try self.verify(self.appending(id, to: program), "id", in: directory).lines, [": LC_ID_DYLIB \"/tmp/evil\\n.dylib\" in an MH_EXECUTE"])
+    }
 }

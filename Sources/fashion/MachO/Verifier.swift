@@ -227,6 +227,14 @@ struct MachOVerifier {
         return name.allSatisfy { 0x20 ... 0x7e ~= $0 } ? decoded : decoded.debugDescription
     }
 
+    /**
+     A string the image carries, a dylib's name, a certificate's, an entitlement's key, as a line shows it: as it is
+     when printable ASCII, quoted and escaped otherwise, so that a newline in it cannot make a line of its own.
+     */
+    private static func shown(_ string: String) -> String {
+        string.utf8.allSatisfy { 0x20 ... 0x7e ~= $0 } ? string : string.debugDescription
+    }
+
     /// The filetypes dyld loads and the kernel runs, whose layout its rules are about.
     private static let loadableFiletypes = [MH_EXECUTE, MH_DYLIB, MH_BUNDLE, MH_DYLINKER].map(UInt32.init)
 
@@ -683,10 +691,10 @@ struct MachOVerifier {
             }
             switch command.cmd {
             case UInt32(LC_LOAD_DYLINKER) where string != "/usr/lib/dyld":
-                found.append("LC_LOAD_DYLINKER names \(string), not /usr/lib/dyld")
+                found.append("LC_LOAD_DYLINKER names \(Self.shown(string)), not /usr/lib/dyld")
             case UInt32(LC_DYLD_ENVIRONMENT):
                 // Apple's own set DYLD_DLSYM_RESULT to thousands of bytes; a library's path fits.
-                found.append("LC_DYLD_ENVIRONMENT sets \(string.utf8.count > 128 ? "\(string.prefix(80))… (\(String(string.utf8.count, pluralizing: "byte")))" : string)")
+                found.append("LC_DYLD_ENVIRONMENT sets \(string.utf8.count > 128 ? "\(Self.shown(String(string.prefix(80))))… (\(String(string.utf8.count, pluralizing: "byte")))" : Self.shown(string))")
             case UInt32(LC_ID_DYLIB):
                 installName = string
             case let cmd where Self.dylibCommands.contains(cmd):
@@ -705,7 +713,7 @@ struct MachOVerifier {
                 found.append("no LC_ID_DYLIB for a dylib")
             }
             if image.filetype != UInt32(MH_DYLIB), let installName {
-                found.append("LC_ID_DYLIB \(installName) in an \(image.filetypeName)")
+                found.append("LC_ID_DYLIB \(Self.shown(installName)) in an \(image.filetypeName)")
             }
             // Only libSystem's own libraries link nothing: they are the bottom.
             if dylibs == 0, image.filetype != UInt32(MH_DYLINKER), image.filetype != UInt32(MH_EXECUTE) || dynamic, !(installName?.hasPrefix("/usr/lib/system/") ?? false) {
@@ -1088,7 +1096,7 @@ struct MachOVerifier {
         guard !restricted.isEmpty else {
             return []
         }
-        return ["entitled to \(restricted.sorted().joined(separator: ", ")), which AMFI reserves to Apple-signed code"]
+        return ["entitled to \(restricted.sorted().map(Self.shown).joined(separator: ", ")), which AMFI reserves to Apple-signed code"]
     }
 
     // MARK: - Universal files
