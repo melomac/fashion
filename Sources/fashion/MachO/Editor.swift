@@ -99,9 +99,11 @@ enum MachOEditor {
      and architecture: the bytes a cut dropped, the signature removed, and how UPX packed what is unpacked, with where
      its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand. `keep`, when given,
      gets what decompressed of an image that fails a check after, a sum or its headers, with the edits done before it
-     and `decompressed` for it, and the architecture: the refusal is thrown all the same.
+     and `decompressed` for it, and the architecture: the refusal is thrown all the same. `archs` are a universal
+     file's architectures as its table was read for the edit, which the states follow, for the artifacts to be named
+     without a second read of the table; nil for a thin file.
      */
-    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> (file: File, states: [[State]], source: File)? {
+    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> (file: File, states: [[State]], source: File, archs: [Universal.Architecture]?)? {
         let read = file
         var held: [String] = []
         let file = try exact == .never ? file : self.padded(file, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
@@ -121,7 +123,7 @@ enum MachOEditor {
                 }
                 return nil
             }
-            return (File(editing: file, pieces: edit.states.last!.pieces), [edit.states], file)
+            return (File(editing: file, pieces: edit.states.last!.pieces), [edit.states], file, nil)
         case let .fat(archs):
             let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
@@ -142,7 +144,7 @@ enum MachOEditor {
                 return nil
             }
             let magic = try file.read(at: 0, count: MemoryLayout<UInt32>.size).withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
-            return (File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: magic == FAT_MAGIC_64)), slices.map(\.states), file)
+            return (File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: magic == FAT_MAGIC_64)), slices.map(\.states), file, archs)
         case .notMachO:
             return nil
         }

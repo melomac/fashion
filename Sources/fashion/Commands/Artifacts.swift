@@ -88,7 +88,7 @@ struct ArtifactWriter {
                 kept.append(("\(arch.map { "_\($0)" } ?? "")\(Self.suffix(edits))", File(editing: read, pieces: [.bytes(data)])))
             } : nil) : nil
             let opened = edited?.source ?? read
-            artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
+            artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states, archs: edited?.archs) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
         } catch {
             // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
             return caveats + self.written(kept, for: path, reporter: reporter) + [reporter.report(path: Digester.subject(path, of: error), message: File.message(for: error), tint: Digester.tint(for: error))]
@@ -138,10 +138,12 @@ struct ArtifactWriter {
      of `file`: a universal file's slice its architecture, as the fat table places it, then each state `MachOEditor`
      took it through, `states`, for what was done to it. A slice the editor left alone, or a thin image, gets the
      `exact` cut here, which takes the bytes appended to an image off, when it shortens it; a thin file's artifacts
-     are named by what was done to it alone, since one nothing was done to would be the file. Throws for a Mach-O
-     that does not parse, a `SliceError` naming the architecture of a universal file's.
+     are named by what was done to it alone, since one nothing was done to would be the file. The states follow
+     `archs`, the table as the editor read it, so the slices are named by that read and not by another, which a file
+     rewritten in the meantime could make differ. Throws for a Mach-O that does not parse, a `SliceError` naming the
+     architecture of a universal file's.
      */
-    private static func slices(of file: File, exact: Bool, states: [[MachOEditor.State]]?) throws -> [(suffix: String, bytes: File)] {
+    private static func slices(of file: File, exact: Bool, states: [[MachOEditor.State]]?, archs: [Universal.Architecture]? = nil) throws -> [(suffix: String, bytes: File)] {
         /// The cut alone, as a state of an image the editor left alone, when it shortens the image.
         func cut(_ image: MachO) -> MachOEditor.State? {
             let end = image.logicalEnd()
@@ -151,7 +153,7 @@ struct ArtifactWriter {
             return MachOEditor.State(edits: .exact, pieces: [.range(image.offset ..< image.offset + end)])
         }
 
-        switch try Universal.open(file) {
+        switch try archs.map(Universal.fat) ?? Universal.open(file) {
         case let .fat(archs):
             // Two slices of one architecture, which the kernel refuses, are named apart: the second `_x86_64_2`.
             var named: [String: Int] = [:]
