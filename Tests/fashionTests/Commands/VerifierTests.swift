@@ -87,6 +87,74 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     The structural lines a crafted image draws, each pinned on a file with one thing wrong: an `LC_SEGMENT_64` in a
+     32-bit image, two `LC_BUILD_VERSION`, two `LC_VERSION_MIN_*`, both kinds, a file size over the vmsize, protection
+     bits beyond rwx, a protection over its maximum, `__TEXT` not at offset 0, too small for the load commands or
+     not r-x, no `__TEXT`, `__LINKEDIT` not r--, `__DATA` not rw-, a `__DATA_CONST` of a bundle not rw-; and the
+     dylib rules: no `LC_ID_DYLIB` in a dylib, one in an executable, a dynamic image linking nothing, flat namespace.
+     */
+    func testTheStructuralLinesAreNamed() throws {
+        let directory = try self.directory("structural")
+        let text: (String, UInt64, UInt64, UInt64, UInt64, UInt32) = ("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5)
+        let linkedit: (String, UInt64, UInt64, UInt64, UInt64, UInt32) = ("__LINKEDIT", 0x3000, 0x1000, 0x1000, 0x10, 1)
+        func build(_ platform: UInt32 = 1) -> Data {
+            var command = Data()
+            [UInt32(LC_BUILD_VERSION), 24, platform, 0x000e_0000, 0x000e_0000, 0].forEach { command.appendUInt32($0) }
+            return command
+        }
+        func versionMin() -> Data {
+            var command = Data()
+            [UInt32(LC_VERSION_MIN_MACOSX), 16, 0x000e_0000, 0x000e_0000].forEach { command.appendUInt32($0) }
+            return command
+        }
+        /// The lines of the crafted file `name` of `segments` and `commands`, `edited` in place first.
+        func lines(_ name: String, segments: [(String, UInt64, UInt64, UInt64, UInt64, UInt32)], commands: [Data] = [], edited: (inout Data) -> Void = { _ in }) throws -> [String] {
+            let file = try self.crafted(name, in: directory, size: 0x1010, segments: segments, commands: commands)
+            var data = try Data(contentsOf: file)
+            edited(&data)
+            try data.write(to: file)
+            return self.verify(file.path).lines.map { $0.replacingOccurrences(of: file.path, with: "") }
+        }
+        var thin = Data()
+        [MH_MAGIC, UInt32(CPU_TYPE_I386), 3, UInt32(MH_EXECUTE), 1, 72, 0].forEach { thin.appendUInt32($0) }
+        thin += try Data(contentsOf: self.crafted("wide", in: directory, size: 0x1010, segments: [text])).subdata(in: 32 ..< 104)
+        thin.append(Data(count: 0x1010 - thin.count))
+        try thin.write(to: directory / "thin")
+        XCTAssertTrue(self.verify((directory / "thin").path).lines.contains("\((directory / "thin").path): LC_SEGMENT_64 in a 32-bit image"))
+
+        let builds = try lines("builds", segments: [text, linkedit], commands: [build(), build(2)])
+        XCTAssertTrue(builds.contains(": 2 LC_BUILD_VERSION commands"), builds.joined(separator: "\n"))
+        let mins = try lines("mins", segments: [text, linkedit], commands: [versionMin(), versionMin()])
+        XCTAssertTrue(mins.contains(": 2 LC_VERSION_MIN_* commands"), mins.joined(separator: "\n"))
+        let both = try lines("both", segments: [text, linkedit], commands: [build(), versionMin()])
+        XCTAssertTrue(both.contains(": LC_BUILD_VERSION and LC_VERSION_MIN_* both"), both.joined(separator: "\n"))
+
+        XCTAssertTrue(try lines("filesize", segments: [("__TEXT", 0x1000, 0x800, 0, 0x1000, 5), linkedit]).contains(": segment __TEXT's file size 0x1000 exceeds its vmsize 0x800"))
+        XCTAssertTrue(try lines("bits", segments: [text, ("__DATA", 0x2000, 0x1000, 0x1000, 0x10, 0x13), linkedit]).contains(": segment __DATA's protection has bits beyond rwx: 0x13 within 0x13"))
+        XCTAssertTrue(try lines("maximum", segments: [text, ("__DATA", 0x2000, 0x1000, 0x1000, 0x10, 3), linkedit]) { $0.store(UInt32(7), at: 32 + 72 + 60) }.contains(": segment __DATA's protection rwx exceeds its maximum rw-"))
+        XCTAssertTrue(try lines("offset", segments: [("__TEXT", 0x1000, 0x1000, 0x1000, 0x10, 5), linkedit]).contains(": __TEXT starts at file offset 0x1000, not 0"))
+        XCTAssertTrue(try lines("small", segments: [("__TEXT", 0x1000, 0x1000, 0, 0x10, 5), linkedit]).contains(": the load commands, 0xb0 bytes, do not fit in __TEXT's 0x10"))
+        XCTAssertTrue(try lines("rwx", segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 7), linkedit]).contains(": __TEXT's protection is rwx, not r-x"))
+        XCTAssertTrue(try lines("notext", segments: [("__DATA", 0x1000, 0x1000, 0, 0x1000, 3), linkedit]).contains(": no __TEXT segment"))
+        XCTAssertTrue(try lines("linkedit", segments: [text, ("__LINKEDIT", 0x3000, 0x1000, 0x1000, 0x10, 3)]).contains(": __LINKEDIT's protection is rw-, not r--"))
+        XCTAssertTrue(try lines("data", segments: [text, ("__DATA", 0x2000, 0x1000, 0x1000, 0x10, 5), linkedit]).contains(": __DATA's protection is r-x, not rw-"))
+        let bundle = try lines("bundle", segments: [text, ("__DATA_CONST", 0x2000, 0x1000, 0x1000, 0x10, 1), linkedit]) { $0.store(UInt32(MH_BUNDLE), at: 12) }
+        XCTAssertTrue(bundle.contains(": __DATA_CONST's protection is r--, not rw-, which dyld refuses"), bundle.joined(separator: "\n"))
+
+        let dylib = try lines("dylib", segments: [text, linkedit]) { $0.store(UInt32(MH_DYLIB), at: 12) }
+        XCTAssertTrue(dylib.contains(": no LC_ID_DYLIB for a dylib"), dylib.joined(separator: "\n"))
+        XCTAssertTrue(dylib.contains(": links no dylib"))
+        var id = Data()
+        [UInt32(LC_ID_DYLIB), 48, 24, 0, 0, 0].forEach { id.appendUInt32($0) } // name 24 bytes in, after the versions
+        id += Data("/usr/lib/libx.dylib".utf8) + Data(count: 5)
+        let named = try lines("named", segments: [text, linkedit], commands: [id])
+        XCTAssertTrue(named.contains(": LC_ID_DYLIB /usr/lib/libx.dylib in an MH_EXECUTE"), named.joined(separator: "\n"))
+        let flat = try lines("flat", segments: [text, linkedit]) { $0.store(UInt32(MH_DYLDLINK), at: 24) }
+        XCTAssertTrue(flat.contains(": flat namespace: no MH_TWOLEVEL"), flat.joined(separator: "\n"))
+        XCTAssertTrue(flat.contains(": links no dylib"))
+    }
+
+    /**
      Segments out of order in the file and in memory, as a crafted image lays them, an executable with no entry point
      and no version command: each is a line, in the order the headers are read.
      */
