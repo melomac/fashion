@@ -1324,7 +1324,7 @@ struct MachOVerifier {
         } else if cms.isEmpty {
             found += self.restrictedEntitlements(entitled, signedBy: nil)
         } else {
-            found += self.signerAnomalies(cms, over: primary, team: best, entitled: entitled)
+            found += self.signerAnomalies(cms, over: primary, team: best, among: directories, entitled: entitled)
         }
         return found
     }
@@ -1424,22 +1424,24 @@ struct MachOVerifier {
     }
 
     /**
-     Who signed, as `Signer` verifies and classes the CMS blob over `primary`: what fails to verify, in one line, else
+     Who signed, as `Signer` verifies and classes the CMS blob over `primary`, bound to every one of `directories`
+     by the signer's hash-agility attributes: what fails to verify, in one line, else
      the chain Gatekeeper refuses or runs without a ticket, and a team identifier in `best`, the directory Security
      reads it from, that the certificate does not bear, which Security refuses (`errSecCSBadTeamIdentifier`); then the
      entitlements AMFI reserves, given who signed.
      */
-    private func signerAnomalies(_ cms: Data, over primary: EmbeddedCodeDirectory, team best: EmbeddedCodeDirectory, entitled: [String: Any]?) -> [String] {
+    private func signerAnomalies(_ cms: Data, over primary: EmbeddedCodeDirectory, team best: EmbeddedCodeDirectory, among directories: [EmbeddedCodeDirectory], entitled: [String: Any]?) -> [String] {
         let type = "the \(primary.hashType.name) code directory"
         let signer: Signer
         do {
-            signer = try Signer(cms: cms, over: primary.data)
+            signer = try Signer(cms: cms, over: primary.data, binding: directories.map { ($0.hashType, $0.hashType.digest($0.data)) }, best: best.hashType)
         } catch {
             let line = switch error {
             case .undecodable: "a CMS signature Security cannot decode"
             case .unsigned: "a CMS signature with no signer"
             case .invalidSignature: "the CMS signature does not verify over \(type)"
             case let .chain(reason): "the signer's certificate chain does not build: \(Self.shown(reason))"
+            case let .agility(reason): "the CMS signature does not bind the code directories as Security requires: \(reason), an invalid signature to it"
             }
             return [line] + self.restrictedEntitlements(entitled, signedBy: nil)
         }

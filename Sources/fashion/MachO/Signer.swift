@@ -25,6 +25,9 @@ struct Signer {
         case invalidSignature
         /// The signer's certificate chain does not build or verify, in trustd's words.
         case chain(String)
+        /// The signer's hash-agility attributes do not bind the code directories the signature holds: an invalid
+        /// signature to Security.
+        case agility(String)
     }
 
     /// Which of Gatekeeper's requirements the chain meets.
@@ -75,10 +78,15 @@ struct Signer {
 
     /**
      Verifies `cms` over `directory` as `SecStaticCode::verifySignature` does: the decoder takes the directory as the
-     detached content and the Apple code-signing policy, trustd builds the chain with no network, every self-signed
-     certificate an anchor and expiry allowed, as the date the signer claims. Throws a `Failure` otherwise.
+     detached content and the Apple code-signing policy, then the signer's hash-agility attributes must bind every
+     directory the signature holds, `binding`, each with its full cdhash: the cdhashes plist lists their cdhashes
+     truncated to 20 bytes, in the order of their hash types, and the v2 attribute names each by its digest
+     algorithm with its cdhash, as many as there are directories, the `best` among them; a signer that wrote
+     neither binds nothing, which Security lets pass. Then trustd builds the chain with no network, every
+     self-signed certificate an anchor and expiry allowed, as the date the signer claims. Throws a `Failure`
+     otherwise. An empty `binding` skips the attributes, for a caller with the one directory alone.
      */
-    init(cms: Data, over directory: Data) throws(Failure) {
+    init(cms: Data, over directory: Data, binding: [(hashType: HashType, cdhash: Data)] = [], best: HashType? = nil) throws(Failure) {
         var created: CMSDecoder?
         guard CMSDecoderCreate(&created) == errSecSuccess, let decoder = created,
               cms.withUnsafeBytes({ $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, cms.count) } ?? errSecParam }) == errSecSuccess,
@@ -102,6 +110,18 @@ struct Signer {
         }
         guard status == .valid, let trust = built else {
             throw status == .invalidSignature ? .invalidSignature : .unsigned
+        }
+        if !binding.isEmpty {
+            let bound = binding.sorted { $0.hashType.rawValue < $1.hashType.rawValue }
+            let agility = Self.hashAgility(in: cms)
+            if let cdhashes = agility.cdhashes, cdhashes != bound.map({ Data($0.cdhash.prefix(20)) }) {
+                throw .agility("its cdhashes plist lists other code directories than the signature holds")
+            }
+            if let v2 = agility.v2 {
+                guard v2.count == bound.count, bound.allSatisfy({ v2[$0.hashType] == $0.cdhash }), best.map({ v2[$0] != nil }) ?? true else {
+                    throw .agility("its hash agility names other code directories than the signature holds")
+                }
+            }
         }
 
         var time: CFAbsoluteTime = 0
@@ -193,6 +213,43 @@ struct Signer {
             return nil
         }
         return DER.elements(of: signerInfo.content)
+    }
+
+    /// The OIDs of the signer's hash-agility attributes: the cdhashes plist, and the v2 cdhash per digest algorithm.
+    private static let hashAgilityType = Data([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x01])
+    private static let hashAgilityV2Type = Data([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x02])
+
+    /**
+     The code directories the first signer of `cms` binds, as codesign records them among its signed attributes and
+     Security reads them (`CMSDecoderCopySignerAppleCodesigningHashAgility` and its v2): the cdhashes plist, an
+     OCTET STRING holding an XML plist whose `cdhashes` are each directory's cdhash truncated to 20 bytes, and the
+     v2 attribute, a SEQUENCE per directory of its digest algorithm and its full cdhash. Nil for an attribute that
+     is not there.
+     */
+    static func hashAgility(in cms: Data) -> (cdhashes: [Data]?, v2: [HashType: Data]?) {
+        guard let fields = signerInfo(in: cms), let signed = fields.first(where: { $0.tag == 0xa0 }), let attributes = DER.elements(of: signed.content) else {
+            return (nil, nil)
+        }
+        var cdhashes: [Data]?
+        var v2: [HashType: Data]?
+        for attribute in attributes where attribute.tag == 0x30 {
+            guard let parts = DER.elements(of: attribute.content), parts.count == 2, parts[0].tag == 0x06, parts[1].tag == 0x31, let values = DER.elements(of: parts[1].content) else {
+                continue
+            }
+            if parts[0].content == Self.hashAgilityType, let plist = values.first, plist.tag == 0x04 {
+                let hashes = (try? PropertyListSerialization.propertyList(from: Data(plist.content), format: nil) as? [String: Any])?["cdhashes"] as? [Data]
+                cdhashes = hashes ?? []
+            } else if parts[0].content == Self.hashAgilityV2Type {
+                var named: [HashType: Data] = [:]
+                for value in values where value.tag == 0x30 {
+                    if let pair = DER.elements(of: value.content), pair.count == 2, pair[0].tag == 0x06, pair[1].tag == 0x04, let hashType = Self.imprintDigests[Data(pair[0].content)] {
+                        named[hashType] = Data(pair[1].content)
+                    }
+                }
+                v2 = named
+            }
+        }
+        return (cdhashes, v2)
     }
 
     /// The first signer's signature in `cms`, what a timestamp token is taken over; nil for anything else.
