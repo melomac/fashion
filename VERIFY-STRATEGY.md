@@ -267,9 +267,12 @@ Every rule of section 4 lives in one type, `MachOVerifier` (`Sources/fashion/Mac
 validators suggest: the table, the segments, their sections, the entry point, what the image links, the extent,
 `__LINKEDIT`, the padding, the signature. The universal file's rules, and a slice's against its table entry, are its
 too. The `verify` subcommand (`Commands/Verify.swift`) only walks the files and prints the lines; what Security refuses
-of a superblob comes back beside the lines and prints red after them, counted, as hash mode reports it. `hash
---verify` and `thinr --verify` run the same verifier on each file they work on and leave its findings in the unified
-log alone, under the `verify` category, so a scan for another purpose records what is odd without printing it.
+of a superblob comes back beside the lines and prints red after them, counted, as hash mode reports it. Hash mode's
+INVALID label is Security's static verdict as well: the code slots, the sealed blobs, the code limit under strict
+validation, and the CMS signature verified over the primary directory and bound to every directory, the chain left
+to `verify`. `hash --verify` and `thinr --verify` run the same verifier on each file they work on and leave its
+findings in the unified log alone, under the `verify` category, so a scan for another purpose records what is odd
+without printing it.
 
 Headers only, but for three reads: the bytes no section or table covers (the padding alone), the signature's pages
 (the signed extent once, as hash mode reads it), and the superblob's blobs against their special slots. The signer

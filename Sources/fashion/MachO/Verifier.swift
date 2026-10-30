@@ -1151,14 +1151,8 @@ struct MachOVerifier {
 
     // MARK: - Signature
 
-    // The special slots a code directory seals (`cs_blobs.h`), the CMS blob's slot, and the ad-hoc flag.
-    private static let csslotRequirements: UInt32 = 2
-    private static let csslotEntitlements: UInt32 = 5
-    private static let csslotDEREntitlements: UInt32 = 7
     /// `CS_ENFORCE_EXPIRATION` (`codesign -o expires`): an expired signer refused, where Security tolerates one otherwise.
     private static let csEnforceExpiration: UInt32 = 0x400
-    private static let csslotSignature: UInt32 = 0x10000
-    private static let csAdhoc: UInt32 = 0x2
 
     /// The entitlements that opt out of the hardened runtime's protections, or let another process in.
     private static let weakeningEntitlements = [
@@ -1243,9 +1237,9 @@ struct MachOVerifier {
         found += Self.kernelIndexAnomalies(of: superblob)
 
         let sealed: [(slot: UInt32, what: String, blob: Data?)] = [
-            (Self.csslotRequirements, "the requirements blob", MachO.component(Self.csslotRequirements, of: superblob)),
-            (Self.csslotEntitlements, "the entitlements blob", MachO.component(Self.csslotEntitlements, of: superblob)),
-            (Self.csslotDEREntitlements, "the DER entitlements blob", MachO.component(Self.csslotDEREntitlements, of: superblob)),
+            (MachO.csslotRequirements, "the requirements blob", MachO.component(MachO.csslotRequirements, of: superblob)),
+            (MachO.csslotEntitlements, "the entitlements blob", MachO.component(MachO.csslotEntitlements, of: superblob)),
+            (MachO.csslotDEREntitlements, "the DER entitlements blob", MachO.component(MachO.csslotDEREntitlements, of: superblob)),
         ]
         for directory in directories {
             let type = "the \(directory.hashType.name) code directory"
@@ -1271,7 +1265,7 @@ struct MachOVerifier {
         // the signature whole otherwise: what such a blob says is granted to nothing.
         var entitled: [String: Any]?
         var refusedBlob = false
-        if let entitlements = MachO.component(Self.csslotEntitlements, of: superblob) {
+        if let entitlements = MachO.component(MachO.csslotEntitlements, of: superblob) {
             if let magic = Self.magic(of: entitlements), magic != 0xfade_7171 {
                 found.append("the entitlements blob's magic is \(magic.hex), not 0xfade7171, which the kernel refuses the signature for; codesign warns of an invalid entitlements blob")
                 refusedBlob = true
@@ -1281,7 +1275,7 @@ struct MachOVerifier {
                 found.append("entitlements that do not parse as a plist")
             }
         }
-        if let der = MachO.component(Self.csslotDEREntitlements, of: superblob) {
+        if let der = MachO.component(MachO.csslotDEREntitlements, of: superblob) {
             if let magic = Self.magic(of: der), magic != 0xfade_7172 {
                 found.append("the DER entitlements blob's magic is \(magic.hex), not 0xfade7172, which the kernel refuses the signature for")
                 refusedBlob = true
@@ -1314,7 +1308,7 @@ struct MachOVerifier {
         // The CMS blob, past its 8-byte header, which Security takes under its magic alone (`EmbeddedSignatureBlob`,
         // errSecCSSignatureInvalid otherwise), and reads only behind a directory not flagged ad hoc.
         // codesign writes an empty wrapper, its header alone, behind an ad-hoc signature.
-        let wrapped = MachO.component(Self.csslotSignature, of: superblob).flatMap { $0.count > 8 ? $0 : nil }
+        let wrapped = MachO.component(MachO.csslotSignature, of: superblob).flatMap { $0.count > 8 ? $0 : nil }
         var cms = Data()
         if let wrapped {
             if let magic = Self.magic(of: wrapped), magic != 0xfade_0b01 {
@@ -1323,7 +1317,7 @@ struct MachOVerifier {
                 cms = Data(wrapped.dropFirst(8))
             }
         }
-        if best.flags & Self.csAdhoc != 0 {
+        if best.flags & MachO.csAdhoc != 0 {
             if wrapped != nil {
                 found.append("a CMS signature behind a code directory flagged ad hoc, which Security ignores")
             }
@@ -1369,7 +1363,7 @@ struct MachOVerifier {
         for entry in 0 ..< Int(Self.bigEndian(superblob, at: 8)) {
             let slot = Self.bigEndian(superblob, at: 12 + 8 * entry)
             let offset = Int(Self.bigEndian(superblob, at: 12 + 8 * entry + 4))
-            if [Self.csslotEntitlements, Self.csslotDEREntitlements].contains(slot) {
+            if [MachO.csslotEntitlements, MachO.csslotDEREntitlements].contains(slot) {
                 entitlements[slot, default: 0] += 1
             }
             guard slot == 0 || (0x1000 ... 0x1004).contains(slot) else {

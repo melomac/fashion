@@ -328,6 +328,16 @@ final class AdhocCDHashTests: XCTestCase {
     }
 
     /**
+     A truncated SHA-256 directory's cdhash is 20 bytes, as `CodeDirectory::hashFor` cuts every digest of that type and
+     codesign prints it, not the 32 of a plain SHA-256.
+     */
+    func testATruncatedDirectoryHasATruncatedCDHash() throws {
+        let directory = self.codeDirectory(hashType: 3)
+        let data = self.makeSignedMachO(signature: self.superblob(slots: [(0, directory)]))
+        XCTAssertEqual(try CDHash.hash(fixture: data).map(\.hash), [Data(SHA256.hash(data: directory)).prefix(20).hexString])
+    }
+
+    /**
      Primary slot: SHA-1. Alternates 0x1000 and 0x1001: SHA-256 and SHA-384, which xnu prefers in that order.
      */
     func testMultipleCodeDirectoriesRankStrongestFirst() throws {

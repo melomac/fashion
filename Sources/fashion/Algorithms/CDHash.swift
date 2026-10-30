@@ -64,8 +64,9 @@ enum CDHash {
         let type: String?
         /// True when the slice is unsigned and the hash was synthesized.
         let adhoc: Bool
-        /// True when the slice's signature does not hold: Security rejects it, so the hash is synthesized, or the code no
-        /// longer hashes to this directory.
+        /// True when the slice's signature does not hold as Security's static validation holds it: a code directory
+        /// it cannot load, so the hash is synthesized; code that no longer hashes to this directory; a sealed blob
+        /// missing or changed; a code limit short of the signature; a CMS signature missing or not verifying.
         let invalid: Bool
     }
 
@@ -161,10 +162,12 @@ extension MachO {
 
         let signature = try self.findCodeSignature()
         if let signature {
-            let directories = try Self.loadCodeDirectories(self.signingData(signature))
-                .sorted { $0.hashType.rank > $1.hashType.rank }
-            let hashes = try zip(directories, self.validateExecutables(directories)).map { cd, checked in
-                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !checked.valid)
+            let superblob = try self.signingData(signature)
+            let loaded = try Self.loadCodeDirectories(superblob)
+            let directories = loaded.sorted { $0.hashType.rank > $1.hashType.rank }
+            let taken = Self.securityTakes(directories, primary: loaded.first, in: superblob, signature: signature)
+            let hashes = try zip(directories, zip(self.validateExecutables(directories), taken)).map { cd, verdicts in
+                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !verdicts.0.valid || !verdicts.1)
             }
             if !hashes.isEmpty {
                 return (hashes, nil)
@@ -251,6 +254,41 @@ extension MachO {
                 Int(blobLength) <= superblob.count - Int(blobOffset)
             else {
                 throw CDHashError.invalidCodeSignatureBlobRange(offset: blobOffset, size: blobLength, signatureSize: superblob.count)
+            }
+        }
+    }
+
+    /**
+     Whether Security's static validation takes each of `directories` beyond its code slots
+     (`SecStaticCode::staticValidateCore`): a sealed special slot, the requirements, the entitlements or their DER
+     form, whose blob is missing or hashes otherwise fails (`validateComponent`); a code limit short of the
+     signature fails strict validation, codesign's and Gatekeeper's default; and behind a best directory not flagged
+     ad hoc, the CMS blob must be there under its wrapper's magic and verify over `primary`, binding every directory
+     (`verifySignature`). Whose chain the signer's is, trustd's work, is verify's business, not hash mode's.
+     */
+    private static func securityTakes(_ directories: [EmbeddedCodeDirectory], primary: EmbeddedCodeDirectory?, in superblob: Data, signature: (offset: Int, size: Int)) -> [Bool] {
+        let sealed = [self.csslotRequirements, self.csslotEntitlements, self.csslotDEREntitlements].map { self.component($0, of: superblob) }
+        let signed: Bool = {
+            guard let best = directories.first, let primary, best.flags & self.csAdhoc == 0 else {
+                return true
+            }
+            guard let wrapped = self.component(self.csslotSignature, of: superblob), wrapped.count > 8, wrapped.bigEndianUInt32(at: 0) == self.csmagicBlobWrapper else {
+                return false
+            }
+            return (try? Signer(cms: Data(wrapped.dropFirst(8)), over: primary.data, binding: directories.map { ($0.hashType, $0.hashType.digest($0.data)) }, best: best.hashType, evaluatingChain: false)) != nil
+        }()
+        return directories.map { directory in
+            guard signed, directory.codeLimit >= UInt64(signature.offset) else {
+                return false
+            }
+            return zip([self.csslotRequirements, self.csslotEntitlements, self.csslotDEREntitlements], sealed).allSatisfy { slot, blob in
+                guard let hash = directory.specialSlot(Int(slot)), hash.contains(where: { $0 != 0 }) else {
+                    return true // unsealed: nothing for Security to check
+                }
+                guard let blob else {
+                    return false
+                }
+                return directory.hashType.digest(blob).prefix(directory.hashType.slotSize) == hash
             }
         }
     }
@@ -418,8 +456,10 @@ extension MachO {
             return (0, 0)
         }
 
+        // Security reads the 64-bit fields of a 64-bit image's segment command whatever the command's kind: of a
+        // 56-byte LC_SEGMENT, the bytes its protections and section count hold, which `findSegment` has required.
         if self.is64 {
-            return text.payload(as: segment_command_64.self).map { ($0.fileoff, $0.filesize) } ?? (0, 0)
+            return text.data.withUnsafeBytes { ($0.loadUnaligned(fromByteOffset: 40, as: UInt64.self), $0.loadUnaligned(fromByteOffset: 48, as: UInt64.self)) }
         }
 
         return text.payload(as: segment_command.self).map { (UInt64($0.fileoff), UInt64($0.filesize)) } ?? (0, 0)
@@ -441,9 +481,15 @@ extension MachO {
             return nil
         }
 
-        let (headerSize, sectionSize, count) = try self.is64
-            ? (MemoryLayout<segment_command_64>.size, MemoryLayout<section_64>.size, text.load(segment_command_64.self).nsects)
-            : (MemoryLayout<segment_command>.size, MemoryLayout<section>.size, text.load(segment_command.self).nsects)
+        // A segment command of the other ABI, shorter than the image's structure, declares no section table this
+        // reads; Security reads a count past it, from the bytes of the next command.
+        let (headerSize, sectionSize) = self.is64
+            ? (MemoryLayout<segment_command_64>.size, MemoryLayout<section_64>.size)
+            : (MemoryLayout<segment_command>.size, MemoryLayout<section>.size)
+        guard text.data.count >= headerSize else {
+            return nil
+        }
+        let count = try self.is64 ? text.load(segment_command_64.self).nsects : text.load(segment_command.self).nsects
         guard headerSize + Int(count) * sectionSize <= text.data.count else {
             return nil
         }
@@ -507,6 +553,15 @@ extension MachO {
     private static let csslotCodeDirectory: UInt32 = 0
     private static let csslotAlternateBase: UInt32 = 0x1000
     private static let csslotAlternateLimit: UInt32 = 0x1005
+    /// The special slots Security seals a blob under: the requirements, the entitlements, their DER form.
+    static let csslotRequirements: UInt32 = 2
+    static let csslotEntitlements: UInt32 = 5
+    static let csslotDEREntitlements: UInt32 = 7
+    /// The CMS signature's slot, and the magic of the wrapper it lies under.
+    static let csslotSignature: UInt32 = 0x10000
+    static let csmagicBlobWrapper: UInt32 = 0xfade_0b01
+    /// `CS_ADHOC`: a directory signed by no one, which Security takes without a CMS blob.
+    static let csAdhoc: UInt32 = 0x2
 
     /// Filetypes codesign signs as Mach-O code; it signs any other one as a generic file (`Format=generic`).
     static let codeFiletypes = [
@@ -890,12 +945,13 @@ enum HashType: UInt8 {
         }
     }
 
-    /// The whole digest of `data`: a slot or a cdhash. Truncation applies to the slots inside a directory, not to its
-    /// cdhash, which is plain SHA-256.
+    /// The whole digest of `data`: a slot or a cdhash. A truncated SHA-256 directory's cdhash is cut to 20 bytes as its
+    /// slots are: `CodeDirectory::hashFor` makes every digest of that type 20 bytes long, codesign's CDHash included.
     func digest(_ data: some DataProtocol) -> Data {
         switch self {
         case .sha1: Data(Insecure.SHA1.hash(data: data))
-        case .sha256, .sha256Truncated: Data(SHA256.hash(data: data))
+        case .sha256: Data(SHA256.hash(data: data))
+        case .sha256Truncated: Data(SHA256.hash(data: data).prefix(20))
         case .sha384: Data(SHA384.hash(data: data))
         case .sha512: Data(SHA512.hash(data: data))
         }

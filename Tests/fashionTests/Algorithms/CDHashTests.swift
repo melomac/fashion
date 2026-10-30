@@ -427,6 +427,33 @@ final class CDHashTests: XCTestCase {
     }
 
     /**
+     A 64-bit image whose `__TEXT` is a 56-byte `LC_SEGMENT`: Security's `findSegment` takes any segment command of 56
+     bytes, and `execSegBase` and `execSegLimit` read the 64-bit fields at 40 and 48 whatever the command's kind, so
+     codesign signs it ad hoc with the identity those bytes make; the section table it declares is none to this
+     reader, where Security reads a count past the command. The room the 64-bit command took is left to a command no
+     loader knows, which none of them minds.
+     */
+    func testAdhocReadsATextSegmentOfTheOtherABIAsCodesignDoes() throws {
+        let dir = try self.temporaryDirectory()
+        var data = try Data(contentsOf: compile("built", in: dir, ["-arch", "x86_64"]))
+        let text = try XCTUnwrap(MachO.loadCommands(data: data).first { $0.isSegment(named: "__TEXT") })
+        let (at, size) = (text.data.startIndex, text.data.count)
+        var command = Data()
+        [UInt32(LC_SEGMENT), 56].forEach { command.appendUInt32($0) }
+        command.append(text.data[at + 8 ..< at + 24])
+        [UInt32(0x1000), 0x1000, 0, 0x1000, 5, 5, 0, 0].forEach { command.appendUInt32($0) } // vmaddr, vmsize, fileoff, filesize, maxprot, initprot, nsects, flags
+        var filler = Data()
+        [UInt32(0x7f), UInt32(size - 56)].forEach { filler.appendUInt32($0) }
+        filler.append(Data(count: size - 64))
+        data.replaceSubrange(at ..< at + size, with: command + filler)
+        let ncmds = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 16, as: UInt32.self) } + 1
+        data.replaceSubrange(16 ..< 20, with: withUnsafeBytes(of: ncmds.littleEndian) { Data($0) })
+        try data.write(to: dir / "other-abi")
+
+        try self.assertAdhocMatchesCodesignDetached(dir / "other-abi")
+    }
+
+    /**
      `MachORep::infoPlist` catches a failed read, so a section larger than the 2 GiB a single `read(2)` takes is no
      `Info.plist` to codesign, like one past the end of the file. The large file is sparse, and --exact keeps the
      code it hashes to the image, the same bytes as in the short file.

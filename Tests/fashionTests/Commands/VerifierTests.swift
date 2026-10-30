@@ -783,11 +783,13 @@ final class VerifierTests: XCTestCase {
         let program = try Data(contentsOf: signed)
         let image = try XCTUnwrap(MachO(File(data: program)))
         XCTAssertEqual(try self.verify(program, "sound", in: directory).lines, [])
+        XCTAssertEqual(try CDHash.hash(fixture: program).map(\.invalid), [false])
 
         var modified = program
         let section = try self.section("__TEXT", "__text", in: program)
         modified[Int(program.load(UInt32.self, at: section + 48)) + 4] ^= 0xff
         XCTAssertEqual(try self.verify(modified, "modified", in: directory).lines, [": page 0 of the code does not hash to the sha256 code directory"])
+        XCTAssertEqual(try CDHash.hash(fixture: modified).map(\.invalid), [true])
 
         // The code directory: slot 0 of the superblob LC_CODE_SIGNATURE points at.
         let signature = try XCTUnwrap(image.findCodeSignature())
@@ -798,6 +800,7 @@ final class VerifierTests: XCTestCase {
         short.store(UInt32((slots - 1) * page).bigEndian, at: directoryOffset + 32)
         short.store(UInt32(slots - 1).bigEndian, at: directoryOffset + 28)
         XCTAssertEqual(try self.verify(short, "short", in: directory).lines, [": the sha256 code directory covers \(((slots - 1) * page).hex) bytes, \((signature.offset - (slots - 1) * page).hex) short of the signature at \(signature.offset.hex): the rest is unsigned"])
+        XCTAssertEqual(try CDHash.hash(fixture: short).map(\.invalid), [true], "strict validation refuses a code limit short of the signature")
 
         var refused = program
         refused.store(UInt32(0), at: signature.offset)
@@ -822,6 +825,8 @@ final class VerifierTests: XCTestCase {
         let flag = try XCTUnwrap(weakened.range(of: Data("<true/>".utf8)))
         tampered.replaceSubrange(flag, with: "<trux/>".utf8)
         XCTAssertEqual(try self.verify(tampered, "tampered", in: directory).lines, [": the entitlements blob does not hash to its slot in the sha256 code directory", ": entitlements that do not parse as a plist", hardening])
+        XCTAssertEqual(try CDHash.hash(fixture: tampered).map(\.invalid), [true], "a sealed blob changed")
+        XCTAssertEqual(try CDHash.hash(fixture: weakened).map(\.invalid), [false])
 
         // The DER form changed to disagree with the XML and sealed again: the disagreement is named, and the verdict
         // is the DER form's, which AMFI reads.
@@ -1033,22 +1038,29 @@ final class VerifierTests: XCTestCase {
             return signed
         }
         XCTAssertEqual(try self.verify(embedded(directoryBlob, signatureBlob), "self-signed", in: directory).lines, [": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
+        // Hash mode's verdict is Security's static one: the signature verifies, whoever signed, or does not.
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, signatureBlob)).map(\.invalid), [false])
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, Data())).map(\.invalid), [true], "no CMS blob behind a directory not flagged ad hoc")
 
         var altered = directoryBlob
         altered[Int(UInt32(bigEndian: adhoc.load(UInt32.self, at: 20)))] ^= 0x20 // the identifier's first byte
         XCTAssertEqual(try self.verify(embedded(altered, signatureBlob), "altered", in: directory).lines, [": the CMS signature does not verify over the sha256 code directory"])
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(altered, signatureBlob)).map(\.invalid), [true])
 
         XCTAssertEqual(try self.verify(embedded(adhoc, signatureBlob), "ad hoc", in: directory).lines, [": a CMS signature behind a code directory flagged ad hoc, which Security ignores"])
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(adhoc, signatureBlob)).map(\.invalid), [false])
         // Security takes the CMS blob under its wrapper's magic alone.
         var mismagic = embedded(directoryBlob, signatureBlob)
         let wrapper = try XCTUnwrap(mismagic.range(of: Data([0xfa, 0xde, 0x0b, 0x01])))
         mismagic.store(UInt32(0xfade_0b02).bigEndian, at: wrapper.lowerBound)
         XCTAssertEqual(try self.verify(mismagic, "mismagic", in: directory).lines, [": the CMS blob's magic is 0xfade0b02, not 0xfade0b01, which Security refuses the signature for"])
+        XCTAssertEqual(try CDHash.hash(fixture: mismagic).map(\.invalid), [true])
         // Security takes exactly one signer: the same signer twice is an invalid signature to it, where the one is
         // a signature codesign verifies.
         let doubled = try Self.withSigners(signatureBlob, times: 2)
         XCTAssertEqual(try self.verify(embedded(directoryBlob, doubled), "doubled", in: directory).lines, [": a CMS signature with 2 signers, where Security requires exactly one, an invalid signature to it"])
         XCTAssertFalse(try execute("/usr/bin/codesign", ["--verify", (directory / "doubled").path]))
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, doubled)).map(\.invalid), [true])
         XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", (directory / "self-signed").path]))
 
         let plist = directory / "entitlements.plist"

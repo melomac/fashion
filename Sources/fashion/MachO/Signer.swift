@@ -95,9 +95,11 @@ struct Signer {
      or not yet valid then is tried again with expiry allowed, as Security tries it, only without a secure timestamp,
      and not when `enforcingExpiration`, the directory's `CS_ENFORCE_EXPIRATION` flag. A signer anchored at Apple
      whose secure timestamp's chain is not ends the verification too. Throws a `Failure` otherwise. An empty
-     `binding` skips the attributes, for a caller with the one directory alone.
+     `binding` skips the attributes, for a caller with the one directory alone. Hash mode asks whether the signature
+     holds and not who signed, so it passes `evaluatingChain` false: the signature and its bindings are checked, the
+     chain and the timestamp, trustd's work, are not, and the signer comes back with no chain.
      */
-    init(cms: Data, over directory: Data, binding: [(hashType: HashType, cdhash: Data)] = [], best: HashType? = nil, enforcingExpiration: Bool = false) throws(Failure) {
+    init(cms: Data, over directory: Data, binding: [(hashType: HashType, cdhash: Data)] = [], best: HashType? = nil, enforcingExpiration: Bool = false, evaluatingChain: Bool = true) throws(Failure) {
         var created: CMSDecoder?
         guard CMSDecoderCreate(&created) == errSecSuccess, let decoder = created,
               cms.withUnsafeBytes({ $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, cms.count) } ?? errSecParam }) == errSecSuccess,
@@ -141,6 +143,13 @@ struct Signer {
 
         var time: CFAbsoluteTime = 0
         self.signingTime = CMSDecoderCopySignerSigningTime(decoder, 0, &time) == errSecSuccess ? Date(timeIntervalSinceReferenceDate: time) : nil
+        guard evaluatingChain else {
+            self.timestamp = nil
+            self.chain = []
+            self.leafFields = []
+            self.issuerFields = []
+            return
+        }
         let stamp = Self.timestamp(in: cms)
         self.timestamp = stamp?.date
 
