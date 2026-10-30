@@ -81,7 +81,7 @@ struct Signer {
     init(cms: Data, over directory: Data) throws(Failure) {
         var created: CMSDecoder?
         guard CMSDecoderCreate(&created) == errSecSuccess, let decoder = created,
-              cms.withUnsafeBytes({ CMSDecoderUpdateMessage(decoder, $0.baseAddress!, cms.count) }) == errSecSuccess,
+              cms.withUnsafeBytes({ $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, cms.count) } ?? errSecParam }) == errSecSuccess,
               CMSDecoderSetDetachedContent(decoder, directory as CFData) == errSecSuccess,
               CMSDecoderFinalizeMessage(decoder) == errSecSuccess
         else {

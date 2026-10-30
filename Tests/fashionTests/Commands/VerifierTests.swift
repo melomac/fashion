@@ -954,4 +954,15 @@ final class VerifierTests: XCTestCase {
         let refused = try embedded([(0, sha1), (2, requirements), (0x1000, cleared(sha256)), (0x10000, cms(over: sha1, "refused"))])
         XCTAssertEqual(try self.verify(refused, "refused", in: directory).lines, [": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
     }
+
+    /**
+     A CMS blob with no bytes does not decode, rather than trip over its missing address.
+     */
+    func testAnEmptyCMSBlobDoesNotDecode() {
+        XCTAssertThrowsError(try Signer(cms: Data(), over: Data())) { error in
+            if case .undecodable? = error as? Signer.Failure {} else {
+                XCTFail("\(error)")
+            }
+        }
+    }
 }
