@@ -11,6 +11,7 @@ enum CDHashError: Error, Equatable {
     case truncatedCodeSignatureSuperblob(signatureSize: Int)
     case invalidCodeSignatureMagic(magic: UInt32)
     case invalidCodeSignatureSuperblobLength(length: UInt32, signatureSize: Int)
+    case codeSignatureTooLarge(length: UInt32, limit: Int)
     case invalidCodeSignatureIndexTable(count: UInt32, length: UInt32)
     case invalidCodeSignatureBlobOffset(offset: UInt32, signatureSize: Int)
     case invalidCodeSignatureBlobRange(offset: UInt32, size: UInt32, signatureSize: Int)
@@ -29,6 +30,8 @@ extension CDHashError: LocalizedError {
             "Invalid Mach-O: code signature has invalid magic \(String(format: "0x%08x", magic))"
         case let .invalidCodeSignatureSuperblobLength(length, signatureSize):
             "Invalid Mach-O: code signature declares a \(length)-byte superblob inside a \(signatureSize)-byte signature"
+        case let .codeSignatureTooLarge(length, limit):
+            "Mach-O too large: its code signature declares a \(length)-byte superblob, more than \(limit)"
         case let .invalidCodeSignatureIndexTable(count, length):
             "Invalid Mach-O: code signature index count \(count) does not fit in the \(length)-byte superblob"
         case let .invalidCodeSignatureBlobOffset(offset, signatureSize):
@@ -174,6 +177,14 @@ extension MachO {
     // MARK: - Embedded signature
 
     /**
+     The most bytes a superblob may declare (64 MiB), a limit of this tool's, as `MachO.maxLoadCommandsSize` is:
+     Security reads what the length says, the kernel maps what `LC_CODE_SIGNATURE` says, and the largest signatures
+     the toolchain writes are a few megabytes, two directories of a 4 GiB `x86_64` slice adding up to 52 MiB, where a
+     crafted length over a sparse file would be read whole.
+     */
+    static let maxSignatureSize = 64 << 20
+
+    /**
      The superblob `LC_CODE_SIGNATURE` points at, read like `MachORep::signingData`: `BlobCore::readBlob` requires its
      magic and, unless the command's size is zero, a length within that size; then `EmbeddedSignatureBlob::specific`
      requires every blob it indexes to lie inside it. fashion also requires the length to fit the slice, where
@@ -199,6 +210,9 @@ extension MachO {
             Int(length) <= self.length - offset
         else {
             throw CDHashError.invalidCodeSignatureSuperblobLength(length: length, signatureSize: size)
+        }
+        guard Int(length) <= Self.maxSignatureSize else {
+            throw CDHashError.codeSignatureTooLarge(length: length, limit: Self.maxSignatureSize)
         }
 
         let superblob = Int(length) <= probe.count ? probe.prefix(Int(length)) : try self.dataAt(offset, count: Int(length))
@@ -331,7 +345,7 @@ extension MachO {
             execSegBase: execSeg.base,
             execSegLimit: execSeg.limit,
             execSegFlags: self.filetype == UInt32(MH_EXECUTE) ? 1 : 0, // CS_EXECSEG_MAIN_BINARY
-            specialSlots: [1: self.infoPlist(), 2: Self.emptyRequirementsBlob].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
+            specialSlots: [1: self.infoPlistDigests(), 2: CodeDirectoryBuilder.digests(of: Self.emptyRequirementsBlob)].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
         )
 
         return try builder.build(code: self).map { hashType, cd in
@@ -412,14 +426,14 @@ extension MachO {
     }
 
     /**
-     The Info.plist embedded in `__TEXT,__info_plist`, like `MachORep::infoPlist`: the section's bytes, whatever they
-     hold, or nil. As in `MachOBase::findSection`, a segment command too short for the section table it declares holds
-     no section. `MachORep::infoPlist` catches a failed `MachO::dataAt`, so a section `codesign` cannot read is no
-     Info.plist either: one past the slice's end, or one larger than the 2 GiB a single read(2) takes. On a big-endian
-     slice (ppc, ppc64) `codesign` bounds the section table with the unswapped section count, so it never finds the
-     section.
+     The Info.plist embedded in `__TEXT,__info_plist`, like `MachORep::infoPlist`, digested under each of the
+     builder's hash types as it streams by, whatever it holds, or nil. As in `MachOBase::findSection`, a segment
+     command too short for the section table it declares holds no section. `MachORep::infoPlist` catches a failed
+     `MachO::dataAt`, so a section `codesign` cannot read is no Info.plist either: one past the slice's end, or one
+     larger than the 2 GiB a single read(2) takes (`nbyte > INT_MAX` is EINVAL). On a big-endian slice (ppc, ppc64)
+     `codesign` bounds the section table with the unswapped section count, so it never finds the section.
      */
-    private func infoPlist() throws -> Data? {
+    private func infoPlistDigests() throws -> [HashType: Data]? {
         guard
             !self.swap,
             let text = try self.findSegment("__TEXT")
@@ -450,12 +464,19 @@ extension MachO {
             }
             guard
                 offset <= UInt64(self.length),
-                size <= UInt64(self.length) - offset
+                size <= UInt64(self.length) - offset,
+                size <= UInt64(Int32.max)
             else {
                 return nil
             }
             do {
-                return try self.dataAt(Int(offset), count: Int(size))
+                var hashers = CodeDirectoryBuilder.hashTypes.map { ($0, $0.hasher()) }
+                try self.stream(Int(offset) ..< Int(offset + size)) { chunk in
+                    for index in hashers.indices {
+                        hashers[index].1.update(bufferPointer: chunk)
+                    }
+                }
+                return Dictionary(uniqueKeysWithValues: hashers.map { ($0, Data($1.finalize())) })
             } catch is Errno {
                 // What codesign cannot read either; a file that changed size is still reported.
                 return nil
@@ -721,8 +742,15 @@ private struct CodeDirectoryBuilder {
     let execSegBase: UInt64
     let execSegLimit: UInt64
     let execSegFlags: UInt64
-    /// Special slot contents by slot number, hashed into slot -n.
-    let specialSlots: [Int: Data]
+    /// The directories built, SHA-256 first, as `codesign --digest-algorithm=sha1,sha256` orders them.
+    static let hashTypes: [HashType] = [.sha256, .sha1]
+    /// Special slot digests by slot number and hash type, written into slot -n.
+    let specialSlots: [Int: [HashType: Data]]
+
+    /// `blob` digested under each of `hashTypes`, what a special slot holds of it.
+    static func digests(of blob: Data) -> [HashType: Data] {
+        Dictionary(uniqueKeysWithValues: self.hashTypes.map { ($0, $0.digest(blob)) })
+    }
 
     /// `Builder::build`'s choice: the oldest version that holds every field in use.
     var version: UInt32 {
@@ -754,7 +782,7 @@ private struct CodeDirectoryBuilder {
      code, read from the image once for both types. A directory too large is refused before any code is read.
      */
     func build(code image: MachO) throws -> [(hashType: HashType, directory: Data)] {
-        let hashTypes: [HashType] = [.sha256, .sha1]
+        let hashTypes = Self.hashTypes
         var directories = try hashTypes.map { try self.directory(hashType: $0) }
         try image.forEachPage(upTo: self.codeLimit, pageSize: 1 << Int(self.pageSizeLog)) { page in
             for index in hashTypes.indices {
@@ -809,7 +837,7 @@ private struct CodeDirectoryBuilder {
         cd.reserveCapacity(length)
         cd.append(identifier)
         for slot in stride(from: nSpecialSlots, through: 1, by: -1) { // slots -nSpecialSlots ... -1
-            cd.append(self.specialSlots[slot].map { hashType.digest($0) } ?? Data(count: hashSize))
+            cd.append(self.specialSlots[slot]?[hashType] ?? Data(count: hashSize))
         }
         return cd
     }

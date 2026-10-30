@@ -104,6 +104,7 @@ left out, with the reason.
 | Two of `LC_ID_DYLIB`, `LC_ROUTINES`, `LC_ATOM_INFO`, `LC_FUNCTION_VARIANTS`, `LC_FUNCTION_VARIANT_FIXUPS`, `LC_TARGET_TRIPLE` | live dyld "multiple LC_… load commands found" | |
 | An `lc_str` starting inside its command's fixed fields, a dylib command's 24 bytes, the others' 12: named with the offset | live dyld "string start offset too small" | |
 | More than 64 MiB of load commands | this tool's own limit, as the symbol names': refused red before the table is read; no loader has one | |
+| A superblob declaring more than 64 MiB | this tool's own limit, as the load commands': refused red before it is read, in hash mode as in `verify`; Security reads what the length says and the kernel maps what `LC_CODE_SIGNATURE` says, a sparse file costing either the length in memory | |
 | `LC_DYSYMTAB` without `LC_SYMTAB`; `LC_DYLD_INFO` with `LC_DYLD_CHAINED_FIXUPS` | dyld | ran |
 | `LC_DYLD_INFO` beside `LC_DYLD_INFO_ONLY`, `LC_ROUTINES` beside `LC_ROUTINES_64` | dyld `validStructureLoadCommands` counts each pair as one command: "multiple LC_DYLD_INFO load commands found" | |
 | No `LC_UUID` | dyld `validLinkedit` "missing LC_UUID" (SDK ≥ 14) | dyld aborted |

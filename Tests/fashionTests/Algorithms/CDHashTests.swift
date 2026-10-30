@@ -408,6 +408,25 @@ final class CDHashTests: XCTestCase {
     }
 
     /**
+     The `__TEXT,__info_plist` section is digested as it streams by, a megabyte at a time, rather than read whole: a
+     section of 64 MiB and a byte, patterned with a period no chunk is a multiple of, hashes as codesign hashes it.
+     */
+    func testAdhocStreamsALargeInfoPlist() throws {
+        let dir = try self.temporaryDirectory()
+        let inputs = dir / "inputs"
+        try FileManager.default.createDirectory(at: inputs, withIntermediateDirectories: true)
+        let count = (64 << 20) + 1
+        let unit = Data((0 ..< 251).map { UInt8($0) })
+        var large = Data(capacity: count + unit.count)
+        while large.count < count {
+            large.append(unit)
+        }
+        try large.prefix(count).write(to: inputs / "large")
+
+        try self.assertAdhocMatchesCodesignDetached(compile("large", in: dir, ["-arch", "arm64", "-Wl,-sectcreate,__TEXT,__info_plist,\((inputs / "large").path())"]))
+    }
+
+    /**
      `MachORep::infoPlist` catches a failed read, so a section larger than the 2 GiB a single `read(2)` takes is no
      `Info.plist` to codesign, like one past the end of the file. The large file is sparse, and --exact keeps the
      code it hashes to the image, the same bytes as in the short file.

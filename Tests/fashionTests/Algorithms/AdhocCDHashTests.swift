@@ -287,6 +287,26 @@ final class AdhocCDHashTests: XCTestCase {
         return signature
     }
 
+    /**
+     A superblob declaring more than 64 MiB, which no signer writes and this tool refuses before it reads it: the
+     file is sparse, holding the length, and `LC_CODE_SIGNATURE` declares the same.
+     */
+    func testEmbeddedSignaturePastTheLimitIsRefused() throws {
+        let limit = MachO.maxSignatureSize
+        var data = self.makeSignedMachO(signature: self.superblob([0xfade_0cc0, UInt32(limit + 1), 0]))
+        data.replaceSubrange(116 ..< 120, with: withUnsafeBytes(of: UInt32(limit + 1).littleEndian) { Data($0) }) // LC_CODE_SIGNATURE's datasize
+        let url = FileManager.default.temporaryDirectory / "fashion-limit-\(UUID())"
+        try data.write(to: url)
+        self.addTeardownBlock {
+            try? FileManager.default.removeItem(at: url)
+        }
+        XCTAssertEqual(truncate(url.path, off_t(128 + limit + 1)), 0)
+
+        XCTAssertThrowsError(try CDHash.hash(path: url.path)) { error in
+            XCTAssertEqual(error as? CDHashError, .codeSignatureTooLarge(length: UInt32(limit + 1), limit: limit))
+        }
+    }
+
     func testEmbeddedSignatureBoundsAreEnforced() throws {
         let magic: UInt32 = 0xfade_0cc0
         let padding = Data(repeating: 0, count: 4)
