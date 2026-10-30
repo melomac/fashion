@@ -283,6 +283,13 @@ final class VerifierTests: XCTestCase {
         try FileManager.default.copyItem(at: packed, to: signed)
         _ = try codesign(["-f", "-s", "-", signed.path])
         XCTAssertTrue(self.verify(signed.path).lines.contains("\(signed.path): packed by UPX, signed after packing"))
+        // A pack header that does not hold, its checksum wrong, is named as unpack refuses it.
+        var broken = try Data(contentsOf: packed)
+        let header = try XCTUnwrap(broken.ranges(of: Data("UPX!".utf8)).last).lowerBound
+        broken[header + 31] ^= 0xff
+        let corrupt = directory / "corrupt"
+        try broken.write(to: corrupt)
+        XCTAssertTrue(self.verify(corrupt.path).lines.contains("\(corrupt.path): Invalid UPX data: header corrupted 3: a pack header that does not hold, which unpack refuses"))
     }
 
     /**

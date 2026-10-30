@@ -783,11 +783,17 @@ struct MachOVerifier {
             }
         }
 
-        // UPX: as it is, or behind a signature added after packing, which hides the 16-byte __LINKEDIT UPX left.
-        if let packed = try? PackMach(image) {
+        // UPX: as it is, or behind a signature added after packing, which hides the 16-byte __LINKEDIT UPX left; a
+        // pack header found that does not hold is named, as unpack refuses it.
+        switch Result(catching: { try PackMach(image) }) {
+        case let .success(packed?):
             found.append(packed.packer)
-        } else if image.findCommand(UInt32(LC_CODE_SIGNATURE)) != nil, let pieces = (try? MachOEditor.unsigned(image, end: image.length)) ?? nil, let unsigned = (try? MachO(File(editing: self.file, pieces: pieces))) ?? nil, let packed = try? PackMach(unsigned) {
-            found.append("\(packed.packer), signed after packing")
+        case .success(nil):
+            if image.findCommand(UInt32(LC_CODE_SIGNATURE)) != nil, let pieces = (try? MachOEditor.unsigned(image, end: image.length)) ?? nil, let unsigned = (try? MachO(File(editing: self.file, pieces: pieces))) ?? nil, let packed = try? PackMach(unsigned) {
+                found.append("\(packed.packer), signed after packing")
+            }
+        case let .failure(error):
+            found.append("\(File.message(for: error)): a pack header that does not hold, which unpack refuses")
         }
         return found
     }

@@ -162,7 +162,7 @@ left out, with the reason.
 | Bytes between two segments that are not zero | research | ran |
 | Bytes appended past the image's end | research: a new hash per copy, polyglots; `--exact` undoes it | ran |
 | A `__LINKEDIT` vmsize rounded as a signature rounds it, on an image without a signature | research: a signature came out, which `codesign --remove-signature` leaves so | ran (x86_64) |
-| UPX, as is, by a modified UPX with its marker, or signed after packing | research; `--unpack` undoes it | ran |
+| UPX, as is, by a modified UPX with its marker, or signed after packing; a pack header found that does not hold, which `unpack` refuses | research; `--unpack` undoes it | ran |
 
 ### Code signature
 
