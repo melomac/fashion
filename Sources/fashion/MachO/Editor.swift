@@ -7,6 +7,8 @@ private let logger = Logger(subsystem: "fashion", category: "edit")
 enum EditError: Error, Equatable {
     /// The code signature does not end the image, so removing it would cut off what follows.
     case signatureNotAtEnd
+    /// The code signature starts inside the header or the load commands, which the edit rewrites.
+    case signatureInsideHeaders
 }
 
 extension EditError: LocalizedError {
@@ -15,6 +17,8 @@ extension EditError: LocalizedError {
         case .signatureNotAtEnd:
             // Security's own words, which codesign logs before it fails with an internal error.
             "LC_CODE_SIGNATURE does not point to end of file"
+        case .signatureInsideHeaders:
+            "LC_CODE_SIGNATURE points inside the load commands"
         }
     }
 }
@@ -392,6 +396,11 @@ extension MachO {
         guard end - 7 ... end ~= signature.offset + signature.size else {
             throw EditError.signatureNotAtEnd
         }
+        // A signature laid over the header and the load commands, which are rewritten below, is no image to give back.
+        let headerSize = self.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+        guard signature.offset >= headerSize + self.sizeofcmds else {
+            throw EditError.signatureInsideHeaders
+        }
 
         var newEnd = signature.offset
         if let symtab = self.findCommand(UInt32(LC_SYMTAB))?.payload(as: symtab_command.self) {
@@ -402,7 +411,6 @@ extension MachO {
         }
 
         // The header and load commands, where a command's data keeps the table's indices, its offsets in the image.
-        let headerSize = self.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
         var head = try self.dataAt(0, count: headerSize + self.sizeofcmds)
         func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
             head.withUnsafeMutableBytes { $0.storeBytes(of: self.sw(value), toByteOffset: offset, as: T.self) }

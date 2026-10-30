@@ -216,6 +216,32 @@ final class UnsignerTests: XCTestCase {
     }
 
     /**
+     A signature laid over the header and the load commands, `LC_CODE_SIGNATURE` pointing at offset 0, is no image to
+     give back: reported, nothing written, where the edit would rewrite the headers under it.
+     */
+    func testASignatureInsideTheLoadCommandsIsRefused() throws {
+        let directory = try self.directory("inside")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let original = try compile("sample", in: directory, ["-arch", "x86_64"])
+        let signed = directory / "signed"
+        try Data(contentsOf: original).write(to: signed)
+        _ = try codesign(["-s", "-", signed.path])
+        var data = try Data(contentsOf: signed)
+        let command = try XCTUnwrap(XCTUnwrap(MachO(File(data: data))).findCommand(UInt32(LC_CODE_SIGNATURE)))
+        data.replaceSubrange(command.data.startIndex + 8 ..< command.data.startIndex + 16, with: withUnsafeBytes(of: (UInt32(0), UInt32(data.count))) { Data($0) }) // dataoff, datasize
+        let file = directory / "inside"
+        try data.write(to: file)
+        let reporter = Reporter(console: Console())
+        let refusal = "fashion: \(file.path): LC_CODE_SIGNATURE points inside the load commands"
+        XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [refusal])
+        XCTAssertEqual(reporter.errorCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unsigned"))
+        XCTAssertEqual(try runFashion(["--unsign", file.path]).errors, [refusal])
+    }
+
+    /**
      A universal file past 4 GiB, which a 32-bit table cannot place, gets a 64-bit table, as `lipo` writes one for it,
      where a smaller file keeps the 32-bit table it had.
      */
