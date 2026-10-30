@@ -846,6 +846,136 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     The DER entitlements are read as AMFI reads them at exec: a program signed with a boolean, a string and a
+     dictionary; then the same bytes resealed with the first two pairs swapped, the root dictionary a SET, the string
+     a GeneralizedTime, then an OCTET STRING, the nested dictionary a SET, and bytes after the dictionary within the
+     wrapper, each of which AMFI refuses the code for and verify names with no verdict; and bytes after the wrapper,
+     and the whole as a version 0 dictionary, a bare SET padded to the length, which AMFI takes and verify reads. The
+     programs run, or do not, as the oracle; codesign decodes what AMFI takes and refuses the rest but the nested SET,
+     its validator run under other options.
+     */
+    func testDEREntitlementsAreReadAsAMFIReadsThem() throws {
+        let directory = try self.directory("der")
+        let plist = directory / "entitlements.plist"
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/><key>com.apple.security.fashion</key><string>20250101000000Z</string><key>com.apple.security.fashion.dict</key><dict><key>idVendorX</key><integer>1</integer></dict></dict></plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+        let signed = directory / "signed"
+#if arch(arm64)
+        let arch = "arm64"
+#else
+        let arch = "x86_64"
+#endif
+        try self.program(arch, in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--entitlements", plist.path, signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let der = try XCTUnwrap(MachO.component(7, of: superblob))
+        let bytes = Data(der.dropFirst(8))
+        // 70 { 02 01 01, b0 { 30 { 0c key, value } ... } }, the keys sorted, the dictionary value a b0 of its own
+        var reader = DER.Reader(bytes)
+        let wrapper = try XCTUnwrap(reader.next())
+        XCTAssertEqual(wrapper.tag, 0x70)
+        let (version, root) = try (XCTUnwrap(DER.elements(of: wrapper.content)?.first), XCTUnwrap(DER.elements(of: wrapper.content)?.last))
+        XCTAssertEqual(root.tag, 0xb0)
+        let pairs = try XCTUnwrap(DER.elements(of: root.content))
+        XCTAssertEqual(pairs.count, 3)
+        let string = try XCTUnwrap(DER.elements(of: pairs[1].content))
+        let nested = try XCTUnwrap(DER.elements(of: pairs[2].content))
+        XCTAssertEqual([string[1].tag, nested[1].tag], [0x0c, 0xb0])
+        let hardening = ": entitled to opt out of hardening: com.apple.security.cs.allow-jit"
+        XCTAssertEqual(try self.verify(program, "signed", in: directory).lines, [hardening])
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: signed.path)
+        try XCTSkipUnless(execute(signed.path, []), "the signed program does not run here")
+        XCTAssertTrue(try execute("/usr/bin/codesign", ["-d", "--entitlements", "-", signed.path]))
+
+        /// `program` with its DER replaced by `replacement`, of the same length, resealed in every code directory.
+        func resealed(_ replacement: Data) -> Data {
+            XCTAssertEqual(replacement.count, bytes.count)
+            var data = program
+            let start = signature.offset + der.startIndex + 8
+            data.replaceSubrange(start ..< start + replacement.count, with: replacement)
+            let blob = data[signature.offset + der.startIndex ..< signature.offset + der.endIndex]
+            for slot: UInt32 in [0, 0x1000] {
+                guard let codeDirectory = MachO.component(slot, of: superblob) else {
+                    continue
+                }
+                let hashOffset = Int(UInt32(bigEndian: codeDirectory.load(UInt32.self, at: 16)))
+                let hashSize = Int(codeDirectory[codeDirectory.startIndex + 36])
+                let digest = switch codeDirectory[codeDirectory.startIndex + 37] {
+                case 1: Data(Insecure.SHA1.hash(data: blob))
+                case 4: Data(SHA384.hash(data: blob))
+                default: Data(SHA256.hash(data: blob))
+                }
+                let at = signature.offset + codeDirectory.startIndex + hashOffset - 7 * hashSize
+                data.replaceSubrange(at ..< at + hashSize, with: digest.prefix(hashSize))
+            }
+            return data
+        }
+        /// What verify says of `data` as `name`, whether it runs, and whether codesign decodes its entitlements.
+        func verified(_ data: Data, _ name: String) throws -> (lines: [String], runs: Bool, decodes: Bool) {
+            let lines = try self.verify(data, name, in: directory).lines
+            let path = (directory / name).path
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+            return try (lines, execute(path, []), execute("/usr/bin/codesign", ["-d", "--entitlements", "-", path]))
+        }
+        func wrapped(_ root: Data, _ trailing: Data = Data()) -> Data {
+            DER.encode(0x70, version.raw + root + trailing)
+        }
+        func refused(_ what: String) -> String {
+            ": DER entitlements holding \(what), which AMFI refuses the code for"
+        }
+        /// `pairs` with the second one's value `value`.
+        func valued(_ value: Data) -> Data {
+            pairs[0].raw + DER.encode(0x30, string[0].raw + value) + pairs[2].raw
+        }
+        /// `pairs` with the dictionary tagged `tag`.
+        func dictionary(_ tag: UInt8) -> Data {
+            pairs[0].raw + pairs[1].raw + DER.encode(0x30, nested[0].raw + DER.encode(tag, nested[1].content))
+        }
+
+        let swapped = try verified(resealed(wrapped(DER.encode(0xb0, pairs[1].raw + pairs[0].raw + pairs[2].raw))), "swapped")
+        XCTAssertEqual(swapped.lines, [refused("keys out of order, com.apple.security.cs.allow-jit after com.apple.security.fashion")])
+        XCTAssertEqual([swapped.runs, swapped.decodes], [false, false])
+
+        let set = try verified(resealed(wrapped(DER.encode(0x31, root.content))), "set")
+        XCTAssertEqual(set.lines, [refused("no dictionary after the version")])
+        XCTAssertEqual([set.runs, set.decodes], [false, false])
+
+        let dated = try verified(resealed(wrapped(DER.encode(0xb0, valued(DER.encode(0x18, string[1].content))))), "dated")
+        XCTAssertEqual(dated.lines, [refused("a GeneralizedTime value")])
+        XCTAssertEqual([dated.runs, dated.decodes], [false, false])
+
+        let data = try verified(resealed(wrapped(DER.encode(0xb0, valued(DER.encode(0x04, string[1].content))))), "data")
+        XCTAssertEqual(data.lines, [refused("an OCTET STRING value")])
+        XCTAssertEqual([data.runs, data.decodes], [false, false])
+
+        let nestedSet = try verified(resealed(wrapped(DER.encode(0xb0, dictionary(0x31)))), "nestedset")
+        XCTAssertEqual(nestedSet.lines, [refused("a dictionary tagged 0x31 under a root tagged 0xb0")])
+        XCTAssertFalse(nestedSet.runs)
+
+        // The dictionary pair dropped, its bytes zeroed after the root, then after the wrapper: the XML then names
+        // what the DER does not.
+        let short = DER.encode(0xb0, pairs[0].raw + pairs[1].raw)
+        let padding = try XCTUnwrap((0 ..< bytes.count).first { wrapped(short, Data(count: $0)).count == bytes.count })
+        let inner = try verified(resealed(wrapped(short, Data(count: padding))), "inner")
+        XCTAssertEqual(inner.lines, [refused("bytes after the dictionary within the wrapper")])
+        XCTAssertEqual([inner.runs, inner.decodes], [false, false])
+        let outer = try verified(resealed(wrapped(short) + Data(count: bytes.count - wrapped(short).count)), "outer")
+        XCTAssertEqual(outer.lines, [": the entitlements and their DER form, which AMFI reads, disagree on com.apple.security.fashion.dict", hardening])
+        XCTAssertEqual([outer.runs, outer.decodes], [true, true])
+
+        let bare = DER.encode(0x31, dictionary(0x31))
+        let versionZero = try verified(resealed(bare + Data(count: bytes.count - bare.count)), "version0")
+        XCTAssertEqual(versionZero.lines, [hardening])
+        XCTAssertEqual([versionZero.runs, versionZero.decodes], [true, true])
+    }
+
+    /**
      Who signed, as `Signer` has it: a certificate outside Apple's chains, which codesign and the kernel take and
      Gatekeeper refuses; a code directory altered after signing; a CMS blob behind a directory flagged ad hoc; and
      entitlements AMFI reserves, under an ad-hoc signature. The certificate and the CMS blob come from the system's
@@ -1234,13 +1364,18 @@ final class VerifierTests: XCTestCase {
         for _ in 0 ..< 20000 {
             arrays = DER.encode(0x30, arrays)
         }
-        let plist = DER.encode(0x70, Data([0x02, 0x01, 0x01]) + arrays)
+        let plist = DER.encode(0x70, Data([0x02, 0x01, 0x01]) + DER.encode(0xb0, DER.encode(0x30, DER.encode(0x0c, Data("deep".utf8)) + arrays)))
         let read = self.expectation(description: "read on a worker's stack")
         let worker = Thread {
             var reader = DER.Reader(sequences)
             XCTAssertNil(reader.next())
             XCTAssertNil(Signer.signatureAndToken(in: sequences))
-            XCTAssertNil(DEREntitlements.decode(plist))
+            do {
+                _ = try DEREntitlements.decode(plist)
+                XCTFail("decoded")
+            } catch {
+                XCTAssertEqual((error as? DEREntitlements.Refusal)?.what, "values nested past 12 levels")
+            }
             read.fulfill()
         }
         worker.stackSize = 512 << 10

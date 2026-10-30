@@ -15,7 +15,7 @@ public func fuzzDER(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
         _ = DER.elements(of: data)
         _ = Signer.signatureAndToken(in: data)
         _ = Signer.timestamp(in: data)
-        _ = DEREntitlements.decode(data)
+        _ = try? DEREntitlements.decode(data)
         _ = DER.generalizedTime(data)
     }
     return 0

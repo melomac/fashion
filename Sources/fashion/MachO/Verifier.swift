@@ -1279,16 +1279,20 @@ struct MachOVerifier {
             if let magic = Self.magic(of: der), magic != 0xfade_7172 {
                 found.append("the DER entitlements blob's magic is \(magic.hex), not 0xfade7172, which the kernel refuses the signature for")
                 refusedBlob = true
-            } else if let decoded = DEREntitlements.decode(Data(der.dropFirst(8))) {
-                if let plist = entitled {
-                    let differing = Set(plist.keys).union(decoded.keys).filter { !Self.equal(plist[$0], decoded[$0]) }
-                    if !differing.isEmpty {
-                        found.append("the entitlements and their DER form, which AMFI reads, disagree on \(differing.sorted().map(Self.shown).joined(separator: ", "))")
-                    }
-                }
-                entitled = decoded
             } else {
-                found.append("DER entitlements that do not decode")
+                do {
+                    let decoded = try DEREntitlements.decode(Data(der.dropFirst(8)))
+                    if let plist = entitled {
+                        let differing = Set(plist.keys).union(decoded.keys).filter { !Self.equal(plist[$0], decoded[$0]) }
+                        if !differing.isEmpty {
+                            found.append("the entitlements and their DER form, which AMFI reads, disagree on \(differing.sorted().map(Self.shown).joined(separator: ", "))")
+                        }
+                    }
+                    entitled = decoded
+                } catch {
+                    found.append("DER entitlements holding \(error.what), which AMFI refuses the code for")
+                    refusedBlob = true
+                }
             }
         }
         if refusedBlob {
