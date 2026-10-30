@@ -394,6 +394,18 @@ final class VerifierTests: XCTestCase {
         return command
     }
 
+    /// A load command of type `cmd` carrying `string` as its `lc_str`, 8 bytes in, NUL-terminated and padded to 8.
+    private func string(_ cmd: Int32, _ string: String) -> Data {
+        var variable = Data(string.utf8) + [0]
+        variable.append(Data(count: (8 - (12 + variable.count) % 8) % 8))
+        var command = Data()
+        command.appendUInt32(UInt32(cmd))
+        command.appendUInt32(UInt32(12 + variable.count))
+        command.appendUInt32(12)
+        command.append(variable)
+        return command
+    }
+
     /// An `LC_UNIXTHREAD` command with `x86_64`'s thread state, its rip at `rip`; `flavor` and `count` as given otherwise.
     private func unixthread(rip: UInt64, flavor: UInt32 = 4, count: UInt32 = 42) -> Data {
         self.unixthread(states: [(flavor, count, rip)])
@@ -734,6 +746,12 @@ final class VerifierTests: XCTestCase {
         let variable = Data("DYLD_INSERT_LIBRARIES=/tmp/evil.dylib".utf8) + Data(count: 7)
         environment.appendUInt32(UInt32(LC_DYLD_ENVIRONMENT)); environment.appendUInt32(UInt32(12 + variable.count)); environment.appendUInt32(12); environment.append(variable)
         XCTAssertEqual(try self.verify(self.appending(environment, to: program), "environment", in: directory).lines, [": LC_DYLD_ENVIRONMENT sets DYLD_INSERT_LIBRARIES=/tmp/evil.dylib"])
+        // A right-to-left override in a value is escaped, where a terminal would show the line reordered; a value
+        // over 128 bytes is cut at 80 scalars, which one grapheme cluster of combining marks does not get around.
+        let reordered = self.string(LC_DYLD_ENVIRONMENT, "DYLD_INSERT_LIBRARIES=/tmp/\u{202E}bilyd.live")
+        XCTAssertEqual(try self.verify(self.appending(reordered, to: program), "reordered", in: directory).lines, [": LC_DYLD_ENVIRONMENT sets \"DYLD_INSERT_LIBRARIES=/tmp/\\u{202E}bilyd.live\""])
+        let marks = self.string(LC_DYLD_ENVIRONMENT, "X=e" + String(repeating: "\u{301}", count: 100))
+        XCTAssertEqual(try self.verify(self.appending(marks, to: program), "marks", in: directory).lines, [": LC_DYLD_ENVIRONMENT sets \"X=e" + String(repeating: "\u{301}", count: 77) + "\"… (203 bytes)"])
 
         var unterminated = program
         let dylib = try self.command(UInt32(LC_LOAD_DYLIB), in: program)

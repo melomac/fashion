@@ -235,7 +235,7 @@ struct MachOVerifier {
     private static func shown(_ field: Data) -> String {
         let name = field.prefix { $0 != 0 }
         let decoded = String(decoding: name, as: UTF8.self)
-        return name.allSatisfy { 0x20 ... 0x7e ~= $0 } ? decoded : decoded.debugDescription
+        return name.allSatisfy { 0x20 ... 0x7e ~= $0 } ? decoded : Self.escaped(decoded)
     }
 
     /**
@@ -243,7 +243,15 @@ struct MachOVerifier {
      when printable ASCII, quoted and escaped otherwise, so that a newline in it cannot make a line of its own.
      */
     private static func shown(_ string: String) -> String {
-        string.utf8.allSatisfy { 0x20 ... 0x7e ~= $0 } ? string : string.debugDescription
+        string.utf8.allSatisfy { 0x20 ... 0x7e ~= $0 } ? string : self.escaped(string)
+    }
+
+    /// `string` quoted and escaped as Swift's debug description writes it, the format characters it leaves as they
+    /// are, a right-to-left override that would reorder the line say, escaped as `\u{202E}` too.
+    private static func escaped(_ string: String) -> String {
+        String(String.UnicodeScalarView(string.debugDescription.unicodeScalars.flatMap { scalar in
+            Console.isPrintable(scalar) ? [scalar] : Array("\\u{\(String(scalar.value, radix: 16, uppercase: true))}".unicodeScalars)
+        }))
     }
 
     /// The filetypes dyld loads and the kernel runs, whose layout its rules are about.
@@ -930,7 +938,7 @@ struct MachOVerifier {
                 found.append("LC_LOAD_DYLINKER names \(Self.shown(string)), not /usr/lib/dyld")
             case UInt32(LC_DYLD_ENVIRONMENT):
                 // Apple's own set DYLD_DLSYM_RESULT to thousands of bytes; a library's path fits.
-                found.append("LC_DYLD_ENVIRONMENT sets \(string.utf8.count > 128 ? "\(Self.shown(String(string.prefix(80))))… (\(String(string.utf8.count, pluralizing: "byte")))" : Self.shown(string))")
+                found.append("LC_DYLD_ENVIRONMENT sets \(string.utf8.count > 128 ? "\(Self.shown(String(String.UnicodeScalarView(string.unicodeScalars.prefix(80)))))… (\(String(string.utf8.count, pluralizing: "byte")))" : Self.shown(string))")
             case UInt32(LC_ID_DYLIB):
                 installName = string
             case let cmd where Self.dylibCommands.contains(cmd):

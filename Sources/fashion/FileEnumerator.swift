@@ -86,8 +86,10 @@ final class FileWalker: Sequence, IteratorProtocol {
                 self.report(path, .illegalByteSequence)
 
             case FTS_SLNONE where isRoot:
-                // A root is followed: one whose target is missing does not exist.
-                self.report(path, .noSuchFileOrDirectory)
+                // A root is followed, and fts says nothing of why its target cannot be looked up: stat does, missing,
+                // a link to itself, or into a directory the user cannot search.
+                var status = stat()
+                self.report(path, stat(path, &status) == 0 ? .noSuchFileOrDirectory : Errno(rawValue: errno))
 
             case FTS_SL, FTS_SLNONE:
                 // FTS_LOGICAL: symlinks are followed, so these only appear for broken targets.

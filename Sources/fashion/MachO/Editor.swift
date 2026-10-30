@@ -133,19 +133,25 @@ enum MachOEditor {
             }
             return (File(editing: file, pieces: edit.states.last!.pieces), [edit.states], file, nil)
         case let .fat(archs):
+            // Two slices of one architecture, which the kernel refuses, are named apart, the second `x86_64_2`, as
+            // the artifacts of them are.
+            var named: [String: Int] = [:]
             let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
+                let count = named[arch.name, default: 0] + 1
+                named[arch.name] = count
+                let name = count == 1 ? arch.name : "\(arch.name)_\(count)"
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                         // An archive, which lipo aligns to 2^3 whatever its architecture.
                         return (arch, whole, 3, [])
                     }
-                    guard let edit = try self.edit(image, of: file, subject: "\(file.path) (\(arch.name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(arch.name, $0) }, keep: keep.map { held in { held(arch.name, $0, $1) } }) else {
+                    guard let edit = try self.edit(image, of: file, subject: "\(file.path) (\(name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(name, $0) }, keep: keep.map { held in { held(name, $0, $1) } }) else {
                         return (arch, whole, image.universalAlignment, [])
                     }
                     return (arch, edit.states.last!.pieces, edit.align, edit.states)
                 } catch {
-                    throw SliceError(arch: arch.name, error: error)
+                    throw SliceError(arch: name, error: error)
                 }
             }
             guard slices.contains(where: { !$0.states.isEmpty }) else {

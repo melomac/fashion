@@ -244,15 +244,24 @@ final class Console: @unchecked Sendable {
 
     /**
      A line as a terminal may show it: a control character from a file name, such as ESC, would move the cursor,
-     restyle the terminal or rewrite earlier output, so it shows as "?", as `ls` does. Pipes and files get every byte.
+     restyle the terminal or rewrite earlier output, and a format character, such as the right-to-left override that
+     reverses the end of a name or a zero-width space that hides in it, would show the name as another, so each
+     shows as "?", as `ls` shows what `iswprint` rejects. Pipes and files get every byte.
      */
     static func printable(_ line: String) -> String {
-        // C0 controls, DEL and C1 controls: Unicode's general category Cc.
-        let isControl = { (scalar: Unicode.Scalar) in scalar.value < 0x20 || (0x7f ... 0x9f).contains(scalar.value) }
-        guard line.unicodeScalars.contains(where: isControl) else {
+        guard line.unicodeScalars.contains(where: { !Self.isPrintable($0) }) else {
             return line
         }
-        return String(String.UnicodeScalarView(line.unicodeScalars.map { isControl($0) ? "?" : $0 }))
+        return String(String.UnicodeScalarView(line.unicodeScalars.map { Self.isPrintable($0) ? $0 : "?" }))
+    }
+
+    /// Whether a terminal shows `scalar` as itself: not a control (C0, DEL, C1: general category Cc) nor a format
+    /// character (Cf), which `ls` in a UTF-8 locale replaces too; spaces, marks and private-use characters it shows.
+    static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .format: false
+        default: true
+        }
     }
 
     /**
@@ -913,7 +922,7 @@ struct Digester {
             return
         }
         self.mode = if command.symbolOptions.symhash {
-            .symhash(hashes, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.order)
+            .symhash(hashes, separator: command.resolvedSeparator, sortSymbols: command.symbolOptions.order ?? true)
         } else if command.xarOptions.xarToc {
             .xarToc(hashes, decompress: command.xarOptions.decompress)
         } else if command.hash.slices {
@@ -1041,10 +1050,11 @@ struct Digester {
             file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: self.unsign, unpack: self.unpack, caveat: warned)?.file ?? opened : opened
         } catch where self.unpack && Self.isUnpackError(error) {
             // Packed data that does not hold, or an image unpacked from it that does not, in the file or a slice of a
-            // universal one: --unpack hashes every file, so the file is hashed packed, as it is, the refusal said in a
-            // warning after the slice at fault; with --unsign, its signatures out. thinr and unpack refuse it in red
-            // instead, and write what decompressed under --keep.
-            note(reporter.warn(path: Self.subject(path, of: error), message: "\(File.message(for: error)), hashed packed"))
+            // universal one: --unpack hashes every file, so the file is hashed packed, as it is, every slice of it,
+            // the ones that unpacked included, the refusal said in a warning after the slice at fault; with --unsign,
+            // its signatures out. thinr and unpack refuse it in red instead, and write what decompressed under --keep.
+            let subject = Self.subject(path, of: error)
+            note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")hashed packed"))
             file = try self.unsign ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: true, unpack: false, caveat: warned)?.file ?? opened : opened
         }
         // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless

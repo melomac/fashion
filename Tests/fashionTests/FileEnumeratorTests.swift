@@ -196,7 +196,8 @@ final class FileEnumeratorTests: XCTestCase {
 
     /**
      Each root that cannot be walked is reported with what fts met there: a path in an unreadable directory is
-     not missing, a file named as a directory is not one, and a root symlink to nothing does not exist.
+     not missing, a file named as a directory is not one, a root symlink to nothing does not exist, and one to
+     itself is a loop, which fts does not tell from a missing target.
      */
     func testRootsReportTheirOwnErrors() throws {
         try XCTSkipIf(getuid() == 0, "root reads an unreadable directory")
@@ -205,13 +206,14 @@ final class FileEnumeratorTests: XCTestCase {
         try Data("x".utf8).write(to: dir / "locked" / "f")
         try Data("x".utf8).write(to: dir / "file")
         try FileManager.default.createSymbolicLink(atPath: (dir / "dangling").path, withDestinationPath: "nowhere")
+        try FileManager.default.createSymbolicLink(atPath: (dir / "loop").path, withDestinationPath: "loop")
         XCTAssertEqual(chmod((dir / "locked").path, 0), 0)
         defer {
             chmod((dir / "locked").path, 0o755)
             try? FileManager.default.removeItem(at: dir)
         }
 
-        let roots = [(dir / "locked" / "f").path, (dir / "file").path + "/", (dir / "dangling").path, (dir / "missing").path]
+        let roots = [(dir / "locked" / "f").path, (dir / "file").path + "/", (dir / "dangling").path, (dir / "missing").path, (dir / "loop").path]
         XCTAssertTrue(self.sortedWalk(roots).isEmpty)
 
         let (status, errors) = try runFashion(["--sort"] + roots)
@@ -220,6 +222,7 @@ final class FileEnumeratorTests: XCTestCase {
             "fashion: \(dir.path)/dangling: No such file or directory",
             "fashion: \(dir.path)/file/: Not a directory",
             "fashion: \(dir.path)/locked/f: Permission denied",
+            "fashion: \(dir.path)/loop: Too many levels of symbolic links",
             "fashion: \(dir.path)/missing: No such file or directory",
         ])
     }

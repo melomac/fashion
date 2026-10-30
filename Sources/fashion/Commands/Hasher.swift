@@ -20,6 +20,9 @@ private enum HashOptionError: Error, Equatable {
     case targetNotOfAlgorithm(String, Algorithm)
     case xlenWithoutTLSHTarget
     case negateWithoutMatch
+    case separatorWithoutSymHash
+    case orderWithoutSymHash
+    case scoreWithoutMatch
 }
 
 extension HashOptionError: LocalizedError {
@@ -51,6 +54,12 @@ extension HashOptionError: LocalizedError {
             "--match '\(target)' is not shaped like \(algorithm.rawValue) digests."
         case .xlenWithoutTLSHTarget:
             "--xlen requires a TLSH digest to --match."
+        case .separatorWithoutSymHash:
+            "--separator requires --symhash."
+        case .orderWithoutSymHash:
+            "--order and --no-order require --symhash."
+        case .scoreWithoutMatch:
+            "--score requires --match."
         case .negateWithoutMatch:
             "--negate requires --match."
         }
@@ -149,7 +158,7 @@ struct Hasher: ParsableCommand {
     }
 
     var resolvedSeparator: String {
-        var sep = self.symbolOptions.separator
+        var sep = self.symbolOptions.separator ?? ","
         sep = sep.replacingOccurrences(of: "\\n", with: "\n")
         sep = sep.replacingOccurrences(of: "\\0", with: "\0")
         sep = sep.replacingOccurrences(of: "\\t", with: "\t")
@@ -157,7 +166,7 @@ struct Hasher: ParsableCommand {
     }
 
     var resolvedScore: Int {
-        self.matchOptions.score
+        self.matchOptions.score ?? 40
     }
 
     // MARK: - Validation
@@ -204,14 +213,23 @@ struct Hasher: ParsableCommand {
         if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.tlsh) {
             throw ValidationError(HashOptionError.xlenWithoutTLSHTarget)
         }
-        if self.matchOptions.score < 0 {
+        if self.resolvedScore < 0 {
             throw ValidationError(HashOptionError.negativeScore)
         }
-        if self.matchOptions.score > 100, Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.ssdeep) {
+        if self.resolvedScore > 100, Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.ssdeep) {
             throw ValidationError(HashOptionError.scoreAboveSSDeep)
         }
         if self.matchOptions.negate, self.matchOptions.match.isEmpty {
             throw ValidationError(HashOptionError.negateWithoutMatch)
+        }
+        if self.matchOptions.score != nil, self.matchOptions.match.isEmpty {
+            throw ValidationError(HashOptionError.scoreWithoutMatch)
+        }
+        if self.symbolOptions.separator != nil, !self.symbolOptions.symhash {
+            throw ValidationError(HashOptionError.separatorWithoutSymHash)
+        }
+        if self.symbolOptions.order != nil, !self.symbolOptions.symhash {
+            throw ValidationError(HashOptionError.orderWithoutSymHash)
         }
     }
 
@@ -294,8 +312,8 @@ struct MatchOptions: ParsableArguments {
     @Option(name: .shortAndLong, help: "Digests to match.")
     var match: [String] = []
 
-    @Option(name: .shortAndLong, help: "Minimum similarity (ssdeep) or maximum distance (TLSH) threshold.")
-    var score: Int = 40
+    @Option(name: .shortAndLong, help: "Minimum similarity (ssdeep) or maximum distance (TLSH) threshold (default: 40).")
+    var score: Int?
 
     @Flag(name: .shortAndLong, help: "Compare TLSH digests without the recorded file length.")
     var xlen = false
@@ -308,11 +326,11 @@ struct SymbolOptions: ParsableArguments {
     @Flag(name: [.long, .customLong("sym")], help: "Compute SymHash (external symbol hash) for Mach-O slices.")
     var symhash = false
 
-    @Option(name: [.long, .customLong("sep")], help: ArgumentHelp("Symbol separator.", valueName: "char"))
-    var separator: String = ","
+    @Option(name: [.long, .customLong("sep")], help: ArgumentHelp("Symbol separator (default: ,).", valueName: "char"))
+    var separator: String?
 
-    @Flag(name: .shortAndLong, inversion: .prefixedNo, help: "Sort symbols before hashing.")
-    var order = true
+    @Flag(name: .shortAndLong, inversion: .prefixedNo, help: "Sort symbols before hashing (default: sorted).")
+    var order: Bool?
 }
 
 struct XAROptions: ParsableArguments {

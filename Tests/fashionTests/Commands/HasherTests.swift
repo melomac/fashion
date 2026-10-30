@@ -28,6 +28,25 @@ final class HasherTests: XCTestCase {
     /**
      A XAR archive is no Mach-O for UPX to have packed; the symbols of one it packed are those of its original.
      */
+    /**
+     `--separator` and `--no-order` belong to `--symhash`, `--score` to `--match`: given outside their mode they
+     would change nothing, so they are refused, as `--decompress` without `--xar-toc` is.
+     */
+    func testModeOptionsAreRefusedOutsideTheirMode() {
+        for (arguments, message) in [
+            (["x", "--sep", ";"], "--separator requires --symhash."),
+            (["x", "--no-order"], "--order and --no-order require --symhash."),
+            (["x", "--order"], "--order and --no-order require --symhash."),
+            (["x", "--score", "10"], "--score requires --match."),
+        ] {
+            XCTAssertThrowsError(try Hasher.parse(arguments), arguments.joined(separator: " ")) { error in
+                XCTAssertEqual(Hasher.message(for: error), message)
+            }
+        }
+        XCTAssertNoThrow(try Hasher.parse(["x", "--symhash", "--sep", ";", "--no-order"]))
+        XCTAssertNoThrow(try Hasher.parse(["x", "--match", "3:abc:def", "--score", "10"]))
+    }
+
     func testUnpackDoesNotApplyToXarToc() {
         XCTAssertEqual(usageError(["x", "--unpack", "--xar-toc"]), "--unpack does not apply to --xar-toc.")
         XCTAssertNil(usageError(["x", "--unpack", "--symhash"]))

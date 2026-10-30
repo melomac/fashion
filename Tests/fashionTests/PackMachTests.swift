@@ -1158,7 +1158,7 @@ final class PackMachTests: XCTestCase {
     /**
      A universal file whose first slice a modified UPX packed and whose second slice's packed data does not hold:
      the warning about the first is printed, then the error about the second, each after its architecture, as hash
-     mode prints them, before the digest of the file as it is, packed.
+     mode prints them, before the digest of the file as it is, packed, the first slice included, as the warning says.
      */
     func testACaveatOutlivesALaterSlicesError() throws {
         let directory = try self.directory("caveat-then-error")
@@ -1183,7 +1183,7 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(hashed.count, 3)
         XCTAssertEqual(hashed.first, warning)
         XCTAssertTrue(try XCTUnwrap(hashed.dropFirst().first).hasPrefix(error))
-        XCTAssertTrue(try XCTUnwrap(hashed.dropFirst().first).hasSuffix(", hashed packed"))
+        XCTAssertTrue(try XCTUnwrap(hashed.dropFirst().first).hasSuffix(", the file hashed packed"))
         XCTAssertEqual(hashed.last, try XCTUnwrap(ByteHash.sha256.digest(Data(contentsOf: file))))
         let reporter = Reporter(console: Console())
         for lines in [Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter), Unpacker.lines(for: file.path, write: false, reporter: reporter)] {
