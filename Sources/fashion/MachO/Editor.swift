@@ -214,8 +214,9 @@ enum MachOEditor {
             // image is looked at without it.
             let probed = unsigned.flatMap { (try? MachO(File(editing: file, pieces: $0))) ?? nil } ?? image
             if let packMach = try PackMach(probed) {
-                // What decompressed of an image that fails a check, kept as it is for --keep: named for the edits
-                // before it, the signature that came out for UPX to be found behind it included.
+                // What decompressed of an image that fails a check, or decoded under no key where a key was applied,
+                // kept as it is for --keep: named for the edits before it, the signature that came out for UPX to be
+                // found behind it included.
                 let hold = { (data: Data, why: String) in
                     guard let keep else {
                         return
@@ -228,15 +229,12 @@ enum MachOEditor {
                     keep(kept, data)
                     logger.info("\(subject, privacy: .public): decompressed, kept as it is: \(why, privacy: .public)")
                 }
-                let (data, message, notes): (Data, String?, [String])
-                do {
-                    (data, message, notes) = try packMach.unpack()
-                } catch let UnpackError.unverified(reason, decompressed) {
-                    hold(decompressed, reason)
-                    throw UnpackError.unverified(reason, decompressed: decompressed)
-                }
+                let (data, message, notes, decompressed) = try packMach.unpack()
                 if let message {
                     caveat(message)
+                }
+                if let decompressed {
+                    hold(decompressed, "the blocks under no XOR key, as decoded")
                 }
                 if let unsigned, !edits.contains(.unsigned) {
                     // Its signature had to come out to unpack it: a state of its own.

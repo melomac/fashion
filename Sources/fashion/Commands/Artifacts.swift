@@ -77,7 +77,8 @@ struct ArtifactWriter {
     func lines(for path: String, reporter: Reporter) -> [Line] {
         let artifacts: [(suffix: String, bytes: File)]
         var caveats: [Line] = []
-        // What decompressed of an image that fails a check, under keep, named for its slice and the edits before it.
+        // What decompressed of an image that fails a check, or decoded under no key where a key was applied, under
+        // keep, named for its slice and the edits before it.
         var kept: [(suffix: String, bytes: File)] = []
         do {
             let read = try File(path: path)
@@ -94,7 +95,7 @@ struct ArtifactWriter {
             return caveats + self.written(kept, for: path, reporter: reporter) + [reporter.report(path: Digester.subject(path, of: error), message: File.message(for: error), tint: Digester.tint(for: error))]
         }
 
-        return caveats + self.written(artifacts, for: path, reporter: reporter)
+        return caveats + self.written(kept + artifacts, for: path, reporter: reporter)
     }
 
     /// The lines for `artifacts` written beside `path`, each named after it with its suffix: its path, or what kept it

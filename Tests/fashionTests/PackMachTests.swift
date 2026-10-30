@@ -558,7 +558,15 @@ final class PackMachTests: XCTestCase {
         big.replaceSubrange(header + 16 ..< header + 20, with: [0xff, 0xff, 0xff, 0xff])
         big[header + 31] = UInt8(big[header + 4 ..< header + 31].reduce(0) { $0 + Int($1) } % 251)
 
-        for (name, data, message) in [("corrupt", corrupt, "header corrupted 3"), ("huge", huge, "file header corrupted"), ("big", big, "header corrupted 4")] {
+        // A format UPX never numbered, its checksum made to hold, is refused by its number before any field is read.
+        var unknown = packed
+        unknown[header + 5] = 200
+        unknown[header + 31] = UInt8(unknown[header + 4 ..< header + 31].reduce(0) { $0 + Int($1) } % 251)
+        // A p_filesize past what this tool unpacks in memory, which UPX, bounding each block alone, would unpack.
+        var large = packed
+        large.replaceSubrange(overlay + 4 ..< overlay + 8, with: withUnsafeBytes(of: UInt32(0x7fff_ffff).littleEndian) { Data($0) })
+
+        for (name, data, message) in [("corrupt", corrupt, "Invalid UPX data: header corrupted 3"), ("huge", huge, "Invalid UPX data: file header corrupted"), ("big", big, "Invalid UPX data: header corrupted 4"), ("unknown", unknown, "Invalid UPX data: unknown format 200"), ("large", large, "Mach-O too large: the image UPX packed would be 2147483647 bytes, more than the 805306368 this tool unpacks in memory")] {
             let file = directory / name
             try data.write(to: file)
             let reporter = Reporter(console: Console())
@@ -568,7 +576,7 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(reporter.errorCount, 1, name)
             XCTAssertFalse(FileManager.default.fileExists(atPath: (directory / "\(name)_unpacked").path), name)
             // Hash mode hashes it packed, the refusal said.
-            let refusal = "fashion: \(file.path): Invalid UPX data: \(message)"
+            let refusal = "fashion: \(file.path): \(message)"
             let (status, errors) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 0, name)
             XCTAssertEqual(errors, [refusal + ", hashed packed"], name)
@@ -617,8 +625,8 @@ final class PackMachTests: XCTestCase {
      A UPX modified to defeat upx -d writes another marker than "UPX!" everywhere it goes: the pack header, the
      `l_info` before the packed data, and the stub, which looks for it. upx -d calls the file not packed; unpack
      finds the pack header by its structure and checksum, and takes the `l_info`'s word for the marker, named in a
-     warning. The pack header's marker replaced alone, the `l_info`'s left, vouches for nothing: the image is hashed
-     as it is.
+     warning. The pack header's marker replaced alone, the `l_info`'s left as UPX wrote it, is confirmed by that word
+     all the same, as OSX/Keydnap's "ASS7" header was.
      */
     func testUnpackFindsThePackHeaderWithoutItsMarker() throws {
         let directory = try self.directory("marker")
@@ -643,13 +651,17 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: swapped.path + "_unpacked")), original, name)
             XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", swapped.path + "_upx-d", swapped.path]), name)
 
+            // The header's marker alone replaced, l_info left as UPX wrote it: the header is confirmed by it all the same,
+            // as OSX/Keydnap's "ASS7" was, and upx -d gives up on the file.
             var header = packed
             try header.replaceSubrange(XCTUnwrap(packed.ranges(of: marker).last), with: other)
             let alone = directory / "\(name)_header-swapped"
             try header.write(to: alone)
-            XCTAssertEqual(try self.hashLines(alone.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(header))], name)
-            XCTAssertEqual(Thinner.lines(for: alone.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).count, 0, name)
+            let aloneWarning = "fashion: \(alone.path): packed by a modified UPX, its marker \"VQY\\\"\" in place of \"UPX!\""
+            XCTAssertEqual(try self.hashLines(alone.path, ["--unpack"]), try [aloneWarning, XCTUnwrap(ByteHash.sha256.digest(original))], name)
+            XCTAssertEqual(Thinner.lines(for: alone.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter).map(\.text), [aloneWarning, alone.path + "_unpacked"], name)
             XCTAssertEqual(reporter.errorCount, 0, name)
+            XCTAssertFalse(try execute(self.upx(), ["-q", "-d", "-o", alone.path + "_upx-d", alone.path]), name)
         }
     }
 
@@ -761,16 +773,16 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
-     The pack header's `c_adler`, the packer's sum of the packed bytes, is checked before the image is: a literal of
-     an NRV2B block changed decompresses all the same, to another image, and is refused for it in red by thinr and
-     unpack, in UPX's words with both sums, before any key is tried; a `c_adler` that is not the packer's, as much.
-     Hash mode hashes the file packed, the refusal said in a warning, as --unpack hashes every file. Under --keep,
-     what decompressed is written as it is before the refusal, `_decompressed`: the other image for the changed
-     literals, the original for the header that lies.
+     The pack header's `c_adler`, the packer's sum of the packed bytes, refuses nothing, as neither UPX's stub nor
+     upx -d reads it for a Mach-O: a literal of an NRV2B block XORed with 0x01 decompresses to another image, under
+     which the key search finds 0x01 and gives the original back, the key and the sums said in a warning; a `c_adler`
+     that is not the packer's leaves the original as it is, the sums said. Hash mode hashes the image unpacked, the
+     warning on stderr, exit 0. Under --keep, what decoded under no key is written as it is, `_decompressed`, where a
+     key was applied: the other image for the changed literals, nothing for the header that lies.
      */
-    func testPackedBytesThatFailTheirChecksumAreRefused() throws {
+    func testPackedBytesThatFailTheirChecksumAreUnpackedAllTheSame() throws {
         let directory = try self.directory("c-adler")
-        for (name, unsigned, _) in try self.unsignedLs(in: directory) {
+        for (name, unsigned, original) in try self.unsignedLs(in: directory) {
             let packed = try Data(contentsOf: self.packed(unsigned, ["--nrv2b"]))
             let block = try XCTUnwrap(self.blocks(of: packed).first { $0.compressed < $0.uncompressed && $0.filter != 0 })
             var damaged = packed
@@ -779,45 +791,47 @@ final class PackMachTests: XCTestCase {
             let at = try XCTUnwrap(packed.ranges(of: Data("UPX!".utf8)).last).lowerBound
             header[at + 12] ^= 0xff
             header[at + 31] = UInt8(header[at + 4 ..< at + 31].reduce(0) { $0 + Int($1) } % 251)
-            for (suffix, data) in [("_damaged", damaged), ("_header", header)] {
+            for (suffix, data, keyed) in [("_damaged", damaged, true), ("_header", header, false)] {
                 let file = directory / "\(name)\(suffix)"
                 try data.write(to: file)
                 saveFixture(path: file.path)
                 let sum = try self.cAdler(of: data)
                 let said = data[at + 12 ..< at + 16].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
-                let refusal = "fashion: \(file.path): Invalid UPX data: checksum error: the packed bytes sum to \(sum.hex), the pack header says \(said.hex)"
+                let key = keyed ? "packed by a modified UPX, its filtered blocks XORed with 0x01 before they are unfiltered; " : ""
+                let warning = "fashion: \(file.path): \(key)checksums neither UPX nor its stub reads: the packed bytes sum to \(sum.hex), the pack header says \(said.hex)"
                 let (status, errors) = try runFashion(["--unpack", file.path])
                 XCTAssertEqual(status, 0, name)
-                XCTAssertEqual(errors, [refusal + ", hashed packed"], name)
-                XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [refusal + ", hashed packed", XCTUnwrap(ByteHash.sha256.digest(data))], name)
+                XCTAssertEqual(errors, [warning], name)
+                XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [warning, XCTUnwrap(ByteHash.sha256.digest(original))], name)
                 let reporter = Reporter(console: Console())
                 let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
-                XCTAssertEqual(lines.map(\.tint), [.malformed], name)
-                XCTAssertEqual(reporter.errorCount, 1, name)
-                XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
+                XCTAssertEqual(lines.map(\.text), [warning, file.path + "_unpacked"], name)
+                XCTAssertEqual(reporter.errorCount, 0, name)
+                XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), original, name)
                 XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_decompressed"), name)
 
                 let keeping = Reporter(console: Console())
                 let kept = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, keep: true, reporter: keeping)
-                XCTAssertEqual(kept.map(\.text), [file.path + "_decompressed", refusal], name)
-                XCTAssertEqual(kept.last?.tint, .malformed, name)
-                XCTAssertEqual(keeping.errorCount, 1, name)
-                let decompressed = try Data(contentsOf: URL(fileURLWithPath: file.path + "_decompressed"))
-                let original = try Data(contentsOf: unsigned)
-                XCTAssertEqual(decompressed.count, original.count, name)
-                XCTAssertEqual(decompressed == original, suffix == "_header", name)
+                XCTAssertEqual(Set(kept.map(\.text)), Set([warning, file.path + "_unpacked"] + (keyed ? [file.path + "_decompressed"] : [])), name)
+                XCTAssertEqual(keeping.errorCount, 0, name)
+                XCTAssertEqual(FileManager.default.fileExists(atPath: file.path + "_decompressed"), keyed, name)
+                if keyed {
+                    let decompressed = try Data(contentsOf: URL(fileURLWithPath: file.path + "_decompressed"))
+                    XCTAssertEqual(decompressed.count, original.count, name)
+                    XCTAssertNotEqual(decompressed, original, name)
+                }
             }
         }
     }
 
     /**
-     The pack header's `u_adler`, the Adler-32 of the original, is the word on an unpacked image, which upx -d does
-     not check for Mach-O: one that fails it under every key is refused in red, both sums and the packer named, written
-     nowhere and hashed packed, like packed bytes that fail theirs. Under --keep, thinr and unpack write what
-     decompressed as it is, `_decompressed`, which is the original here, since only the header lies, and report the
-     refusal all the same.
+     The pack header's `u_adler`, the Adler-32 of the original, is the packer's word on an unpacked image, which upx -d
+     does not check for a Mach-O: one that fails it under every key is unpacked as UPX unpacks it, both sums said in a
+     warning, with the keys tried where the blocks were filtered; it is the original here, since only the header lies.
+     Hash mode hashes it unpacked, the warning on stderr, exit 0. --keep writes nothing of it, no key having been
+     applied.
      */
-    func testAnUnpackedImageThatFailsThePackersChecksumIsRefused() throws {
+    func testAnUnpackedImageThatFailsThePackersChecksumIsUnpackedAndSaid() throws {
         let directory = try self.directory("checksum")
         for (name, unsigned, _) in try self.unsignedLs(in: directory) {
             var packed = try Data(contentsOf: self.packed(unsigned))
@@ -829,33 +843,30 @@ final class PackMachTests: XCTestCase {
             try packed.write(to: file)
             saveFixture(path: file.path)
             let filtered = try self.blocks(of: packed).contains { $0.filter != 0 && $0.compressed < $0.uncompressed }
-            let refusal = "fashion: \(file.path): Invalid UPX data: checksum error on the unpacked image, packed by UPX: it sums to \(sum.hex), the pack header says \((sum ^ 0xff).hex)\(filtered ? ", under no XOR key" : "")"
+            let warning = "fashion: \(file.path): checksums neither UPX nor its stub reads: the image sums to \(sum.hex), the pack header says \((sum ^ 0xff).hex)\(filtered ? ", under no XOR key" : "")"
+            let original = try Data(contentsOf: unsigned)
             let (status, errors) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 0, name)
-            XCTAssertEqual(errors, [refusal + ", hashed packed"], name)
-            XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [refusal + ", hashed packed", XCTUnwrap(ByteHash.sha256.digest(packed))], name)
+            XCTAssertEqual(errors, [warning], name)
+            XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [warning, XCTUnwrap(ByteHash.sha256.digest(original))], name)
             let reporter = Reporter(console: Console())
             let lines = Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, reporter: reporter)
-            XCTAssertEqual(lines.map(\.tint), [.malformed], name)
-            XCTAssertEqual(reporter.errorCount, 1, name)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unpacked"), name)
+            XCTAssertEqual(lines.map(\.text), [warning, file.path + "_unpacked"], name)
+            XCTAssertEqual(reporter.errorCount, 0, name)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), original, name)
             XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_decompressed"), name)
 
-            let artifact = file.path + "_decompressed"
             for kept in [
                 Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: false, keep: true, reporter: reporter),
                 Unpacker.lines(for: file.path, write: false, keep: true, reporter: reporter),
             ] {
-                XCTAssertEqual(kept.map(\.text), [artifact, refusal], name)
-                XCTAssertEqual(kept.last?.tint, .malformed, name)
-                XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: artifact)), try Data(contentsOf: unsigned), name)
+                XCTAssertEqual(kept.map(\.text), [warning, file.path + "_unpacked"], name)
             }
-            XCTAssertEqual(reporter.errorCount, 3, name)
-            try FileManager.default.removeItem(atPath: artifact)
-            let (kept, said) = try runFashion(["thinr", "--unpack", "--keep", file.path])
-            XCTAssertEqual(kept, 2, name)
-            XCTAssertEqual(said, [refusal], name)
-            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: artifact)), try Data(contentsOf: unsigned), name)
+            XCTAssertEqual(reporter.errorCount, 0, name)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_decompressed"), name)
+            let (status2, said) = try runFashion(["thinr", "--unpack", "--keep", file.path])
+            XCTAssertEqual(status2, 0, name)
+            XCTAssertEqual(said, [warning], name)
         }
     }
 
@@ -944,7 +955,7 @@ final class PackMachTests: XCTestCase {
             XCTAssertTrue(left.first?.text.hasSuffix(message) ?? false, name)
             XCTAssertEqual(forNothing.errorCount, 1, name)
 
-            // The padding is said before the error the edit then ends in: packed bytes that fail their checksum.
+            // The padding is said before what the edit then says: the packed bytes' sum the pack header does not hold.
             var damaged = packed
             let at = try XCTUnwrap(damaged.ranges(of: Data("UPX!".utf8)).last).lowerBound
             damaged[at + 12] ^= 0xff
@@ -952,12 +963,12 @@ final class PackMachTests: XCTestCase {
             let damagedFile = directory / "\(name)_damaged"
             try damaged.write(to: damagedFile)
             let saidFirst = Reporter(console: Console())
-            let refused = Unpacker.lines(for: damagedFile.path, write: false, reporter: saidFirst)
-            XCTAssertEqual(refused.map(\.text).first, "fashion: \(damagedFile.path): cut short of its last page, \((page - end).hex) bytes before __LINKEDIT at \(page.hex): padded with zeros", name)
-            XCTAssertEqual(refused.count, 2, name)
-            XCTAssertEqual(refused.last?.tint, .malformed, name)
-            XCTAssertTrue(refused.last?.text.hasPrefix("fashion: \(damagedFile.path): Invalid UPX data: checksum error: the packed bytes sum to") ?? false, name)
-            XCTAssertEqual(saidFirst.errorCount, 1, name)
+            let said = Unpacker.lines(for: damagedFile.path, write: false, reporter: saidFirst)
+            XCTAssertEqual(said.map(\.text).first, "fashion: \(damagedFile.path): cut short of its last page, \((page - end).hex) bytes before __LINKEDIT at \(page.hex): padded with zeros", name)
+            XCTAssertEqual(said.count, 3, name)
+            XCTAssertTrue(said[1].text.hasPrefix("fashion: \(damagedFile.path): checksums neither UPX nor its stub reads: the packed bytes sum to"), name)
+            XCTAssertEqual(said.last?.text, damagedFile.path + "_exact_unpacked", name)
+            XCTAssertEqual(saidFirst.errorCount, 0, name)
         }
     }
 
@@ -1126,9 +1137,9 @@ final class PackMachTests: XCTestCase {
         let at = Int(linkedit.fileoff) - 40
         try XCTSkipUnless(data[at ..< at + 40].allSatisfy { $0 == 0 }, "\(name): no zeros before __LINKEDIT")
         var marked = data
-        marked.replaceSubrange(at ..< at + 5, with: Data("UPX!".utf8) + [0xff]) // a version no UPX wrote
+        marked.replaceSubrange(at ..< at + 5, with: Data("UPX!".utf8) + [0xff]) // a version no UPX wrote, a format it never numbered
         XCTAssertThrowsError(try PackMach(XCTUnwrap(MachO(File(data: marked)))), name) { error in
-            XCTAssertEqual(error as? UnpackError, .cantUnpack("cannot unpack UPX ;-)"), name)
+            XCTAssertEqual(error as? UnpackError, .cantUnpack("unknown format 0"), name)
         }
         var renamed = marked
         for (segment, other) in [("__TEXT", "__TEXU"), ("__LINKEDIT", "__LINKEDYT")] {
