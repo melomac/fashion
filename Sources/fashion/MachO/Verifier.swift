@@ -162,9 +162,14 @@ struct MachOVerifier {
         let align: UInt32
         let flags: UInt32
 
+        /// Whether the section is of a zero-fill type, which the loader maps from no bytes of the file.
+        var isZeroFill: Bool {
+            [UInt32(S_ZEROFILL), UInt32(S_GB_ZEROFILL), UInt32(S_THREAD_LOCAL_ZEROFILL)].contains(self.flags & UInt32(SECTION_TYPE))
+        }
+
         /// Whether the section has bytes in the file: not a zero-fill section, and not empty.
         var hasContent: Bool {
-            ![UInt32(S_ZEROFILL), UInt32(S_GB_ZEROFILL), UInt32(S_THREAD_LOCAL_ZEROFILL)].contains(self.flags & UInt32(SECTION_TYPE)) && self.size > 0
+            !self.isZeroFill && self.size > 0
         }
 
         var fileend: UInt64 {
@@ -240,6 +245,16 @@ struct MachOVerifier {
 
     private var isLoadable: Bool {
         Self.loadableFiletypes.contains(self.image.filetype)
+    }
+
+    /// Whether dyld manages the image (`Header::isDyldManaged`): a dylib, a bundle, a dynamically linked executable.
+    private var isDyldManaged: Bool {
+        [UInt32(MH_DYLIB), UInt32(MH_BUNDLE)].contains(self.image.filetype) || self.image.filetype == UInt32(MH_EXECUTE) && self.image.flags & UInt32(MH_DYLDLINK) != 0
+    }
+
+    /// The major version of the SDK the image was built against, as its version command records it; nil without one.
+    private var sdkMajor: UInt32? {
+        ((try? self.image.version()) ?? nil).map { $0.sdk >> 16 }
     }
 
     /// Whether no loader maps the image as a file (see `anomalies()`).
@@ -454,7 +469,8 @@ struct MachOVerifier {
      its sections, a file offset off the page the platform maps, protection bits beyond rwx or past the maximum, a
      name twice or empty,
      `__TEXT` not at the file's start or too small for the load commands, `__LINKEDIT` not last, protections other
-     than r-x, r-- and rw- on the three, any other segment writable and executable or executable at all, `__TEXT`
+     than r-x, r-- and rw- on the three, `__DATA_CONST` other than rw- in an image dyld manages, more than the 255
+     segments dyld takes, any other segment writable and executable or executable at all, `__TEXT`
      with room past its file size, as a packer leaves it, or without sections, a segment flagged Apple-protected,
      whose pages the kernel decrypts as it maps them, and names that read as one thing to a prefix and another to a
      `strncmp`.
@@ -509,6 +525,10 @@ struct MachOVerifier {
         if segments.count == 1 + segments.filter({ !$0.name.isEmpty }).count {
             found.append("a segment with an empty name")
         }
+        // dyld's validSemanticsSegments: "too many segments".
+        if self.isLoadable, segments.count > 255 {
+            found.append("\(segments.count) segments, more than the 255 dyld takes")
+        }
 
         let headerSize = image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
         let text = segments.first { $0.name == "__TEXT" }
@@ -543,6 +563,13 @@ struct MachOVerifier {
         }
         for segment in segments where segment.name == "__DATA" && segment.protection != "rw-" {
             found.append("__DATA's protection is \(segment.protection), not rw-")
+        }
+        // dyld's validSemanticsSingleSegment, of an image it manages: __DATA_CONST maps rw- too, as a dyld-managed
+        // image's __DATA_CONST is written before it is made read-only.
+        if self.isDyldManaged {
+            for segment in segments where segment.name == "__DATA_CONST" && segment.protection != "rw-" {
+                found.append("__DATA_CONST's protection is \(segment.protection), not rw-, which dyld refuses")
+            }
         }
         // __IMPORT, the i386 linker's segment of self-modifying symbol stubs, is rwx by design, and __TEXT_EXEC is a
         // kext's code. The kernel maps nothing writable and executable on arm64 ("curprot cannot be write+execute").
@@ -608,12 +635,15 @@ struct MachOVerifier {
     /**
      A section as dyld's `validSegments` and `Header::validSections` read it: its address range outside its
      segment's, or not aligned as its align field declares, in a segment that is mapped (Go's `__DWARF` has no
-     vmsize, and dyld maps none of it); no file offset though it is not zero-fill; two sections sharing addresses or
-     bytes; the segment name it carries not its segment's. And as a disassembler reads it: its file offset not where
+     vmsize, and dyld maps none of it); no file offset though it is not zero-fill; a file offset though it is
+     zero-fill, or no name, which the live dyld refuses of an image it manages built against the SDK of fall 2026
+     or later (`validSemanticsSingleSegment`); two sections sharing addresses or bytes; the segment name it carries
+     not its segment's. And as a disassembler reads it: its file offset not where
      its address lays it, so the tool reads other bytes than the loader maps; its bytes past the image; its name.
      */
     private func sectionAnomalies() -> [String] {
         var found: [String] = []
+        let recent = self.isDyldManaged && (self.sdkMajor ?? 0) >= 27
         for segment in self.segments {
             for section in segment.sections {
                 let what = "section \(segment.name),\(section.name)"
@@ -637,6 +667,16 @@ struct MachOVerifier {
                 }
                 if section.offset == 0, section.hasContent {
                     found.append("\(what) has no file offset though it is not zero-fill")
+                }
+                // The live dyld's validSemanticsSingleSegment, of an image it manages built against the SDK of
+                // fall 2026 or later: a zero-fill section has no file offset, and every section a name.
+                if recent {
+                    if section.isZeroFill, section.offset != 0 {
+                        found.append("\(what) is zero-fill with a file offset \(section.offset.hex), which dyld refuses")
+                    }
+                    if section.field.prefix(16).allSatisfy({ $0 == 0 }) {
+                        found.append("a section of \(segment.name) with an empty name, which dyld refuses")
+                    }
                 }
                 if section.segname != segment.name {
                     found.append("\(what) carries the segment name \(section.segname)")

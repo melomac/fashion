@@ -485,7 +485,8 @@ final class VerifierTests: XCTestCase {
      bytes after its NUL, a section's name that is not ASCII, a section's file offset not where its address lays it,
      which overlaps the next and leaves bytes no section covers, a section's address range outside its segment, which
      leaves the entry in no section, a segment both writable and executable, two segments of one name, a segment's
-     file offset off the page, `__TEXT` with room past its file size, and a segment flagged Apple-protected.
+     file offset off the page, `__TEXT` with room past its file size, a segment flagged Apple-protected, `__DATA_CONST`
+     not rw- and more segments than dyld takes.
      */
     func testSegmentsAndSectionsAreNamed() throws {
         let directory = try self.directory("segments")
@@ -540,11 +541,22 @@ final class VerifierTests: XCTestCase {
         var protected = program
         protected.store(program.load(UInt32.self, at: text + 68) | UInt32(SG_PROTECTED_VERSION_1), at: text + 68)
         XCTAssertEqual(try self.verify(protected, "protected", in: directory).lines, [": segment __TEXT is Apple-protected (SG_PROTECTED_VERSION_1): the kernel decrypts it past its first 0x3000 bytes as it maps it"])
+
+        // The live dyld's validSemanticsSingleSegment: __DATA_CONST maps rw- in an image dyld manages.
+        var constant = program
+        let dataConst = try XCTUnwrap(XCTUnwrap(MachO(File(data: program))).findSegment("__DATA_CONST")).data.startIndex
+        constant.store(UInt32(VM_PROT_READ), at: dataConst + 60)
+        XCTAssertEqual(try self.verify(constant, "constant", in: directory).lines, [": __DATA_CONST's protection is r--, not rw-, which dyld refuses"])
+        // dyld's validSemanticsSegments: 255 segments at most.
+        let many = try self.crafted("many", in: directory, size: 0x8000, segments: (0 ..< 256).map { ("__S\($0)", 0x1_0000_0000 + UInt64($0) * 0x1000, 0x1000, 0, 0, 1) })
+        XCTAssertTrue(self.verify(many.path).lines.contains("\(many.path): 256 segments, more than the 255 dyld takes"))
     }
 
     /**
      Sections as the live dyld's `Header::validSections` reads them: an address not aligned to the align field, a
-     section with content but no file offset, two sections sharing addresses.
+     section with content but no file offset, two sections sharing addresses; and as its `validSemanticsSingleSegment`
+     reads them in an image built against the SDK of fall 2026 or later, a zero-fill section with a file offset and a
+     section with no name.
      */
     func testSectionsAsTheLiveDyldReadsThemAreNamed() throws {
         let directory = try self.directory("sections")
@@ -564,6 +576,20 @@ final class VerifierTests: XCTestCase {
         let stubs = try self.section("__TEXT", "__stubs", in: program)
         shared.store(addr, at: stubs + 32)
         XCTAssertTrue(try self.verify(shared, "shared", in: directory).lines.contains(": sections __TEXT,__text and __TEXT,__stubs overlap in memory"))
+
+        // Built against this toolchain's SDK, the program is one the live dyld holds to its newest rules: a zero-fill
+        // section with a file offset, and a section with no name.
+        try XCTSkipUnless(XCTUnwrap(XCTUnwrap(MachO(File(data: program))).version()).sdk >> 16 >= 27, "an SDK before fall 2026")
+        var zerofill = program
+        zerofill.store(program.load(UInt32.self, at: section + 64) & ~UInt32(SECTION_TYPE) | UInt32(S_ZEROFILL), at: section + 64)
+        // The code is then bytes no section covers.
+        let zeroed = try self.verify(zerofill, "zerofill", in: directory).lines
+        XCTAssertEqual(zeroed.count, 2)
+        XCTAssertEqual(zeroed.first, ": section __TEXT,__text is zero-fill with a file offset \(program.load(UInt32.self, at: section + 48).hex), which dyld refuses")
+        XCTAssertTrue(try XCTUnwrap(zeroed.last).hasSuffix(" bytes of __TEXT that no section covers are not zero, the first at \(program.load(UInt32.self, at: section + 48).hex)"))
+        var nameless = program
+        nameless.replaceSubrange(stubs ..< stubs + 16, with: Data(count: 16))
+        XCTAssertEqual(try self.verify(nameless, "nameless", in: directory).lines, [": a section of __TEXT with an empty name, which dyld refuses"])
     }
 
     /**

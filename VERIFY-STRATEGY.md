@@ -125,11 +125,13 @@ left out, with the reason.
 | A segment command's size not `nsects` sections exactly | dyld "does not match nsects"; kernel "sections would fit" | |
 | Protection bits beyond rwx; `initprot` outside `maxprot` | dyld "invalid bits set"; kernel `vm_map_enter` | |
 | Two segments of one name; an empty name | dyld (cache builder); `__LINKEDIT` twice: Rosetta "multiple __LINKEDIT segments" | ran |
-| More than 255 segments; `sizeofcmds` past `__TEXT` | dyld "too many segments", "load commands exceed length of __TEXT segment" | |
+| More than 255 segments; `sizeofcmds` past `__TEXT` | dyld `validSemanticsSegments` "too many segments %llu (max 255)", "load commands exceed length of __TEXT segment" | |
+| `__DATA_CONST` not rw- in an image dyld manages | live dyld `validSemanticsSingleSegment` "__DATA_CONST segment permissions is not 'rw-'", gated by `isDyldManaged` alone | |
 | A section's address range outside its segment | dyld `validSegments` "end address is beyond containing segment" | dyld aborted |
 | A section's file offset not where its address lays it (`offset ≠ fileoff + addr − vmaddr`), or laid past 2^64 by a segment that maps most of the address space | no loader maps by section: static tools read the section's `offset`, the loader maps the segment; Rosetta translates from the section | crashed under Rosetta, "valid on disk" when signed; would run natively |
 | Segments overlapping in the file or in memory, however many: one pass in the order of their starts, each against the one reaching furthest before it | dyld `validSegments`; a crafted table of thousands of segments would cost their square | |
-| A section's `offset + size` past the file, overlapping sections, a zerofill section with an offset | static tools | |
+| A section's `offset + size` past the file, overlapping sections | static tools | |
+| A zero-fill section with a file offset; a section with an empty name | live dyld `validSemanticsSingleSegment` "has a zero-fill section type, but offset field is not zero", "has an empty section name": images dyld manages, built against the fall-2026 SDK or later (`Policy`, epoch 0x4F29), on the path that maps from disk | |
 | A section's address not aligned to its align field; a section with content and no file offset; two sections sharing addresses; in a segment that is mapped (Go's `__DWARF` has no vmsize) | live dyld `Header::validSections` "align field does not match address", "has offset=0 but is not a zero-fill section type", "start address overlaps previous section" | |
 | A section's align field past 2^15 | live dyld "too large for VM to support"; not named: Tor Browser's and numpy's dylibs declare 2^16 and run | |
 | `__DATA_CONST` without `SG_READ_ONLY` | live dyld "__DATA_CONST segment missing SG_READ_ONLY flag"; not named: 177 of Apple's own slices lack it (`libccid`, the toolchain's Swift libraries), so dyld does not refuse it | |
