@@ -947,6 +947,158 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
+     `data` as an NRV2B stream read 32 bits at a time, as UCL's `n2b_d.c` reads it: each byte a literal, a run of one
+     byte a literal and a match of the run at distance 1, then UPX's end marker; the bit words, top bit first, lie
+     where the decoder reads them, before the bytes they tell of. For packed files made by hand.
+     */
+    private static func nrv2b(_ data: Data) -> Data {
+        var stream = Data()
+        var bits: UInt32 = 0
+        var count = 0
+        var word = 0
+        func put(_ bit: Int) {
+            if count == 0 {
+                word = stream.count
+                stream.append(Data(count: 4))
+            }
+            bits = bits << 1 | UInt32(bit)
+            count += 1
+            if count == 32 {
+                stream.replaceSubrange(word ..< word + 4, with: withUnsafeBytes(of: bits.littleEndian) { Data($0) })
+                (bits, count) = (0, 0)
+            }
+        }
+        /// `value`, its leading 1 understood, bit by bit from the top, each but the last followed by 0 to go on.
+        func putVarying(_ value: Int) {
+            for shift in stride(from: value.bitWidth - value.leadingZeroBitCount - 2, through: 0, by: -1) {
+                put((value >> shift) & 1)
+                put(shift == 0 ? 1 : 0)
+            }
+        }
+        var index = data.startIndex
+        while index < data.endIndex {
+            let byte = data[index]
+            var run = 1
+            while index + run < data.endIndex, data[index + run] == byte {
+                run += 1
+            }
+            put(1)
+            stream.append(byte)
+            guard run >= 3 else {
+                index += 1
+                continue
+            }
+            // A match at distance 1 of the rest of the run: m_off 3 and the byte 0 make 1, then m_len, the count less 1.
+            put(0)
+            putVarying(3)
+            stream.append(0)
+            let length = run - 2
+            if length <= 3 {
+                put(length >> 1)
+                put(length & 1)
+            } else {
+                put(0)
+                put(0)
+                putVarying(length - 2)
+            }
+            index += run
+        }
+        put(0)
+        putVarying(0x0100_0002) // then 0xff: an offset of 0xffffffff, the end
+        stream.append(0xff)
+        if count > 0 {
+            stream.replaceSubrange(word ..< word + 4, with: withUnsafeBytes(of: (bits << UInt32(32 - count)).littleEndian) { Data($0) })
+        }
+        return stream
+    }
+
+    /**
+     A file UPX packed, made by hand as UPX 5 lays one out: an `x86_64` executable of a page, one `__TEXT` segment over
+     it, its headers in an NRV2B block and the rest stored; with `overlapping` more segments in its headers laid
+     over the same page, each wanting the page's worth of blocks again, stored, where UPX writes each byte of an
+     original once. The pack header's sums are the packer's.
+     */
+    private func packedByHand(overlapping: Int) throws -> (packed: Data, original: Data) {
+        let size = 0x1000
+        var original = Data()
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_EXECUTE), UInt32(1 + overlapping), UInt32(72 * (1 + overlapping)), 0, 0].forEach { original.appendUInt32($0) }
+        for _ in 0 ... overlapping {
+            original.appendUInt32(UInt32(LC_SEGMENT_64)); original.appendUInt32(72)
+            original.append(Data("__TEXT".utf8) + Data(count: 10))
+            [UInt64(0x1_0000_0000), UInt64(size), 0, UInt64(size)].forEach { original.appendUInt64($0) }
+            [5, 5, 0, 0].forEach { original.appendUInt32(UInt32($0)) }
+        }
+        let headers = original.count
+        original.append(Data((headers ..< size).map { UInt8(truncatingIfNeeded: $0 * 7 + 1) }))
+
+        var blocks = Data()
+        func block(_ unpacked: Data, as packed: Data) {
+            blocks.appendUInt32(UInt32(unpacked.count)); blocks.appendUInt32(UInt32(packed.count)); blocks.append(contentsOf: [2, 0, 0, 0]) // sz_unc, sz_cpr, NRV2B_LE32, no filter
+            blocks += packed
+        }
+        let first = Self.nrv2b(original.prefix(headers))
+        XCTAssertEqual(self.decompressed(first, count: headers), original.prefix(headers), "the headers, as the encoder packs them, decode back")
+        XCTAssertLessThan(first.count, headers)
+        block(original.prefix(headers), as: first)
+        block(original[headers...], as: original[headers...])
+        for _ in 0 ..< overlapping {
+            block(original, as: original)
+        }
+
+        var packed = Data()
+        let overlay = 32 + 144 + 12 // the header, two segment commands, l_info
+        let text = (overlay + 12 + blocks.count + 36 + 0xfff) & ~0xfff
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_EXECUTE), 2, 144, 0, 0].forEach { packed.appendUInt32($0) }
+        for (name, offset, count, prot) in [("__TEXT", 0, text, 5), ("__LINKEDIT", text, 16, 1)] {
+            packed.appendUInt32(UInt32(LC_SEGMENT_64)); packed.appendUInt32(72)
+            packed.append(Data(name.utf8) + Data(count: 16 - name.utf8.count))
+            [UInt64(0x1_0000_0000 + offset), UInt64(count), UInt64(offset), UInt64(count)].forEach { packed.appendUInt64($0) }
+            [prot, prot, 0, 0].forEach { packed.appendUInt32(UInt32($0)) }
+        }
+        packed.appendUInt32(0); packed.append(Data("UPX!".utf8)); packed.append(contentsOf: [0, 0, 13, 34]) // l_info: checksum, magic, size, version, format
+        [0, UInt32(size), UInt32(size)].forEach { packed.appendUInt32($0) } // p_info: progid, filesize, blocksize
+        packed += blocks
+        packed.append(Data(count: text - 36 - packed.count))
+        packed.append(Data("UPX!".utf8)); packed.append(contentsOf: [13, 34, 2, 8]) // version, format, method, level
+        let adler = original.withUnsafeBytes { UInt32(adler32(1, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt(original.count))) }
+        [adler, 0, UInt32(size), UInt32(size - 1), UInt32(size)].forEach { packed.appendUInt32($0) } // u_adler, c_adler, u_len, c_len, u_file_size
+        packed.append(contentsOf: [0, 0, 0, 0]) // filter, cto, n_mru, checksum
+        packed.appendUInt32(UInt32(overlay)) // overlay_offset
+        packed.append(Data(count: 16)) // __LINKEDIT
+        return try (self.resummed(packed), original)
+    }
+
+    /**
+     The blocks of every extent add up to the image, `p_filesize`, as UPX writes each byte of an original once: a
+     file made by hand so unpacks, and one whose headers lay more segments over the same bytes, each asking for the
+     image's worth of blocks again, is refused before they are decoded, in red, and hashed packed.
+     */
+    func testBlocksThatMakeMoreThanTheImageAreRefused() throws {
+        let directory = try self.directory("overlapping")
+        let (sound, original) = try self.packedByHand(overlapping: 0)
+        let file = directory / "sound"
+        try sound.write(to: file)
+        saveFixture(path: file.path)
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [XCTUnwrap(ByteHash.sha256.digest(original))])
+        let reporter = Reporter(console: Console())
+        XCTAssertEqual(Unpacker.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_unpacked"])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), original)
+        XCTAssertEqual(reporter.errorCount, 0)
+
+        let (overlapping, _) = try self.packedByHand(overlapping: 2)
+        let laid = directory / "overlapping"
+        try overlapping.write(to: laid)
+        saveFixture(path: laid.path)
+        let refusal = "fashion: \(laid.path): Invalid UPX data: the blocks make more than p_filesize bytes"
+        XCTAssertEqual(try self.hashLines(laid.path, ["--unpack"]), try [refusal + ", hashed packed", XCTUnwrap(ByteHash.sha256.digest(overlapping))])
+        let lines = Unpacker.lines(for: laid.path, write: false, reporter: reporter)
+        XCTAssertEqual(lines.map(\.text), [refusal])
+        XCTAssertEqual(lines.first?.tint, .malformed)
+        XCTAssertEqual(reporter.errorCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: laid.path + "_unpacked"))
+    }
+
+    /**
      A universal file whose first slice a modified UPX packed and whose second slice's packed data does not hold:
      the warning about the first is printed, then the error about the second, each after its architecture, as hash
      mode prints them, before the digest of the file as it is, packed.

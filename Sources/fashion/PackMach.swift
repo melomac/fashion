@@ -349,9 +349,11 @@ struct PackMach {
             let overlayOffset = at + 4 <= data.count ? Int(image.word(data, at: at)) : 0
             if packHeader.magic != PackHeader.magic {
                 // Found without its marker, the pack header needs the word of UPX's `l_info`, the 12 bytes before the
-                // packed data: its marker, version and format must be the header's, as the packer wrote them.
+                // packed data, inside the image: its marker, version and format must be the header's, as the packer
+                // wrote them.
                 guard
                     overlayOffset >= headerSize + headway + 12,
+                    overlayOffset <= image.length,
                     let lInfo = try? image.dataAt(overlayOffset - 12, count: 12),
                     lInfo.dropFirst(4).prefix(4).elementsEqual(packHeader.magic),
                     lInfo[lInfo.startIndex + 10] == packHeader.version,
@@ -411,12 +413,13 @@ struct PackMach {
      of the original, `u_adler`, neither of which `upx -d` checks for a Mach-O, where it checks both for an ELF. Packed
      bytes that fail theirs are damaged, which no key undoes: refused, in UPX's words, both sums named. A modified UPX may XOR the
      blocks it filtered with a byte before they are unfiltered, as the UPX 3.91 behind OSX/Keydnap did, which unfilter
-     to a wrong image without it: the key is the byte, tried in turn, under which the image bears its checksum. An
-     image that bears it under no key is refused as much, in red, its sum and the header's named with the packer.
-     Either refusal carries what decompressed, as it is, for --keep to write.
+     to a wrong image without it: the key is the byte, tried in turn over the filtered blocks as decoded, decoded
+     once, under which the image bears its checksum. An image that bears it under no key is refused as much, in red,
+     its sum and the header's named with the packer. Either refusal carries what decompressed, as it is, for --keep to
+     write.
      */
     func unpack() throws -> (data: Data, caveat: String?, notes: [String]) {
-        let plain = try self.unpack(xor: 0)
+        let plain = try self.unpack(keeping: false)
         guard plain.cAdler == self.cAdler else {
             throw UnpackError.unverified("checksum error: the packed bytes sum to \(plain.cAdler.hex), the pack header says \(self.cAdler.hex)", decompressed: plain.data)
         }
@@ -424,9 +427,11 @@ struct PackMach {
             return (plain.data, self.caveat(xor: 0), self.notes(plain))
         }
         if plain.filtered {
+            // Decoded once more, the filtered blocks kept as they decoded, so each key is tried over them alone.
+            var keyed = try self.unpack(keeping: true)
             for key in UInt8(1) ... 255 {
-                if let unpacked = try? self.unpack(xor: key), unpacked.adler == self.uAdler {
-                    return (unpacked.data, self.caveat(xor: key), self.notes(unpacked))
+                if try keyed.keyed(key) == self.uAdler {
+                    return (keyed.data, self.caveat(xor: key), self.notes(keyed))
                 }
             }
         }
@@ -483,16 +488,17 @@ struct PackMach {
 
     /// An image unpacked, with what the pass over its blocks summed and saw, and the `p_info` before the blocks.
     private struct Unpacked {
-        let data: Data
-        let pass: Pass
+        var data: Data
+        var pass: Pass
         let pInfo: (progid: UInt32, fileSize: Int, blocksize: Int)
 
         var blocks: [Block] {
             self.pass.blocks
         }
 
+        /// The Adler-32 of the image as the packer summed it, block by block in the order they were unpacked.
         var adler: UInt32 {
-            self.pass.adler
+            UInt32(self.pass.sums.reduce(1 as uLong) { adler32_combine($0, uLong($1.adler), $1.count) })
         }
 
         var cAdler: UInt32 {
@@ -510,14 +516,35 @@ struct PackMach {
         var filters: Set<UInt8> {
             self.pass.filters
         }
+
+        /**
+         The image with its filtered blocks, kept as decoded, XORed with `key` and unfiltered again in place of
+         what the last key made of them, and its Adler-32 so: no block is decoded again for a key.
+         */
+        mutating func keyed(_ key: UInt8) throws -> UInt32 {
+            for kept in self.pass.kept {
+                let sum = try self.data.withUnsafeMutableBytes { buffer in
+                    let destination = UnsafeMutableRawBufferPointer(rebasing: buffer[kept.at ..< kept.at + kept.decoded.count])
+                    kept.decoded.withUnsafeBytes { destination.copyMemory(from: $0) }
+                    for index in destination.indices {
+                        destination[index] ^= key
+                    }
+                    try PackMach.unfilter(destination, id: kept.filter, cto: kept.cto)
+                    return UInt32(adler32(1, destination.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt(destination.count)))
+                }
+                self.pass.sums[kept.index].adler = sum
+            }
+            return self.adler
+        }
     }
 
     /**
-     The image unpacked with its filtered blocks XORed with `xor` before they are unfiltered, the Adler-32 of the image
-     as unpacked and of the packed bytes, block by block as the packer summed them, whether a block was unfiltered, and
-     the methods and filters the blocks were packed with.
+     The image unpacked, the Adler-32 of its packed bytes and of each block as unpacked, block by block as the packer
+     summed them, whether a block was unfiltered, the methods and filters the blocks were packed with and, when
+     `keeping`, the filtered blocks as decoded, for `Unpacked.keyed` to try the keys a modified UPX may have XORed
+     them with.
      */
-    private func unpack(xor: UInt8) throws -> Unpacked {
+    private func unpack(keeping: Bool) throws -> Unpacked {
         let pInfo = try self.read(at: self.overlayOffset, count: 12)
         let progid = self.image.word(pInfo, at: 0)
         let fileSize = Int(self.image.word(pInfo, at: 4))
@@ -572,7 +599,7 @@ struct PackMach {
 
         var output = Data(count: fileSize)
         var cursor = blocks
-        var pass = Pass(xor: xor)
+        var pass = Pass(keeping: keeping)
         pass.methods.insert(first.method)
         for segment in segments where segment.filesize != 0 {
             try self.unpackExtent(segment.filesize, into: &output, at: segment.fileoff, cursor: &cursor, blocksize: blocksize, pass: &pass)
@@ -656,14 +683,18 @@ struct PackMach {
         let segment: Segment?
     }
 
-    /// A pass over the blocks: the byte filtered blocks are XORed with before they are unfiltered, the Adler-32 of
-    /// what the blocks make so far and of their packed bytes, as the packer summed them, and whether one was
-    /// unfiltered.
+    /// A pass over the blocks: the Adler-32 of their packed bytes as the packer summed them, of each block as unpacked,
+    /// in order, how many bytes they made so far, and whether one was unfiltered.
     private struct Pass {
-        let xor: UInt8
-        var adler: UInt32 = 1
+        /// Whether a filtered block is kept as it decoded, before it is unfiltered, for the keys to be tried over it.
+        let keeping: Bool
         var cAdler: UInt32 = 1
         var filtered = false
+        var produced = 0
+        /// Each block's Adler-32 and length, in order, which the image's sum combines.
+        var sums: [(adler: UInt32, count: Int)] = []
+        /// The filtered blocks as decoded, when `keeping`: which block, where it lies in the image, and its filter.
+        var kept: [(index: Int, at: Int, filter: UInt8, cto: UInt8, decoded: Data)] = []
         /// The compression methods and filters of the blocks seen, for the log, and the blocks themselves.
         var methods: Set<UInt8> = []
         var filters: Set<UInt8> = []
@@ -749,8 +780,10 @@ struct PackMach {
 
     /**
      Decompress blocks into `output` at `offset` until they make `wanted` bytes, as `unpackExtent` does: a block whose
-     compressed size is its size is stored as it is, any other is decompressed by its method where it goes, then XORed
-     with `pass`'s byte and unfiltered there; each is summed into `pass`'s Adler-32s, packed and unpacked.
+     compressed size is its size is stored as it is, any other is decompressed by its method where it goes, then
+     unfiltered there; each is summed into `pass`, its packed bytes and its own. The blocks of every extent together
+     make no more than the image, `p_filesize`: extents laid over one another by crafted headers would decode the
+     image's worth of blocks each, up to 255 times, where UPX writes each byte of the original once.
      */
     private func unpackExtent(_ wanted: Int, into output: inout Data, at offset: Int, cursor: inout Int, blocksize: Int, pass: inout Pass) throws {
         var wanted = wanted
@@ -768,6 +801,9 @@ struct PackMach {
             else {
                 throw UnpackError.cantUnpack("corrupt b_info")
             }
+            guard info.uncompressed <= output.count - pass.produced else {
+                throw UnpackError.cantUnpack("the blocks make more than p_filesize bytes")
+            }
             let block = try self.block(at: cursor + 12, count: info.compressed)
             pass.blocks.append(Block(offset: cursor, info: info, at: offset))
             cursor += 12 + info.compressed
@@ -780,10 +816,8 @@ struct PackMach {
                     if info.filter != 0 {
                         pass.filtered = true
                         pass.filters.insert(info.filter)
-                        if pass.xor != 0 {
-                            for index in destination.indices {
-                                destination[index] ^= pass.xor
-                            }
+                        if pass.keeping {
+                            pass.kept.append((pass.sums.count, offset, info.filter, info.cto, Data(destination)))
                         }
                         try Self.unfilter(destination, id: info.filter, cto: info.cto)
                     }
@@ -791,7 +825,9 @@ struct PackMach {
             } else {
                 output.replaceSubrange(offset ..< offset + info.uncompressed, with: block.prefix(info.compressed))
             }
-            pass.adler = output.withUnsafeBytes { UInt32(adler32(uLong(pass.adler), $0.baseAddress!.advanced(by: offset).assumingMemoryBound(to: Bytef.self), uInt(info.uncompressed))) }
+            let sum = output.withUnsafeBytes { UInt32(adler32(1, $0.baseAddress!.advanced(by: offset).assumingMemoryBound(to: Bytef.self), uInt(info.uncompressed))) }
+            pass.sums.append((sum, info.uncompressed))
+            pass.produced += info.uncompressed
             offset += info.uncompressed
             wanted -= info.uncompressed
         }
