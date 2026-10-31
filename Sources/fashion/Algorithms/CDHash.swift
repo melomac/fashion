@@ -192,6 +192,25 @@ extension MachO {
      magic and, unless the command's size is zero, a length within that size; then `EmbeddedSignatureBlob::specific`
      requires every blob it indexes to lie inside it. fashion also requires the length to fit the slice, where
      `codesign -d` reads on into the next slice of a universal file. Throws otherwise. `MachOVerifier` reads it too.
+
+     The superblob, big-endian throughout, where `LC_CODE_SIGNATURE`'s `dataoff` points in `__LINKEDIT`:
+
+     ```text
+      +0x00 +-----------------------------------------------+
+            | SuperBlob (12): magic 0xfade0cc0 | length |   |  `count` index entries follow
+            |                 count                         |
+      +0x0c +-----------------------------------------------+
+            | index: count × { type (4) | offset (4) }      |  the slot and where its blob lies in the superblob
+            +-----------------------------------------------+
+            | slot 0: CodeDirectory 0xfade0c02              |  see `EmbeddedCodeDirectory`
+            | slot 2: Requirements 0xfade0c01 (a set)       |  each sealed by its special slot in the directory
+            | slot 5: Entitlements 0xfade7171 (XML plist)   |
+            | slot 7: DER entitlements 0xfade7172           |
+            | slots 0x1000…: alternate code directories     |  one per hash type, SHA-256 beside SHA-1
+            | slot 0x10000: BlobWrapper 0xfade0b01, the CMS |  signed over the directory at slot 0, detached;
+            |   signature                                   |  the 8-byte header alone when ad hoc
+            +-----------------------------------------------+
+     ```
      */
     func signingData(_ signature: (offset: Int, size: Int)) throws -> Data {
         let (offset, size) = signature
@@ -602,6 +621,37 @@ struct EmbeddedCodeDirectory {
      one it knows with slots of that hash's width, its identifier and team strings end inside it, its hash slots,
      pre-encryption slots and scatter vector lie inside it, and its code slots cover its code limit page by page. Nil
      otherwise. Unlike the kernel, Security does not check the magic.
+
+     The directory, big-endian, its header growing with its version, then the strings and the hash slots it points at:
+
+     ```text
+      +0x00 +-------------------------------------------------+
+            | magic 0xfade0c02 (4)     | length (4)           |
+      +0x08 | version (4)              | flags (4)            |  CS_ADHOC 0x2, CS_ENFORCE_EXPIRATION 0x400 among them
+      +0x10 | hashOffset (4)           | identOffset (4)      |
+      +0x18 | nSpecialSlots (4)        | nCodeSlots (4)       |
+      +0x20 | codeLimit (4)            | hashSize (1) |       |  hashType 1 SHA-1, 2 SHA-256, 3 SHA-256 truncated,
+            |   hashType (1) | platform (1) | pageSize (1)    |  4 SHA-384, 5 SHA-512; pageSize as log2, 0 unpaged
+      +0x28 | spare2 (4)               | scatterOffset (4)    |  scatterOffset from version 0x20100
+      +0x30 | teamOffset (4)           | spare3 (4)           |  teamOffset from 0x20200, spare3 from 0x20300
+      +0x38 | codeLimit64 (8)                                 |  from 0x20300, read when it is not 0
+      +0x40 | execSegBase (8) | execSegLimit (8) |            |  from 0x20400
+            |   execSegFlags (8)                              |
+      +0x58 | runtime (4)              | preEncryptOffset (4) |  from 0x20500; the header ends at 0x60
+            +-------------------------------------------------+
+            | identifier, NUL-terminated, at identOffset      |
+            | team identifier, at teamOffset                  |
+            +-------------------------------------------------+
+            | special slots: nSpecialSlots × hashSize,        |  slot -n at hashOffset - n × hashSize: -1 Info.plist,
+            |   ending at hashOffset                          |  -2 requirements, -3 resources, -4 application,
+            +-------------------------------------------------+  -5 entitlements, -6 rep-specific, -7 DER entitlements
+            | code slots: nCodeSlots × hashSize, from         |  one per page of codeLimit, 2^pageSize bytes each,
+            |   hashOffset                                    |  the last page partial
+            +-------------------------------------------------+
+            | scatter vector, at scatterOffset                |  { count | base | targetOffset (8) | spare (8) } × n,
+            | pre-encryption slots, at preEncryptOffset       |  to an entry of count 0; nCodeSlots × hashSize
+            +-------------------------------------------------+
+     ```
      */
     init?(_ blob: Data) {
         let length = blob.count

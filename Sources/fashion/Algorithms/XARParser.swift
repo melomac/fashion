@@ -4,6 +4,30 @@ import zlib
 
 /**
  Naive XAR archive parser for TOC extraction and hashing.
+
+ The archive begins with a 28-byte header, big-endian, then the table of contents, an XML document zlib-compressed
+ whole, then the heap, where the TOC's own checksum comes first and the files' data after it, at the offsets the TOC
+ gives from the heap's start:
+
+ ```text
+  0x0000 +-----------------------------------------------+
+         | magic "xar!" (4)                              |
+  0x0004 +-----------------------------------------------+
+         | size (2)            | version (2)             |  size 28: where the TOC starts
+  0x0008 +-----------------------------------------------+
+         | toc_length_compressed (8)                     |  the TOC as stored
+  0x0010 +-----------------------------------------------+
+         | toc_length_uncompressed (8)                   |  the TOC inflated, which libxar does not check
+  0x0018 +-----------------------------------------------+
+         | cksum_alg (4)                                 |  0 none, 1 SHA-1, 2 MD5, 3 SHA-256, 4 SHA-512
+  0x001c +-----------------------------------------------+
+         | table of contents, zlib-compressed            |  toc_length_compressed bytes: what --xar-toc hashes,
+         |                                               |  as stored or inflated with --decompress
+         +-----------------------------------------------+  <- the heap starts here
+         | the TOC's checksum, by cksum_alg              |  what `xar --dump-toc-cksum` prints
+         | the files' data, at the TOC's offsets         |
+         +-----------------------------------------------+
+ ```
  */
 enum XARParser {
     private static let logger = Logger(subsystem: "fashion", category: "xar")

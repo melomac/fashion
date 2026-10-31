@@ -79,6 +79,21 @@ enum SymHash {
 
      The image is `length` bytes at `offset` in `file`, which its `symtab` offsets count from; `is64` and `swap` describe
      its header.
+
+     ```text
+      LC_SYMTAB (24): cmd | cmdsize | symoff | nsyms | stroff | strsize
+                                        |                 |
+      symoff ---------------------------+                 +--------------------------- stroff
+        |                                                                                |
+        v  nlist_64 (16), nlist (12) in a 32-bit image      v  the string table, strsize bytes
+        +-------------------------------------------+      +-----------------------------------+
+        | n_strx (4)  ------------------------------+----> | \0 | name \0 | name \0 | ...       |
+        | n_type (1)   N_EXT set, no N_STAB bits,   |      +-----------------------------------+
+        |              N_TYPE N_UNDF: wanted        |        index 0 is the empty name; a name is read to
+        | n_sect (1) | n_desc (2) | n_value (8)     |        its NUL, and several indexes may share one
+        +-------------------------------------------+
+        × nsyms, read in chunks                              read in windows starting at the names wanted
+     ```
      */
     static func externalSymbolNames(file: File, offset: Int, length: Int, symtab: symtab_command, is64: Bool, swap: Bool) throws -> [Data] {
         // 32-bit slices use the 12-byte `nlist`, 64-bit the 16-byte `nlist_64`; n_strx and n_type sit at the

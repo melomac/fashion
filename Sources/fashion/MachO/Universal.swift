@@ -22,6 +22,25 @@ extension SliceError: LocalizedError {
 /**
  A Mach-O file as Security's `Universal` reads it: a thin image, or a universal file's architectures. Anything else,
  including a file too short for a Mach-O header, is not Mach-O.
+
+ A universal file, big-endian throughout, as `lipo` lays it out:
+
+ ```text
+  0x0000 +-----------------------------------------------+
+         | fat_header (8): magic 0xcafebabe | nfat_arch  |  0xcafebabf for a table of fat_arch_64
+  0x0008 +-----------------------------------------------+
+         | fat_arch (20): cputype | cpusubtype |         |  fat_arch_64 (32): offset and size on 8 bytes,
+         |                 offset | size | align         |  then reserved
+         | fat_arch ...                                  |  nfat_arch entries, which the kernel reads
+         +-----------------------------------------------+
+         | fat_arch, one past the count                  |  read by Security and dyld, a slice when it names
+         |                                               |  arm64: what `lipo -hideARM64` leaves (32-bit tables)
+         +-----------------------------------------------+
+         | padding to 2^align                            |
+  offset +-----------------------------------------------+
+         | slice: a thin Mach-O, or an ar archive        |  size bytes, which the table alone decides, as for
+         +-----------------------------------------------+  `lipo -thin`; the next slice at its own offset
+ ```
  */
 enum Universal {
     case fat([Architecture])

@@ -13,6 +13,28 @@ import Security
  development certificates too, and reserves most entitlements to Apple's signature or a provisioning profile.
 
  `anchoredAtApple` is `anchor apple generic`; `kind` is which of Gatekeeper's requirements the chain meets.
+
+ The CMS blob, DER, as `signerInfo(in:)` and `signatureAndToken(in:)` walk it, every value at its own length rather
+ than at an offset:
+
+ ```text
+  ContentInfo { contentType id-signedData, [0] SignedData {
+      version, digestAlgorithms,
+      encapContentInfo { id-data }                        detached: the content is the code directory at slot 0
+      [0] certificates                                    the chain as codesign embeds it, which the signature does not cover
+      signerInfos SET { SignerInfo {
+          version, sid { issuer, serialNumber }, digestAlgorithm,
+          [0] signedAttrs SET {                           what the signature covers
+              contentType, messageDigest,                 the digest of the code directory
+              signingTime,
+              1.2.840.113635.100.9.1,                     hash agility: the cdhashes plist
+              1.2.840.113635.100.9.2 }                    hash agility v2: a cdhash per digest algorithm
+          signatureAlgorithm, signature OCTET STRING,
+          [1] unsignedAttrs SET {                         last, when there are any
+              id-aa-timeStampToken: ContentInfo }         the timestamp authority's SignedData over the signature
+      } }
+  } }
+ ```
  */
 struct Signer {
     /// What `SecStaticCode::verifySignature` throws `errSecCSSignatureFailed` for.
