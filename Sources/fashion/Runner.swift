@@ -171,6 +171,8 @@ final class Console: @unchecked Sendable {
     private let lock = NSLock()
     private var shown = false
     private var closed = false
+    /// The status line as last drawn, drawn again under the lines that take its row.
+    private var lastStatus: [UInt8] = []
 
     /**
      Write lines to stdout, in one write, none for no lines; throws on a write error.
@@ -219,9 +221,17 @@ final class Console: @unchecked Sendable {
             let tail = path.count <= room ? path : "…" + path.suffix(room - 1)
 
             // Dim, and without auto-wrap so a line too wide for the terminal is clipped: one carriage return erases it.
-            _ = try? FileDescriptor.standardOutput.writeAll("\r\u{1B}[2m\u{1B}[?7l\(head)\(tail)\u{1B}[?7h\u{1B}[22m\u{1B}[K".utf8)
-            self.shown = true
+            self.lastStatus = Array("\r\u{1B}[2m\u{1B}[?7l\(head)\(tail)\u{1B}[?7h\u{1B}[22m\u{1B}[K".utf8)
+            self.draw()
         }
+    }
+
+    /**
+     Caller holds the lock: draw the status line as it was last given.
+     */
+    private func draw() {
+        _ = try? FileDescriptor.standardOutput.writeAll(self.lastStatus)
+        self.shown = true
     }
 
     /**
@@ -279,16 +289,25 @@ final class Console: @unchecked Sendable {
     }
 
     /**
-     On a terminal, erase the status line first, under the lock so it cannot be redrawn in the middle of the lines.
+     On a terminal, erase the status line first, under the lock so it cannot be redrawn in the middle of the lines, and
+     draw it again under them, as it was, rather than leave its row empty until the next tick. A line for stderr erases
+     it only where stderr shows on a terminal too: sent to a file or /dev/null, it lands nowhere near the status line.
      */
     private func write(_ bytes: some Sequence<UInt8>, to fd: FileDescriptor) throws {
-        guard self.isLive else {
+        guard
+            self.isLive,
+            fd == .standardOutput || self.stderrIsTerminal
+        else {
             _ = try fd.writeAll(bytes)
             return
         }
         try self.lock.withLock {
+            let shown = self.shown
             self.erase()
             _ = try fd.writeAll(bytes)
+            if shown {
+                self.draw()
+            }
         }
     }
 
