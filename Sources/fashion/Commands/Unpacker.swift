@@ -36,6 +36,9 @@ struct UnpackerOptions: ParsableArguments {
 
     @Flag(name: .shortAndLong, help: "Keep unpacked data as _decompressed, for further investigation.")
     var keep = false
+
+    @Flag(name: [.customShort("i"), .long], help: "Remove the code signature the image kept from before packing too.")
+    var unsign = false
 }
 
 /**
@@ -46,8 +49,8 @@ struct UnpackerOptions: ParsableArguments {
 
  `sample` gives `sample_unpacked`. A signature added after packing hides what UPX left, so it comes out first, and the
  artifact is `sample_unsigned_unpacked`, as `thinr --unpack` names its last artifact. The unpacked code keeps the
- signature it had before packing, if any: `unsign` over the artifact takes it off, into
- `sample_unsigned_unpacked_unsigned`, as `thinr --unpack --unsign` would.
+ signature it had before packing, if any: --unsign takes it off too, into `sample_unsigned_unpacked_unsigned`, as
+ `thinr --unpack --unsign` names its last artifact, and `unsign` over the artifact gives the same.
 
  A file UPX did not pack, or that is not Mach-O, has nothing to write. Packed data that does not hold is reported, in
  red; with --keep, what decompressed of it is written as it is all the same, `sample_decompressed`, or
@@ -69,13 +72,14 @@ extension Unpacker {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Unpack\(self.scan.sort ? " sorted" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (write, keep) = (self.unpack.write, self.unpack.keep)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, write: write, keep: keep, reporter: $1) }
+        let (write, keep, unsign) = (self.unpack.write, self.unpack.keep, self.unpack.unsign)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, write: write, keep: keep, unsign: unsign, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
-    /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unpacked, whole.
-    static func lines(for path: String, write: Bool, keep: Bool = false, reporter: Reporter) -> [Line] {
-        ArtifactWriter(exact: false, unsign: false, unpack: true, split: false, write: write, keep: keep).lines(for: path, reporter: reporter)
+    /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unpacked, whole, and with `unsign` the
+    /// signature the unpacked image kept out too.
+    static func lines(for path: String, write: Bool, keep: Bool = false, unsign: Bool = false, reporter: Reporter) -> [Line] {
+        ArtifactWriter(exact: false, unsign: unsign, unpack: true, split: false, write: write, keep: keep).lines(for: path, reporter: reporter)
     }
 }

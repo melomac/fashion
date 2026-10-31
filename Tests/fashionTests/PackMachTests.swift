@@ -383,8 +383,11 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: packed.path + "_unsigned")), try Data(contentsOf: URL(fileURLWithPath: apple.path + "_packed")))
         XCTAssertEqual(try Data(contentsOf: unpacked), signed)
         _ = try codesign(["--verify", "--strict", unpacked.path])
-        // unpack writes the file as thin leaves it, found in place; unsign over it takes Apple's signature off.
+        // unpack writes the file as thin leaves it, found in place; with --unsign it takes Apple's signature off too,
+        // as unsign over the artifact does, into the same name.
         XCTAssertEqual(Unpacker.lines(for: packed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path])
+        XCTAssertEqual(Unpacker.lines(for: packed.path, write: false, unsign: true, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked.path + "_unsigned")), data)
         XCTAssertEqual(Unsigner.lines(for: unpacked.path, write: false, reporter: Reporter(console: Console())).map(\.text), [unpacked.path + "_unsigned"])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked.path + "_unsigned")), data)
     }
