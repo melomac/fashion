@@ -95,10 +95,21 @@ enum ByteHash: String {
             return try hash.digest(file, range: range, caveat: caveat).map { [(hash, $0)] } ?? []
         }
         let range = range ?? 0 ..< file.size
-        var fanOut = try FanOutHasher(hashes.map { ($0, min(range.count, $0.maximumLength)) })
-        try file.stream(range.lowerBound ..< range.lowerBound + fanOut.length) { fanOut.update($0) }
+        return try self.digests(hashes, length: range.count, caveat: caveat) { fanOut in
+            try file.stream(range.lowerBound ..< range.lowerBound + fanOut.length) { fanOut.update($0) }
+        }
+    }
+
+    /**
+     The digests of several hashes of `length` bytes that `feed` hands the hasher piece by piece, each with its hash in
+     the order given, without those TLSH makes none of: for bytes that are never in one place, a symbol table's names
+     with their separators say.
+     */
+    static func digests(_ hashes: [ByteHash], length: Int, caveat: (String) -> Void = { _ in }, feed: (inout FanOutHasher) throws -> Void) throws -> [(hash: ByteHash, digest: String)] {
+        var fanOut = try FanOutHasher(hashes.map { ($0, min(length, $0.maximumLength)) })
+        try feed(&fanOut)
         return try zip(hashes, fanOut.finalize()).compactMap { hash, digest in
-            hash.note(digest, length: range.count, caveat: caveat)
+            hash.note(digest, length: length, caveat: caveat)
             return digest.map { (hash, $0) }
         }
     }

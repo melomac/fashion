@@ -36,6 +36,30 @@ final class SymHashTests: XCTestCase {
         }
     }
 
+    /**
+     A table of a million and one external symbols, every name the empty string at index 0, counts for nothing against
+     the names' limit and is refused by its count, before a name is read; a million is hashed.
+     */
+    func testTooManyExternalSymbolsAreRefusedByTheirCount() throws {
+        func table(_ count: Int) -> Data {
+            var data = self.makeMachO(symoff: 56, nsyms: UInt32(count), stroff: UInt32(56 + 16 * count), strsize: 1)
+            var entries = Data(count: 16 * count)
+            entries.withUnsafeMutableBytes { raw in
+                for symbol in 0 ..< count {
+                    raw[16 * symbol + 4] = 1 // N_EXT
+                }
+            }
+            data.append(entries)
+            data.append(0)
+            return data
+        }
+        XCTAssertThrowsError(try SymHash.compute(File(data: table(SymHash.maxExternalSymbols + 1)), algorithm: .md5, separator: ",", sortSymbols: true)) { error in
+            XCTAssertEqual(error as? ParserError, .tooManyExternalSymbols(limit: SymHash.maxExternalSymbols))
+        }
+        let md5 = Insecure.MD5.hash(data: Data(repeating: UInt8(ascii: ","), count: SymHash.maxExternalSymbols - 1)).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(try SymHash.compute(File(data: table(SymHash.maxExternalSymbols)), algorithm: .md5, separator: ",", sortSymbols: true).map(\.digest), [md5])
+    }
+
     private func makeMachO(symoff: UInt32, nsyms: UInt32, stroff: UInt32, strsize: UInt32) -> Data {
         var data = Data()
         data.appendUInt32(MH_MAGIC_64)

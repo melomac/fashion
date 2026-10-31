@@ -13,6 +13,7 @@ enum ParserError: Error, Equatable {
     case invalidStringTableIndex(index: UInt32, tableSize: UInt32)
     case invalidSegmentRange(name: String, offset: UInt64, size: UInt64, fileSize: Int)
     case symbolNamesTooLong(limit: Int)
+    case tooManyExternalSymbols(limit: Int)
     case loadCommandsTooLarge(size: Int, limit: Int)
 }
 
@@ -35,6 +36,8 @@ extension ParserError: LocalizedError {
             "Invalid Mach-O: string table at offset \(offset.hex) with size \(size.hex) is outside the \(fileSize.hex)-byte slice"
         case let .symbolNamesTooLong(limit):
             "Mach-O too large: its external symbol names add up to more than \(limit) bytes"
+        case let .tooManyExternalSymbols(limit):
+            "Mach-O too large: its symbol table holds more than \(limit) external symbols"
         case let .loadCommandsTooLarge(size, limit):
             "Mach-O too large: its load commands add up to \(size) bytes, more than \(limit)"
         case let .invalidStringTableIndex(index, tableSize):

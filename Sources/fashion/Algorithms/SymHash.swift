@@ -35,6 +35,14 @@ enum SymHash {
     static let maxSymbolNamesLength = 64 << 20
 
     /**
+     The most external symbols a symbol table may hold (a million): each costs some 40 bytes of the arrays that index,
+     hold and order its name before a byte of it is read, which names that are empty, or one name shared, never count
+     against `maxSymbolNamesLength`; a 64 MB table of four million nameless symbols took 216 MiB. The largest binary at
+     hand, swift-frontend, holds some 49,000.
+     */
+    static let maxExternalSymbols = 1_000_000
+
+    /**
      The `symtab_command` of an `LC_SYMTAB`, nil for any other command. Throws for one too short to hold it: Security
      checks a symbol table command only before `__LINKEDIT`, so a slice can parse with a later one cut short.
      */
@@ -63,11 +71,11 @@ enum SymHash {
      The names of the external undefined symbols in a symbol table, in table order: entries whose type is exactly
      `N_EXT`, with no `N_STAB` bits and the `N_UNDF` section type, and each name up to its NUL or the end of the table.
 
-     Neither table is held whole: the entries are read in chunks, and the string table in windows that start at the names
-     wanted, skipping what lies between them. Names may overlap in a string table, so one NUL can end several: they share
-     one buffer, bounded by `maxSymbolNamesLength` rather than by the file. The names are checked in table order, as they
-     would be one at a time: an index past the string table is an error unless the names before it already went beyond
-     the limit.
+     Neither table is held whole: the entries are read in chunks, no more than `maxExternalSymbols` of them wanted, and
+     the string table in windows that start at the names wanted, skipping what lies between them. Names may overlap in
+     a string table, so one NUL can end several: they share one buffer, bounded by `maxSymbolNamesLength` rather than by
+     the file. The names are checked in table order, as they would be one at a time: an index past the string table is
+     an error unless the names before it already went beyond the limit.
 
      The image is `length` bytes at `offset` in `file`, which its `symtab` offsets count from; `is64` and `swap` describe
      its header.
@@ -100,7 +108,7 @@ enum SymHash {
         for first in stride(from: 0, to: Int(symtab.nsyms), by: batch) where badIndex == nil {
             let count = min(batch, Int(symtab.nsyms) - first)
             let entries = try file.read(at: offset + symbolOffset + first * entrySize, count: count * entrySize)
-            entries.withUnsafeBytes { raw in
+            try entries.withUnsafeBytes { raw in
                 for base in stride(from: 0, to: count * entrySize, by: entrySize) where badIndex == nil {
                     guard raw.loadUnaligned(fromByteOffset: base + 4, as: UInt8.self) & mask == UInt8(N_EXT) else {
                         continue
@@ -110,6 +118,9 @@ enum SymHash {
                     guard index < symtab.strsize else {
                         badIndex = .invalidStringTableIndex(index: index, tableSize: symtab.strsize)
                         continue
+                    }
+                    guard indexes.count < self.maxExternalSymbols else {
+                        throw ParserError.tooManyExternalSymbols(limit: self.maxExternalSymbols)
                     }
                     indexes.append(Int(index))
                 }
@@ -203,14 +214,16 @@ enum SymHash {
             names.sort { $0.lexicographicallyPrecedes($1) }
         }
 
-        var joinedData = Data()
-        for (index, name) in names.enumerated() {
-            if index > 0 {
-                joinedData.append(contentsOf: separator.utf8)
+        // The hashers are fed the names one by one, the separator between them, rather than a joined copy of them all.
+        let separator = Data(separator.utf8)
+        let length = names.reduce(0) { $0 + $1.count } + max(0, names.count - 1) * separator.count
+        return try ByteHash.digests(algorithms, length: length, caveat: caveat) { fanOut in
+            for (index, name) in names.enumerated() {
+                if index > 0 {
+                    separator.withUnsafeBytes { fanOut.update($0) }
+                }
+                name.withUnsafeBytes { fanOut.update($0) }
             }
-            joinedData.append(name)
         }
-
-        return try ByteHash.digests(algorithms, joinedData, caveat: caveat)
     }
 }
