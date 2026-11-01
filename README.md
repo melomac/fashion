@@ -4,14 +4,18 @@
 
 The project is hosted on [Codeberg][], mirrored on [GitHub][], and natively supports:
 
-* [CryptoKit][] hash functions: [SHA-2][] (SHA256 by default), insecure [SHA-1][] and [MD5][]
+* [CryptoKit][] hash functions: [SHA-2][] (SHA-256 by default), insecure [SHA-1][] and [MD5][]
 * Fuzzy hash functions: [ssdeep][] and [TLSH][] as submodules with Swift C bridging
 * Searching for multiple digests with mixed algorithms and a similarity / distance score for fuzzy hash
 * [CDHash][] of Mach-O binaries, the identity macOS and iOS use: embedded when signed or synthesized like `syspolicyd`
 * [symhash][] of Mach-O binaries, with any algorithm, separator, and optional sort
 * [XAR][] archives (macOS packages) table of contents checksum with any algo and optional decompress (zlib)
-* [git-hash-object][]
-* Multithreading
+* [Git blob object][]
+* Thin universal Mach-O binaries into architecture slices with exact, unsign and unpack options
+* Unsign Mach-O binaries, with `__LINKEDIT` vmsize restored: samples signed by different identities hash the same
+* Unpack [UPX][] Mach-O binaries natively, past the signature, a crafted marker or XORed code
+* Verify Mach-O files for anomalies, as the kernel, dyld, Security, Gatekeeper, AMFI or Rosetta see them
+* Multithreading, and zero runtime dependencies
 
 With `--jobs 0` or the `-J` shortcut, and without `--sort`, `fashion` is blazing fast and stays well under 100 MB of memory:
 
@@ -172,7 +176,7 @@ According to [xar(1)](x-man-page://1/xar "man 1 xar"):
 
 The header is straightforward so, instead of bridging to the `libxar` shared library, we implement our own parser to read the table of contents (TOC).
 
-Just like `xar --dump-toc-cksum` and `syspolicyd`, `--xar-toc` mode defaults to the SHA-1 of the compressed TOC.
+Just like `xar --dump-toc-cksum` and `syspolicyd`, `--xar-toc` mode defaults to the insecure SHA-1 of the compressed TOC.
 You can choose any algorithm and even have the TOC decompressed (zlib) with `--decompress` / `--dec` / `-d`.
 
 ## Thinner
@@ -401,7 +405,7 @@ Every rule is checked against `codesign`: the tests compare `fashion`'s `ADHOC` 
 
 ### Git hash
 
-The `git` and `git256` algorithms compute the hash of a [Git blob object](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects): `blob \(length)\0` + data.
+The `git` and `git256` algorithms compute the hash of a [Git blob object][]: `blob \(length)\0` + data.
 
 With the digest, you can look for the object across all branches and commits of a repository:
 
@@ -493,10 +497,10 @@ The ssdeep, TLSH, UCL and LZMA SDK sources are in the repository's submodules, w
 [CDHash]: https://developer.apple.com/documentation/technotes/tn3126-inside-code-signing-hashes "TN3126: Inside Code Signing: Hashes"
 [symhash]: https://github.com/threatstream/symhash "SymHash: An ImpHash for Mach-O"
 [XAR]: https://github.com/apple-oss-distributions/xar/ "GitHub: apple-oss-distributions/xar"
-[Git-Hash-object]: https://git-scm.com/docs/git-hash-object "Git: hash-object"
+[Git blob object]: https://git-scm.com/book/en/v2/Git-Internals-Git-Objects "Git Internals - Git Objects"
 
 [UPX]: https://upx.github.io "UPX: the Ultimate Packer for eXecutables"
 [UCL]: https://github.com/upx/upx-vendor-ucl/tree/upx-vendor "UCL is a portable lossless data compression library written in ANSI C"
-[LZMA]: https://github.com/upx/upx-vendor-lzma-sdk/tree/upx-vendor "Lempel–Ziv–Markov chain algorithm" 
+[LZMA]: https://github.com/upx/upx-vendor-lzma-sdk/tree/upx-vendor "Lempel–Ziv–Markov chain algorithm"
 [LZMA SDK]: https://www.7-zip.org/sdk.html "The LZMA SDK provides the documentation, samples, header files, libraries, and tools you need to develop applications that use LZMA compression"
 [swift-argument-parser]: https://github.com/apple/swift-argument-parser "Straightforward, type-safe argument parsing for Swift"
