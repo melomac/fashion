@@ -169,6 +169,13 @@ struct PackMach {
     /// Whether a modified UPX packed the image, by its marker or its segments' names.
     private let modified: Bool
 
+    /// The original's size as the `p_info` before the blocks claims it and as the pack header says it: UPX writes the
+    /// one value in both, the pack header's under its checksum, the `p_info`'s under nothing, where its stub never
+    /// reads it. Nil when the image ends before the `p_info`.
+    var claimedSizes: (pInfo: Int, header: Int)? {
+        (try? self.read(at: self.overlayOffset, count: 12)).map { (Int(self.image.word($0, at: 4)), Int(self.header.uFileSize)) }
+    }
+
     /// A packer class UPX unpacks Mach-O with: its CPU, filetype, format id and page.
     private struct Class {
         let cpuType: cpu_type_t

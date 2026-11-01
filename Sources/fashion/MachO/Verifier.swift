@@ -1039,14 +1039,28 @@ struct MachOVerifier {
         switch Result(catching: { try PackMach(image) }) {
         case let .success(packed?):
             found.append(packed.packer)
+            found += Self.sizeClaim(packed)
         case .success(nil):
             if image.findCommand(UInt32(LC_CODE_SIGNATURE)) != nil, let pieces = (try? MachOEditor.unsigned(image, end: end)) ?? nil, let unsigned = (try? MachO(File(editing: self.file, pieces: pieces))) ?? nil, let packed = try? PackMach(unsigned) {
                 found.append("\(packed.packer), signed after packing")
+                found += Self.sizeClaim(packed)
             }
         case let .failure(error):
             found.append("\(File.message(for: error)), which unpack refuses")
         }
         return found
+    }
+
+    /**
+     UPX writes the original's size in its pack header, under the header's checksum, and in the `p_info` before the
+     blocks, under nothing, which its stub never reads: the two disagreeing, the file was edited after packing. One
+     line, or none.
+     */
+    private static func sizeClaim(_ packed: PackMach) -> [String] {
+        guard let sizes = packed.claimedSizes, sizes.pInfo != sizes.header else {
+            return []
+        }
+        return ["UPX's p_info claims \(sizes.pInfo) bytes for the original where its pack header, under its checksum, says \(sizes.header)"]
     }
 
     // MARK: - __LINKEDIT

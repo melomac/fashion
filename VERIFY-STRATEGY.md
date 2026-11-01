@@ -169,6 +169,7 @@ left out, with the reason.
 | Bytes appended past the image's end | research: a new hash per copy, polyglots; `--exact` undoes it | ran |
 | A `__LINKEDIT` vmsize rounded as a signature rounds it, on an image without a signature; not named of a stripped 64-bit image that records no linker (`LC_VERSION_MIN_MACOSX`, macOS 10.13 and earlier), whose `strip` may have rounded to 16 KiB itself (cctools 1010, Xcode 15.3) | research: a signature came out, which `codesign --remove-signature` leaves so | ran (x86_64) |
 | UPX, as is, by a modified UPX with its marker, or signed after packing, bytes appended after signing or not; a pack header found that does not hold, or none before the 16-byte `__LINKEDIT` only UPX writes (canUnpack's style 395 "file corrupted"), which `unpack` refuses | research; `--unpack` undoes it | ran |
+| A UPX `p_info` whose size for the original is not the pack header's: UPX writes the one value in both, the pack header's under its checksum, the `p_info`'s under nothing, which its stub never reads; its ELF unpacker refuses the two disagreeing, its Mach-O one does not look (`p_lx_elf.cpp` against `p_mach.cpp`) | research: edited after packing; the unpack fuzz harness's dylib claimed 515 MiB over a pack header saying 4096, which cost 554 MB to hash before `unpack` ended the image at the last byte written | as UPX's own: both die under Rosetta here (SIGTRAP), the stub reading no `p_info` |
 
 ### Code signature
 

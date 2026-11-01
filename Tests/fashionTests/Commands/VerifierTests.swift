@@ -337,7 +337,9 @@ final class VerifierTests: XCTestCase {
 
     /**
      A file UPX packed is named for it, by a modified UPX with its marker, and signed after packing as such, the
-     signature hiding what UPX left from a look at the file as it is, with bytes appended after signing too.
+     signature hiding what UPX left from a look at the file as it is, with bytes appended after signing too. A
+     `p_info` whose size for the original is not the pack header's is told apart: UPX writes the one value in both,
+     and only the pack header's lies under a checksum.
      */
     func testUPXIsNamed() throws {
         let directory = try self.directory("upx")
@@ -373,6 +375,18 @@ final class VerifierTests: XCTestCase {
         let hidden = directory / "hidden"
         try padded.write(to: hidden)
         XCTAssertTrue(self.verify(hidden.path).lines.contains("\(hidden.path): Invalid UPX data: file corrupted: no pack header before the 16-byte __LINKEDIT UPX writes, which unpack refuses"))
+        // The p_info's size for the original, 4 bytes into the 12 at the overlay offset the pack header ends with,
+        // raised by a page: the file is packed all the same, and the two sizes are told apart; as UPX wrote it, not.
+        var claimed = try Data(contentsOf: packed)
+        let overlay = Int(claimed.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: header + 32, as: UInt32.self) }.littleEndian)
+        let original = Int(claimed.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: overlay + 4, as: UInt32.self) }.littleEndian)
+        claimed.replaceSubrange(overlay + 4 ..< overlay + 8, with: withUnsafeBytes(of: UInt32(original + 0x1000).littleEndian) { Data($0) })
+        let overstated = directory / "overstated"
+        try claimed.write(to: overstated)
+        let claims = self.verify(overstated.path).lines
+        XCTAssertTrue(claims.contains("\(overstated.path): packed by UPX"))
+        XCTAssertTrue(claims.contains("\(overstated.path): UPX's p_info claims \(original + 0x1000) bytes for the original where its pack header, under its checksum, says \(original)"))
+        XCTAssertFalse(self.verify(packed.path).lines.contains { $0.contains("UPX's p_info claims") })
     }
 
     /**
