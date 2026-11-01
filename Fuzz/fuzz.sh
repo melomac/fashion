@@ -9,6 +9,7 @@
 #                                             workers each (2), as many binaries at a time as the cores hold, each
 #                                             wave reported as it ends
 #   Fuzz/fuzz.sh summary [harness...]         what the last run did: runs, executions per second, coverage, artifacts
+#   Fuzz/fuzz.sh clean            remove what seed and run wrote, corpora, logs and artifacts; the binaries stay
 #
 set -eo pipefail
 
@@ -426,8 +427,15 @@ summary() {
     done
 }
 
+# Back to a built tree: the corpora, a seeding of them left unfinished, the fixtures they were seeded from, the logs
+# and the artifacts go, so the next run seeds afresh and reports its own findings alone; the binaries stay, as building
+# them is the slow part.
+clean() {
+    rm -rf "${corpus:?}" "$corpus.seeding" "${build:?}/fixtures" "$build/seed-test.log" "${logs:?}" "${artifacts:?}"
+}
+
 case ${1:-} in
-    build | seed | run | summary)
+    build | seed | run | summary | clean)
         "$@"
         ;;
     *)

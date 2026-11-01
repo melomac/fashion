@@ -34,6 +34,7 @@ make fuzz-run FUZZ_HARNESSES="unpack diff" FUZZ_JOBS=8   # some harnesses, more 
 make fuzz-run FUZZ_CORES=4    # fewer binaries at a time
 make fuzz                     # build only
 make fuzz-seed                # seed only
+make fuzz-clean               # drop the corpora, logs and artifacts; the next run seeds afresh
 ```
 
 `fuzz.sh` does the work and documents its steps. `FUZZ_JOBS` sets the workers per binary and `FUZZ_CORES` the cores
@@ -44,6 +45,8 @@ outnumber the cores because libFuzzer's 10-second limit counts wall time, and on
 passes for a hung one. Everything lands under
 `.build/fuzz/`, which git ignores: the binaries in `bin/`, the corpora in `corpus/<harness>/`, each run's logs in
 `logs/<binary>/` and what it found in `artifacts/<binary>/`. `Fuzz/fuzz.sh summary` reads the last run's logs back.
+A run adds to the corpora and leaves earlier artifacts where they are, so after a long run, or one whose findings
+are dealt with, `make fuzz-clean` takes the tree back to its binaries: the next run seeds and reports from nothing.
 
 The corpora are seeded with every fixture the tests build (hand-made, compiled or codesigned: `FASHION_FIXTURES` in
 TestHelpers.swift keeps them while `swift test` runs), with `/bin/ls` whole and by slice, with a XAR of this directory,

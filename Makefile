@@ -96,6 +96,10 @@ fuzz-seed:
 fuzz-run: fuzz
 	Fuzz/fuzz.sh run $(FUZZ_SECONDS) $(FUZZ_HARNESSES)
 
+.PHONY: fuzz-clean
+fuzz-clean:
+	Fuzz/fuzz.sh clean
+
 # ----------------------------------------------------------------------------
 # Housekeeping
 # ----------------------------------------------------------------------------
