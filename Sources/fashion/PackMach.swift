@@ -657,7 +657,7 @@ struct PackMach {
         }
 
         if self.image.filetype == MH_DYLIB {
-            try self.copyDylibSegments(commands, into: &output)
+            try self.copyDylibSegments(commands, into: &output, pass: &pass)
         } else {
             for (index, segment) in segments.enumerated() where segment.filesize != 0 {
                 let gap = Self.gap(after: index, in: segments, end: fileSize)
@@ -667,6 +667,11 @@ struct PackMach {
             }
         }
 
+        // The image ends at the last byte written, by a block or a copied segment, as UPX's output file ends where it
+        // last wrote: p_filesize bounds what the blocks fill and where the segments lie, it is not a length. A dylib
+        // whose p_filesize claims more than its segments reach would otherwise come out that long, zeros after the
+        // last one, and cost that much to hash.
+        output.count = pass.extent
         return Unpacked(data: output, pass: pass, pInfo: (progid, fileSize, blocksize))
     }
 
@@ -741,6 +746,8 @@ struct PackMach {
         var adler: uLong = 1
         var filtered = false
         var produced = 0
+        /// The end of the furthest byte written, by a block or a copied segment: where the image ends.
+        var extent = 0
         /// Each block's Adler-32 and length, in order, which the image's sum combines, kept when `keeping` for the
         /// keys to replace the filtered ones' by.
         var sums: [(adler: UInt32, count: Int)] = []
@@ -888,6 +895,7 @@ struct PackMach {
                 pass.adler = adler32_combine(pass.adler, uLong(sum), info.uncompressed)
             }
             pass.produced += info.uncompressed
+            pass.extent = max(pass.extent, offset + info.uncompressed)
             offset += info.uncompressed
             wanted -= info.uncompressed
         }
@@ -907,7 +915,7 @@ struct PackMach {
      where the original headers place them, the image grown to hold one placed past its end, as UPX's output file
      grows, the pointer in `__mod_init_func`, which UPX points at its loader, restored.
      */
-    private func copyDylibSegments(_ commands: [Command], into output: inout Data) throws {
+    private func copyDylibSegments(_ commands: [Command], into output: inout Data, pass: inout Pass) throws {
         // UPX compares the two headers' ncmds, the packed file's and the original's.
         let packed = self.image.loadCommands.prefix(self.image.ncmds)
         guard self.image.ncmds == commands.count else {
@@ -941,6 +949,7 @@ struct PackMach {
                 output.append(Data(count: end.partialValue - output.count))
             }
             output.replaceSubrange(sc.fileoff ..< end.partialValue, with: data)
+            pass.extent = max(pass.extent, end.partialValue)
         }
     }
 

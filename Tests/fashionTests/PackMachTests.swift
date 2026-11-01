@@ -1173,12 +1173,14 @@ final class PackMachTests: XCTestCase {
     /**
      A packed dylib's first segment comes out of the blocks, bounded by `p_filesize`; the others are copied to where
      the original headers place them, which UPX does by seeking its output file there and writing, so a segment
-     placed past `p_filesize` grows the file. Said with `p_filesize` as the original's size and understated to the
-     first segment's, both unpack to the original, as `upx -d` unpacks them when it is there.
+     placed past `p_filesize` grows the file, and the file ends at the last segment whatever `p_filesize` claims
+     past it. Said with `p_filesize` as the original's size, understated to the first segment's, and overstated by
+     64 MiB, which the unpack fuzz harness found cost that much to hash, all three unpack to the original, as
+     `upx -d` unpacks them when it is there.
      */
     func testADylibsCopiedSegmentsLieWhereTheHeadersPlaceThem() throws {
         let directory = try self.directory("dylib")
-        for (name, fileSize) in [("sound", 0x1060), ("understated", 0x1000)] {
+        for (name, fileSize) in [("sound", 0x1060), ("understated", 0x1000), ("overstated", 0x1060 + (64 << 20))] {
             let (packed, original) = try self.packedDylibByHand(fileSize: fileSize)
             let file = directory / name
             try packed.write(to: file)
