@@ -39,6 +39,8 @@ import Security
 struct Signer {
     /// What `SecStaticCode::verifySignature` throws `errSecCSSignatureFailed` for.
     enum Failure: Error, Equatable {
+        /// The CMS blob is not DER read to its end: what is wrong and where, as the reader met it.
+        case malformed(String)
         /// The CMS blob does not decode.
         case undecodable
         /// The CMS blob carries no signer.
@@ -122,6 +124,13 @@ struct Signer {
      chain and the timestamp, trustd's work, are not, and the signer comes back with no chain.
      */
     init(cms: Data, over directory: Data, binding: [(hashType: HashType, cdhash: Data)] = [], best: HashType? = nil, enforcingExpiration: Bool = false, evaluatingChain: Bool = true) throws(Failure) {
+        // Read to its end first, every length within the bytes: Security's decoder checks a length against its
+        // parent's only when the parent's is definite (sec_asn1d_check_and_subtract_length), and under an indefinite
+        // one allocates what the length says and fills it, 680 MiB for a 4 KiB blob whose OID's length byte the
+        // signer fuzz harness made long-form, the OID's own bytes then its length.
+        if let fault = DER.fault(in: cms) {
+            throw .malformed(fault)
+        }
         var created: CMSDecoder?
         guard CMSDecoderCreate(&created) == errSecSuccess, let decoder = created,
               cms.withUnsafeBytes({ $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, cms.count) } ?? errSecParam }) == errSecSuccess,
@@ -234,7 +243,8 @@ struct Signer {
      holds.
      */
     static func timestamp(in cms: Data, anchors: [SecCertificate]? = nil) -> (date: Date, chain: [SecCertificate])? {
-        guard let (signature, token) = signatureAndToken(in: cms) else {
+        // The token read to its end as the signer's blob is, before the decoder takes a length at its word.
+        guard let (signature, token) = signatureAndToken(in: cms), DER.fault(in: token) == nil else {
             return nil
         }
         var created: CMSDecoder?

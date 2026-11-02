@@ -1516,6 +1516,46 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     A CMS blob with a length past its bytes does not decode, and before Security's decoder sees it: `/bin/ls`'s
+     signature, DER throughout, rewrapped in an indefinite-length outer SEQUENCE as Security's own encoder writes
+     one, which leaves the decoder no length to check the first OID's against, then that OID's length byte made
+     long-form so that the OID's own bytes read as a length of 680 MiB. The decoder allocates what the length says
+     and fills it, 857 MB resident for a 4 KiB blob, as the signer fuzz harness found; the reader refuses the blob
+     first, and the process grows by nothing.
+     */
+    func testACMSBlobWithALengthPastItsBytesDoesNotDecode() throws {
+        let (directory, cms) = try Self.signature(of: "/bin/ls")
+        var reader = DER.Reader(cms)
+        let contentInfo = try XCTUnwrap(reader.next())
+        var indefinite = Data([0x30, 0x80]) + contentInfo.content + Data([0, 0])
+        XCTAssertEqual(Array(indefinite[2 ..< 4]), [0x06, 0x09])
+        XCTAssertNoThrow(try Signer(cms: indefinite, over: directory))
+        indefinite[3] = 0x84
+        let resident = residentBytes()
+        XCTAssertThrowsError(try Signer(cms: indefinite, over: directory)) { error in
+            XCTAssertEqual(error as? Signer.Failure, .malformed("tag 0x06 at 0x2 declares 713443462 bytes, \(indefinite.count - 8) left"))
+        }
+        XCTAssertLessThan(residentBytes() - resident, 64 << 20, "the decoder was handed the length")
+    }
+
+    /**
+     The reader reads tags and lengths as Security's decoder does, so that it refuses nothing the decoder takes: a
+     tag in the high-tag-number form, its number in seven-bit bytes; a length in more bytes than it needs, leading
+     zeros first; and refuses as it does a tag number past 57 bits and a length past 55, each said with its offset.
+     */
+    func testTheReaderReadsTagsAndLengthsAsSecuritysDecoderDoes() throws {
+        let tagged = try XCTUnwrap(DER.elements(of: Data([0x1f, 0x81, 0x00, 0x01, 0x41])))
+        XCTAssertEqual(tagged.map(\.tag), [0x1f])
+        XCTAssertEqual(tagged.map { Array($0.content) }, [[0x41]])
+        let padded = try XCTUnwrap(DER.elements(of: Data([0x04, 0x85, 0x00, 0x00, 0x00, 0x00, 0x01, 0x41])))
+        XCTAssertEqual(padded.map { Array($0.content) }, [[0x41]])
+        XCTAssertEqual(DER.fault(in: Data([0x1f] + [UInt8](repeating: 0xff, count: 9) + [0x7f])), "the tag at 0x0 past 57 bits")
+        XCTAssertEqual(DER.fault(in: Data([0x04, 0x88] + [UInt8](repeating: 0xff, count: 8))), "the length at 0x0 past 55 bits")
+        XCTAssertEqual(DER.fault(in: Data([0x30, 0x80, 0x06, 0x84, 0x2a, 0x86, 0x48, 0x86, 0x00, 0x00])), "tag 0x06 at 0x2 declares 713443462 bytes, 2 left")
+        XCTAssertNil(DER.fault(in: Data([0x30, 0x80, 0x04, 0x01, 0x41, 0x00, 0x00])))
+    }
+
+    /**
      DER nested a level every two bytes, a megabyte of unclosed indefinite-length sequences for the CMS reader and
      arrays within arrays for the entitlements decoder, is refused rather than recursed into: each level is a stack
      frame, and a worker thread has 512 KiB of them.

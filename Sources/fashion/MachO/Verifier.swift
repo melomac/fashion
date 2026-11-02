@@ -1521,6 +1521,7 @@ struct MachOVerifier {
             signer = try Signer(cms: cms, over: primary.data, binding: directories.map { ($0.hashType, $0.hashType.digest($0.data)) }, best: best.hashType, enforcingExpiration: best.flags & Self.csEnforceExpiration != 0)
         } catch {
             let line = switch error {
+            case let .malformed(fault): "a CMS signature that is not DER to its end, \(fault), which Security's decoder would allocate for as it streams"
             case .undecodable: "a CMS signature Security cannot decode"
             case .unsigned: "a CMS signature with no signer"
             case let .signers(count): "a CMS signature with \(count) signers, where Security requires exactly one, an invalid signature to it"
