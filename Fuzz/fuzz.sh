@@ -7,9 +7,10 @@
 #   Fuzz/fuzz.sh seed             seed .build/fuzz/corpus/* from the test fixtures, /bin/ls and a XAR, the corpora
 #                                 grown so far merged in
 #   Fuzz/fuzz.sh run [seconds] [harness...]   run the harnesses named, all by default, for that long (900) each, FUZZ_JOBS
-#                                             workers each (2), as many binaries at a time as the cores hold, each
-#                                             wave reported as it ends
+#                                             processes each (2), respawned as they die, in waves of equal size that
+#                                             the cores hold, each reported as it ends
 #   Fuzz/fuzz.sh summary [harness...]         what the last run did: runs, executions per second, coverage, artifacts
+#   Fuzz/fuzz.sh watch [harness...]           follow the logs of a run as they are written, waves to come included
 #   Fuzz/fuzz.sh merge [tree] [harness...]    merge another tree's corpora into these, or these into themselves,
 #                                             keeping what reaches an edge the rest does not
 #   Fuzz/fuzz.sh clean            remove what seed and run wrote, corpora, logs and artifacts; the binaries stay
@@ -26,9 +27,10 @@ bin=$build/bin
 corpus=$build/corpus
 artifacts=$build/artifacts
 logs=$build/logs
-# Workers per binary, and the cores they run on: run launches cores / jobs binaries at a time and the rest when those
-# finish, so the workers never outnumber the cores (libFuzzer's -timeout counts wall time: oversubscribed, a slow unit
-# passes for a hung one). FUZZ_CORES=$(sysctl -n hw.perflevel0.logicalcpu) keeps the efficiency cores out of it.
+# Processes per binary, and the cores they run on: run launches the binaries in waves of equal size, no larger than
+# the cores hold, cores / jobs, so the processes never outnumber the cores (libFuzzer's -timeout counts wall time:
+# oversubscribed, a slow unit passes for a hung one). FUZZ_CORES=$(sysctl -n hw.perflevel0.logicalcpu) keeps the
+# efficiency cores out of it.
 jobs=${FUZZ_JOBS:-2}
 cores=${FUZZ_CORES:-$(sysctl -n hw.ncpu)}
 
@@ -425,19 +427,21 @@ run() {
     if [ ! -d "$corpus" ]; then
         seed
     fi
-    # The binaries go in waves of cores / jobs, each wave waited for before the next starts, so that the workers never
-    # outnumber the cores; a jobs past the cores gets a binary at a time, and a warning.
-    local slots=$((cores / jobs)) count waves
+    # The binaries go in waves no larger than the cores hold, cores / jobs, and as equal as the count allows, each
+    # wave waited for before the next starts: the processes never outnumber the cores, and no wave leaves most of
+    # them idle; a jobs past the cores gets a binary at a time, and a warning.
+    local slots=$((cores / jobs)) count waves per
     if [ "$slots" -lt 1 ]; then
         slots=1
-        echo "warning: $jobs workers on $cores cores; set FUZZ_JOBS lower" >&2
+        echo "warning: $jobs processes on $cores cores; set FUZZ_JOBS lower" >&2
     fi
     local all=($(binaries "$@")) wave=1 i
     count=${#all[@]}
     waves=$(((count + slots - 1) / slots))
-    echo "Running ${*:-every harness}: $count binaries, $slots at a time with $jobs workers each, $seconds seconds a wave, $waves waves..."
-    for ((i = 0; i < count; i += slots)); do
-        local names=("${all[@]:i:slots}")
+    per=$(((count + waves - 1) / waves))
+    echo "Running ${*:-every harness}: $count binaries, $waves waves of up to $per, $jobs processes each, $seconds seconds a wave..."
+    for ((i = 0; i < count; i += per)); do
+        local names=("${all[@]:i:per}")
         echo "wave $wave of $waves, until about $(date -v "+${seconds}S" '+%H:%M'): ${names[*]}"
         for name in "${names[@]}"; do
             harness=${name#fuzz-}
@@ -448,8 +452,12 @@ run() {
             fi
             rm -rf "${logs:?}/${name:?}"
             mkdir -p "$artifacts/$name" "$logs/$name"
-            (cd "$logs/$name" && "$bin/$name" -jobs="$jobs" -workers="$jobs" -max_total_time="$seconds" -timeout=10 \
-                -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" -use_value_profile=1 -print_final_stats=1 \
+            # libFuzzer's fork mode: the parent spawns jobs processes over and over, each fuzzing a while from the
+            # corpus and merging what it found back, so one that dies of memory or a timeout is replaced, its input
+            # written as an artifact and counted, where a crash ends the binary's run with its artifact. The parent's
+            # log is the one read back; the jobs' own live in a temporary directory, gone with them.
+            (cd "$logs/$name" && "$bin/$name" -fork="$jobs" -max_total_time="$seconds" -timeout=10 \
+                -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" -use_value_profile=1 \
                 -max_len="$(max_len "$harness")" ${dict[@]+"${dict[@]}"} -artifact_prefix="$artifacts/$name/" \
                 "$corpus/$harness" > "$name.log" 2>&1) &
         done
@@ -461,18 +469,31 @@ run() {
     done
 }
 
-# What the last run of one binary did. Each worker's log (fuzz-<n>.log, next to the parent's) ends with its final
-# stats: the runs and executions per second are summed over the workers, the coverage is the most edges any of them
-# reached.
+# What the last run of one binary did, from its log (<binary>.log, the parent's): its last status line carries the
+# runs so far, the edges reached and the seconds elapsed, and the rate is the runs over the seconds, all processes
+# together.
 report() {
-    local name=$1 runs rate cov found
-    [ -d "$logs/$name" ] || return 0
-    runs=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::number_of_executed_units/ { sum += $2 } END { print sum + 0 }')
-    rate=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | awk '/stat::average_exec_per_sec/ { sum += $2 } END { print sum + 0 }')
-    cov=$(cat "$logs/$name"/fuzz-[0-9]*.log 2>/dev/null | grep -o 'cov: [0-9]*' | awk '{ if ($2 > max) max = $2 } END { print max + 0 }' || true)
+    local name=$1 line runs cov seconds rate found
+    [ -f "$logs/$name/$name.log" ] || return 0
+    line=$(grep '^#[0-9]*: cov: ' "$logs/$name/$name.log" | tail -1)
+    runs=$(echo "$line" | sed -n 's/^#\([0-9]*\):.*/\1/p')
+    cov=$(echo "$line" | sed -n 's/.* cov: \([0-9]*\).*/\1/p')
+    seconds=$(echo "$line" | sed -n 's/.* time: \([0-9]*\)s.*/\1/p')
+    rate=$((${runs:-0} / (${seconds:-0} > 0 ? seconds : 1)))
     found=$(ls "$artifacts/$name" 2>/dev/null | wc -l | tr -d ' ')
-    printf '%-24s %12s runs %8s exec/s  cov %-6s artifacts %s\n' "$name" "$runs" "$rate" "$cov" "$found"
+    printf '%-24s %12s runs %8s exec/s  cov %-6s artifacts %s\n' "$name" "${runs:-0}" "$rate" "${cov:-0}" "$found"
     ls "$artifacts/$name" 2>/dev/null | sed 's/^/    /'
+}
+
+# The logs of a run followed as they grow, each binary's, named before they exist: tail -F follows names and takes a
+# file up when it appears, as a later wave's do, or when run makes a binary's log directory again to launch it. A
+# glob would name the files of the moment only.
+watch() {
+    local name files=()
+    for name in $(binaries "$@"); do
+        files+=("$logs/$name/$name.log")
+    done
+    exec tail -F "${files[@]}"
 }
 
 # What the last run did, binary by binary: every harness's, or those named.
@@ -491,7 +512,7 @@ clean() {
 }
 
 case ${1:-} in
-    build | seed | run | summary | merge | clean)
+    build | seed | run | summary | watch | merge | clean)
         "$@"
         ;;
     *)

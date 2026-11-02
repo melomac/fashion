@@ -97,6 +97,10 @@ fuzz-seed:
 fuzz-run: fuzz
 	Fuzz/fuzz.sh run $(FUZZ_SECONDS) $(FUZZ_HARNESSES)
 
+.PHONY: fuzz-watch
+fuzz-watch:
+	Fuzz/fuzz.sh watch $(FUZZ_HARNESSES)
+
 .PHONY: fuzz-merge
 fuzz-merge:
 	Fuzz/fuzz.sh merge $(FUZZ_FROM) $(FUZZ_HARNESSES)

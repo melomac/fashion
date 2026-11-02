@@ -28,26 +28,31 @@ Package.swift): `fuzz-macho`, `fuzz-cdhash`, `fuzz-unpack` and `fuzz-verify` wit
 ## Running
 
 ```sh
-make fuzz-run                 # build, seed, then fuzz every harness for 15 minutes each, 2 workers each
+make fuzz-run                 # build, seed, then fuzz every harness for 15 minutes each, 2 processes each
 make fuzz-run FUZZ_SECONDS=60 # shorter
-make fuzz-run FUZZ_HARNESSES="unpack diff" FUZZ_JOBS=8   # some harnesses, more workers each
+make fuzz-run FUZZ_HARNESSES="unpack diff" FUZZ_JOBS=8   # some harnesses, more processes each
 make fuzz-run FUZZ_CORES=4    # fewer binaries at a time
 make fuzz                     # build only
 make fuzz-seed                # seed only, the corpora grown so far merged into the seeded ones
+make fuzz-watch               # in another terminal: follow the logs as a run writes them
 make fuzz-merge               # minimize the corpora: what reaches an edge the rest does not stays
 make fuzz-merge FUZZ_FROM=/path/to/another/tree   # take that tree's corpora in the same way
 make fuzz-clean               # drop the corpora, logs and artifacts; the next run seeds afresh
 ```
 
-`fuzz.sh` does the work and documents its steps. `FUZZ_JOBS` sets the workers per binary and `FUZZ_CORES` the cores
-they share (all of them by default): the binaries run as many at a time as the cores hold, the rest once those finish,
-so a run of every harness takes a few times `FUZZ_SECONDS`, fewer on a machine with more cores; each wave is announced
-with the time it should end and reported, binary by binary, when it does. The workers never
-outnumber the cores because libFuzzer's 10-second limit counts wall time, and on an oversubscribed machine a slow unit
-passes for a hung one. Everything lands under `.build/fuzz/`, which git ignores and `make distclean` removes with the
+`fuzz.sh` does the work and documents its steps. `FUZZ_JOBS` sets the processes per binary, which libFuzzer's fork
+mode spawns over and over, each fuzzing a while from the corpus and merging what it found back: one that dies of
+memory or a timeout is replaced and its input kept as an artifact, where a crash ends that binary's run. `FUZZ_CORES`
+sets the cores they share (all of them by default): the binaries run in waves of equal size that the cores hold, so a
+run of every harness takes a few times `FUZZ_SECONDS`, fewer on a machine with more cores, and no wave leaves most of
+them idle; each wave is announced with the time it should end and reported, binary by binary, when it does. The
+processes never outnumber the cores because libFuzzer's 10-second limit counts wall time, and on an oversubscribed
+machine a slow unit passes for a hung one. Everything lands under `.build/fuzz/`, which git ignores and `make distclean` removes with the
 rest of `.build`; `FUZZ_BUILD` names another tree, one outside the repository outliving it. The tree holds the binaries
 in `bin/`, the corpora in `corpus/<harness>/`, each run's logs in `logs/<binary>/` and what it found in
-`artifacts/<binary>/`. `Fuzz/fuzz.sh summary` reads the last run's logs back.
+`artifacts/<binary>/`. `Fuzz/fuzz.sh summary` reads the last run's logs back, and `Fuzz/fuzz.sh watch` follows them
+as a run writes them, a line per job with the runs so far, the edges and the rate, the logs of a wave not yet started
+included, since it names them all up front.
 
 A run adds to the corpora, mostly units that differ from another by a comparison operand, which value profiling
 keeps and which pile up over days to where a worker starts near its memory limit. `make fuzz-merge` merges each
@@ -77,6 +82,7 @@ To reproduce a finding, run its binary on the artifact; to shrink it first, let 
 
 A crash, an input that takes more than 10 seconds (`timeout-`), one that pushes the process past 2 GiB
 (`oom-`) or a single allocation past 512 MiB counts as a finding; the unpack binaries may allocate 1 GiB, see below.
+A timeout or an out-of-memory is counted and the run goes on without that input; a crash ends that binary's run.
 
 ## Building
 
