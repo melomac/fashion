@@ -4,12 +4,18 @@
 # outside SwiftPM, which lets no executable depend on the fashion target.
 #
 #   Fuzz/fuzz.sh build            build .build/fuzz/bin/fuzz-* from Sources/, Bridges/ and the harnesses here
-#   Fuzz/fuzz.sh seed             seed .build/fuzz/corpus/* from the test fixtures, /bin/ls and a XAR
+#   Fuzz/fuzz.sh seed             seed .build/fuzz/corpus/* from the test fixtures, /bin/ls and a XAR, the corpora
+#                                 grown so far merged in
 #   Fuzz/fuzz.sh run [seconds] [harness...]   run the harnesses named, all by default, for that long (900) each, FUZZ_JOBS
 #                                             workers each (2), as many binaries at a time as the cores hold, each
 #                                             wave reported as it ends
 #   Fuzz/fuzz.sh summary [harness...]         what the last run did: runs, executions per second, coverage, artifacts
+#   Fuzz/fuzz.sh merge [tree] [harness...]    merge another tree's corpora into these, or these into themselves,
+#                                             keeping what reaches an edge the rest does not
 #   Fuzz/fuzz.sh clean            remove what seed and run wrote, corpora, logs and artifacts; the binaries stay
+#
+# FUZZ_BUILD names the tree, .build/fuzz by default, which make distclean removes with the rest of .build: a
+# directory outside the repository outlives it.
 #
 set -eo pipefail
 
@@ -191,11 +197,12 @@ build() {
 
 seed() {
     local harness
-    # Seeded beside its name and moved into it once whole, so that a seeding that fails leaves no corpus for a later
-    # run to take as complete.
+    # The corpora are seeded beside their name and moved into it once whole, so that a seeding that fails leaves no
+    # corpus for a later run to take as complete; the corpora grown so far are merged into the seeded ones first,
+    # their gains kept and their bulk dropped. The fixtures are made again; the logs and artifacts stay.
     local final=$corpus
     corpus=$final.seeding
-    rm -rf "${build:?}/fixtures" "$corpus" "${final:?}"
+    rm -rf "$corpus" "${build:?}/fixtures" "$build/seed-test.log"
     mkdir -p "$build/fixtures"
     for harness in $harnesses; do
         mkdir -p "$corpus/$harness"
@@ -340,11 +347,60 @@ PYTHON
         printf '%s' "$first" > "$corpus/diff/$algorithm-same"
     done
 
+    if [ -d "$final" ]; then
+        echo "Merging the corpora grown so far into the seeded ones..."
+        merge "$final"
+        rm -rf "$final"
+    fi
+    mv "$corpus" "$final"
+    corpus=$final
     for harness in $harnesses; do
         echo "$corpus/$harness: $(ls "$corpus/$harness" | wc -l | tr -d ' ') files"
     done
-    mv "$corpus" "$final"
-    corpus=$final
+}
+
+# The corpora of another tree, $1 (its corpus/<harness>, or <harness> under it), merged into these: libFuzzer runs
+# each of its units once under each binary of the harness and keeps those that reach an edge the corpus here does
+# not, so a tree's gains move without its bulk. Without a tree, each corpus is merged into an empty one that takes
+# its place: minimized. Edges alone decide, not the comparison operands value profiling keeps, which a run finds
+# again within its first minute; a unit that crashes or times out is left out and its artifact written.
+merge() {
+    local from=${1:-} harness name source target before count
+    if [ -n "$from" ]; then
+        shift
+        if [ -d "$from/corpus" ]; then
+            from=$from/corpus
+        fi
+    fi
+    mkdir -p "$logs"
+    for harness in ${*:-$harnesses}; do
+        if [ -n "$from" ]; then
+            source=$from/$harness
+            target=$corpus/$harness
+            [ -d "$source" ] || continue
+            mkdir -p "$target"
+        else
+            source=$corpus/$harness
+            target=$source.merging
+            rm -rf "$target"
+            mkdir -p "$target"
+        fi
+        before=$(ls "$target" | wc -l | tr -d ' ')
+        count=$(ls "$source" | wc -l | tr -d ' ')
+        for name in $(binaries "$harness"); do
+            mkdir -p "$artifacts/$name"
+            "$bin/$name" -merge=1 -max_len="$(max_len "$harness")" -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" \
+                -artifact_prefix="$artifacts/$name/" "$target" "$source" > "$logs/merge-$name.log" 2>&1 ||
+                echo "merging $source under $name failed, see $logs/merge-$name.log" >&2
+        done
+        if [ -n "$from" ]; then
+            echo "$target: $(($(ls "$target" | wc -l | tr -d ' ') - before)) of $source's $count units added"
+        else
+            rm -rf "$source"
+            mv "$target" "$source"
+            echo "$source: $(ls "$source" | wc -l | tr -d ' ') of its $count units kept"
+        fi
+    done
 }
 
 run() {
@@ -427,15 +483,15 @@ summary() {
     done
 }
 
-# Back to a built tree: the corpora, a seeding of them left unfinished, the fixtures they were seeded from, the logs
-# and the artifacts go, so the next run seeds afresh and reports its own findings alone; the binaries stay, as building
-# them is the slow part.
+# Back to a built tree: the corpora and what they gained, a seeding of them left unfinished, the fixtures they were
+# seeded from, the logs and the artifacts go, so the next run seeds afresh and reports its own findings alone; the
+# binaries stay, as building them is the slow part.
 clean() {
     rm -rf "${corpus:?}" "$corpus.seeding" "${build:?}/fixtures" "$build/seed-test.log" "${logs:?}" "${artifacts:?}"
 }
 
 case ${1:-} in
-    build | seed | run | summary | clean)
+    build | seed | run | summary | merge | clean)
         "$@"
         ;;
     *)

@@ -33,7 +33,9 @@ make fuzz-run FUZZ_SECONDS=60 # shorter
 make fuzz-run FUZZ_HARNESSES="unpack diff" FUZZ_JOBS=8   # some harnesses, more workers each
 make fuzz-run FUZZ_CORES=4    # fewer binaries at a time
 make fuzz                     # build only
-make fuzz-seed                # seed only
+make fuzz-seed                # seed only, the corpora grown so far merged into the seeded ones
+make fuzz-merge               # minimize the corpora: what reaches an edge the rest does not stays
+make fuzz-merge FUZZ_FROM=/path/to/another/tree   # take that tree's corpora in the same way
 make fuzz-clean               # drop the corpora, logs and artifacts; the next run seeds afresh
 ```
 
@@ -42,11 +44,17 @@ they share (all of them by default): the binaries run as many at a time as the c
 so a run of every harness takes a few times `FUZZ_SECONDS`, fewer on a machine with more cores; each wave is announced
 with the time it should end and reported, binary by binary, when it does. The workers never
 outnumber the cores because libFuzzer's 10-second limit counts wall time, and on an oversubscribed machine a slow unit
-passes for a hung one. Everything lands under
-`.build/fuzz/`, which git ignores: the binaries in `bin/`, the corpora in `corpus/<harness>/`, each run's logs in
-`logs/<binary>/` and what it found in `artifacts/<binary>/`. `Fuzz/fuzz.sh summary` reads the last run's logs back.
-A run adds to the corpora and leaves earlier artifacts where they are, so after a long run, or one whose findings
-are dealt with, `make fuzz-clean` takes the tree back to its binaries: the next run seeds and reports from nothing.
+passes for a hung one. Everything lands under `.build/fuzz/`, which git ignores and `make distclean` removes with the
+rest of `.build`; `FUZZ_BUILD` names another tree, one outside the repository outliving it. The tree holds the binaries
+in `bin/`, the corpora in `corpus/<harness>/`, each run's logs in `logs/<binary>/` and what it found in
+`artifacts/<binary>/`. `Fuzz/fuzz.sh summary` reads the last run's logs back.
+
+A run adds to the corpora, mostly units that differ from another by a comparison operand, which value profiling
+keeps and which pile up over days to where a worker starts near its memory limit. `make fuzz-merge` merges each
+corpus into an empty one, keeping what reaches an edge the rest does not, and with `FUZZ_FROM` takes another tree's
+corpora in the same way, which is how a tree moves. A reseed merges the corpora grown so far into the seeded ones, so
+new fixtures cost no coverage. `make fuzz-clean` drops the corpora, logs and artifacts and keeps the binaries: the
+next run seeds and reports from nothing.
 
 The corpora are seeded with every fixture the tests build (hand-made, compiled or codesigned: `FASHION_FIXTURES` in
 TestHelpers.swift keeps them while `swift test` runs), with `/bin/ls` whole and by slice, with a XAR of this directory,
