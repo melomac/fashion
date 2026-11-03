@@ -107,7 +107,10 @@ struct ScanOptions: ParsableArguments {
     @Flag(name: [.customShort("L"), .long], help: "Follow symlinks.")
     var follow = false
 
-    @Flag(inversion: .prefixedNo, help: "Sort file paths, numbers by value.")
+    @Flag(name: .shortAndLong, help: "Quiet mode: digest(s) or matched path(s) only.")
+    var quiet = false
+
+    @Flag(name: [.customShort("S"), .long], inversion: .prefixedNo, help: "Sort file paths, numbers by value.")
     var sort = false
 
     var resolvedJobs: Int {

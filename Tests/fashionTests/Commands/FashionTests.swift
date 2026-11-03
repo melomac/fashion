@@ -123,12 +123,13 @@ final class FashionTests: XCTestCase {
         for alias in Verify.configuration.aliases {
             XCTAssertNotNil(try Fashion.parseAsRoot([alias, "x"]) as? Verify, alias)
         }
-        XCTAssertTrue(Thinner.configuration.aliases.contains("t") && Thinner.configuration.aliases.contains("thin"))
+        XCTAssertTrue(Thinner.configuration.aliases.contains("t") && Thinner.configuration.aliases.contains("thinr"))
         XCTAssertEqual(Unsigner.configuration.aliases, ["i"])
         XCTAssertEqual(Unpacker.configuration.aliases, ["p", "upx"])
         XCTAssertEqual(Verify.configuration.aliases, ["v"])
         XCTAssertEqual(try XCTUnwrap(Fashion.parseAsRoot([]) as? Hasher).scan.paths, ["."], "hash stays the default")
         XCTAssertEqual(try runFashion(["h", "--algo", "md5", "-q", "/bin/ls"]).status, 0)
+
         let process = Process()
         process.executableURL = try fashionExecutable()
         process.arguments = ["help"]

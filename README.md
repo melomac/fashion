@@ -51,8 +51,13 @@ The packed fixtures want `upx` installed, and are skipped without it.
 
 ## Usage
 
-```console
-$ fashion help
+`fashion` provides subcommands to directly access important features: `thin`, `unpack`, _etc._
+Run `fashion help` to list all of them:
+
+<details>
+<summary>fashion help</summary>
+
+```help
 OVERVIEW: Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.
 
 USAGE: fashion <subcommand>
@@ -62,14 +67,22 @@ OPTIONS:
 
 SUBCOMMANDS:
   hash, h (default)       Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.
-  thinr, t, thin          Write the artifacts of a Mach-O beside it: each architecture, each state the flags take it through.
+  thin, t, thinr          Scan Mach-O files for artifacts, each architecture and each state the flags take it through.
   unsign, i               Write and restore a Mach-O image, removing the code signature.
   unpack, p, upx          Write and restore a UPX-packed Mach-O image, unpacked without UPX.
   verify, v               Verify Mach-O files for anomalies.
 
   See 'fashion help <subcommand>' for detailed help.
+```
 
-$ fashion --help
+</details>
+
+`hash` is the default command, `fashion` alone is `fashion hash`:
+
+<details>
+<summary>fashion --help</summary>
+
+```help
 OVERVIEW: Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.
 
 USAGE: fashion [hash] [<options>] [<paths> ...]
@@ -78,7 +91,7 @@ ARGUMENTS:
   <paths>                 Paths to scan. (default: .)
 
 HASH MODE:
-  -a, --algo <algo>       Hash algorithm
+  -a, --algo <algorithm>  Hash algorithm
         md5               - MD5 insecure hash
         sha1              - SHA-1 insecure hash
         sha256            - SHA-256 hash
@@ -89,9 +102,8 @@ HASH MODE:
         ssdeep            - Spam Sum Deep fuzzy hash
         tlsh              - Trend Micro Locality Sensitive Hash
         cdhash            - CodeDirectory hash
-  -q, --quiet             Quiet mode: digest(s) or matched path(s) only.
-  --slices                Hash individual Mach-O architectures.
-  -e, --exact             Hash an exact Mach-O image, dropping appended bytes.
+  -t, --thin, --slices    Hash individual Mach-O architectures.
+  -e, --exact, --strict   Hash an exact Mach-O image, dropping appended bytes.
   -i, --unsign            Hash a Mach-O image, removing the code signature.
   -p, --unpack            Hash a UPX-packed Mach-O image, unpacked without UPX.
   -v, --verify            Verify Mach-O files for anomalies
@@ -116,19 +128,30 @@ OPTIONS:
   -j, --jobs <jobs>       Number of concurrent workers (default: 1, 0 = all CPUs).
   -J                      All CPUs, short for --jobs 0.
   -L, --follow            Follow symlinks.
-  --sort/--no-sort        Sort file paths, numbers by value. (default: --no-sort)
+  -q, --quiet             Quiet mode: digest(s) or matched path(s) only.
+  -S, --sort/--no-sort    Sort file paths, numbers by value. (default: --no-sort)
   --version               Show the version.
   -h, --help              Show help information.
 ```
 
+</details>
+
 ## Hasher
 
-`hash` is the default command: `fashion` alone is `fashion hash`.
-It walks the paths given, the current directory by default, and prints one line per regular file, the digest then the path, as the files are found or in order with `--sort`.
+`fashion` walks the given paths or the current directory by default, and prints one line per regular file with the digest then the path, as the files are found or in order with `--sort`.
+
 `--algo` picks the hash function, `md5`, `sha1`, `sha256`, `sha384`, `sha512`, `ssdeep`, `tlsh`, `cdhash`, `git` or `git256`, and defaults to SHA-256.
 
-The other modes, match, symbol hash and XAR TOC, share the walk and the options, one mode at a time.
-`--slices` hashes each architecture of a universal Mach-O as a file of its own, labeled with its name, as the CDHash lines are already.
+`--thin` hashes each architecture of a universal Mach-O as a file of its own.
+
+`--exact`, `--unsign` and `--unpack` print the initial file first, unlabeled, then each artifact `thin`, `unsign` or `unpack` would find.
+The digests are those of the artifacts.
+**You can match any artifact with any algorithm.**
+
+When an edit cannot be made, the file is hashed as it is and reported to standard error.
+Files existing at the location of an artifact are compared: one holding different bytes is hashed too and reported to standard error with both sizes and SHA-256s.
+
+The exit status is 2 only for a path that could not be read or walked.
 
 ### Match mode
 
@@ -167,6 +190,11 @@ A symhash or a XAR TOC checksum is matched in its own mode, `--symhash` or `--xa
 Following the convention used by ImpHash, [symhash][], and tools like [VirusTotal](https://www.virustotal.com/), `--symhash` mode aka `--sym`, defaults to the insecure **MD5** hash of the **ordered** external symbol list joined by the `,` separator.
 You can actually pick any algorithm (ex: `--algo ssdeep`), separator, and keep the symbol list as is with `--no-order`.
 
+An image with no external symbol table reports to standard error: `no external symbol table`.
+
+With `--unpack`, the symhash goes through each artifact, one line labeled per state, and compared the same way.
+`--unsign` and `--exact` change no symbol but are accepted, so one set of flags serves every mode.
+
 ### XAR TOC mode
 
 Installation packages on macOS are eXtended ARchives.
@@ -181,17 +209,19 @@ You can choose any algorithm and even have the TOC decompressed (zlib) with `--d
 
 ## Thinner
 
-`fashion thinr`, or `thin`, writes each architecture of a universal Mach-O beside it as a file of its own, named as `lipo` spells the architecture, `ls_x86_64` and `ls_arm64e` for `ls`.
+`fashion thin` aka `thinr` takes each architecture of a universal Mach-O as a slice, named as `lipo` spells the architecture.
 The fat table alone decides the bytes of each slice, as `lipo -thin`.
-A thin file, or one that is not Mach-O, has nothing to write.
 
-`--exact`, `--unsign` and `--unpack` take each slice through the edits hash mode makes in memory, and every state on the way is written: the slice, then cut where the image ends, then without the code signature, then unpacked, then the unpacked image without the signature it kept.
-A signature added after packing comes out before the image is unpacked, so `--unpack` alone writes that state too.
+`--exact`, `--unsign` and `--unpack` take universal and thinned Mach-O files through the edits hash mode makes in memory, every state on the way: the slice, then cut where the image ends, then without the code signature, then unpacked, then the unpacked image without the signature it kept.
 Each artifact is named after the file, the architecture and what was done, `ls_x86_64_unsigned_unpacked`.
-`--keep` writes what decompressed of an image that fails a check, as it is, with the `_decompressed` suffix.
 
-A file already under an artifact's name is left alone and reported when it differs, replaced with `--write`.
+Nothing is written, all edits happen in memory, so a tree can be looked over first: each artifact is listed as `hash` labels the state.
+
+With `--write`, a different file already under an artifact's name is kept as a conflict backup, renamed with the suffix `~` and the current timestamp.
+The backup's path is printed after the artifact's.
 Anything that is not a regular file there is never replaced.
+
+With `-q` / `--quiet`, a file that has artifacts is printed once.
 
 ## Unsigner
 
@@ -212,7 +242,7 @@ Malware was long packed with [UPX][] on macOS, until UPX [stopped packing by def
 `upx -d` still unpacks, but gives up on samples signed after packing: code signature hides the 16-byte `__LINKEDIT` UPX left.
 
 With the `--unpack` flag, we hash the Mach-O file as it was before packing, natively, with UPX's own [UCL][] and [LZMA][] decoders, and looking past any code signature.
-`fashion unpack` writes that file beside the sample, `sample_unpacked`, whole, where `thinr --unpack` writes it split; with `--unsign`, the signature the code carried before it was packed comes out too.
+`fashion unpack` writes that file beside the sample, `sample_unpacked`, whole, where `thin --unpack` writes it split; with `--unsign`, the signature the code carried before it was packed comes out too.
 
 When the marker `UPX!` was modified, or the usual section/segment was renamed, heuristics look for the `PackHeader` structure and checksum to unpack the file anyway, and report the marker we found in place.
 
@@ -223,7 +253,13 @@ Unlike `upx`, we compare what comes out of the decompressor with the two Adler-3
 What refuses a file is a header that does not hold, a block that does not decode, or an image that does not parse.
 
 A `PackHeader` wiped out to defeat `upx -d` leaves nothing to find for us: the file is hashed as it is, unless it keeps the 16-byte `__LINKEDIT` only UPX writes, which `upx -d` and we refuse as corrupted.
-UPX's `canUnpack` says "Pirates might overwrite the UPX! marker. Try harder." and falls back to emulating the entry stub and scanning for the packed data.
+UPX's `canUnpack` [comments](https://github.com/upx/upx/blob/7c7bea44146c7ad6e17cb2d0bb9566805b44a91a/src/p_mach.cpp#L1807 "GitHub: upx/src/p_mach.cpp")...
+
+```cpp
+        // Pirates might overwrite the UPX! marker.  Try harder.
+```
+
+...and falls back to emulating the entry stub and scanning for the packed data.
 Anything we'd recover that way is unverifiable.
 
 When the decompressed data isn't a Mach-O image, we hash the file like any other file.
@@ -246,19 +282,19 @@ The rest catch a file that two readers parse differently, which is how a sample 
 * **load commands**: a count that hides the last ones, a size not a multiple of 4, a command found twice, pairs that exclude each other
 * **segments and sections**: overlapping or out of order, a file offset that disagrees with the address, `__TEXT` not first or `__LINKEDIT` not last, protections no linker writes
 * **entry point**: outside `__TEXT`, in no section, or in a thread state of another architecture
-* **linking**: a dylinker other than `/usr/lib/dyld`, `LC_DYLD_ENVIRONMENT`, no `LC_UUID`, no dylib, a static or non-PIE arm64 executable
+* **linking**: a dylinker other than `/usr/lib/dyld`, `LC_DYLD_ENVIRONMENT`, no `LC_UUID`, no dylib, no symbol table, a static or non-PIE arm64 executable
 * **unaccounted bytes**: past the image, inside `__LINKEDIT` with no table over them, non-zero padding
 * **edits**: a `__LINKEDIT` vmsize rounded by a signature the file no longer has, UPX plain, modified or signed after packing
 * **the signature**: pages that do not hash to the code directory, a code limit short of the file, sealed blobs that do not hash to their slots, entitlements that opt out of hardening
 * **the signer**: a CMS blob that does not verify, a chain outside Apple's roots, a certificate Gatekeeper refuses, entitlements AMFI reserves to Apple
 * **universal files**: a slice hidden past the table's count, two slices of one architecture, overlapping or misaligned slices, non-zero padding
 
-What no loader would accept, the parser refuses: red and counted, as in hash mode.
+What no loader would accept, the parser refuses: red and counted.
 Most of the other findings survive an ad-hoc signature, so `codesign` still calls the file "valid on disk" while it carries hidden bytes, an inserted library, a desynced code section, or a hidden slice.
 
-The reasoning behind each rule, the reader it comes from, the evasion it catches, and the measurements over the OS, third-party software, and a malware corpus that kept or dropped it are in [VERIFY-STRATEGY.md](https://codeberg.org/melomac/fashion/VERIFY-STRATEGY.md).
+The reasoning behind each rule, the reader it comes from, the evasion it catches, and the measurements over the OS, third-party software, and a malware corpus that kept or dropped it are in [VERIFY-STRATEGY.md](VERIFY-STRATEGY.md).
 
-`fashion hash --verify` and `fashion thinr --verify` run the same rules on the files they hash or write, and leave the lines in the unified log, under the `verify` category of the `fashion` subsystem, so a scan for another purpose records what is odd without printing it:
+`fashion hash --verify` and `fashion thin --verify` run the same rules, and leave the lines in the unified log, under the `verify` category of the `fashion` subsystem, so a scan for another purpose records what is odd without printing it:
 
 ```bash
 log show --style compact --predicate 'subsystem == "fashion" AND category == "verify"' --last 10m
@@ -269,7 +305,7 @@ log show --style compact --predicate 'subsystem == "fashion" AND category == "ve
 ### Exact
 
 Bytes appended past a Mach-O image change its digest and keep a signature from coming out.
-The `--exact` flag cuts each slice where its image ends, so the digest is the image's and the appended bytes are dropped, as `thinr --exact` writes it.
+The `--exact` flag cuts a slice where the image ends, so the digest is the image's with the appended bytes dropped: the file's own digest prints first, then the cut image's, labeled `(exact)`.
 Where the image ends is read as Security's strict validation reads it, at the end of the `__LINKEDIT` segment or of the `LC_SYMTAB` string table, whichever command comes first; built with `SECURITY_STRICT_VALIDATION=NO`, at the farthest byte any segment or table reaches instead.
 
 ### Quiet
@@ -298,9 +334,9 @@ On a terminal, `fashion` colors lines by what they tell:
 * a fuzzy match, darker greens as the distance grows toward the `--score` threshold;
 * a TLSH distance from 300, where [false positives][TLSH paper] pass 79%, is gray whatever the threshold, unless `--xlen` leaves out the length those rates count;
 
-🔴 **Red:** a file `fashion` can't parse, a malformed Mach-O, signature, XAR, or UPX pack;
+🔴 **Red:** a malformed file in a mode that has nothing to print without parsing it: a Mach-O under `--algo cdhash`, `verify`, `unsign`, `unpack` or the edits of `thin`, a XAR under `--xar-toc`, a UPX pack `unpack` can't undo;
 
-🟡 **Yellow:** anything else `fashion` reports on standard error: a file that can't be read, a signature that doesn't hold, a packer's marker replaced, or a file TLSH can't hash;
+🟡 **Yellow:** anything else` on standard error: a file that can't be read, a Mach-O or a slice that can't be parsed, an edit that can't be made, a signature that doesn't hold, a packer's marker replaced or its code XORed, a sum that doesn't match, an image with no symbol table, a file in place of an artifact that differs, or a file TLSH can't hash;
 
 ⚪️ **Dimmed:** synthesized `ADHOC` lines, for unsigned code.
 
@@ -318,7 +354,7 @@ Set `NO_COLOR=1` to turn this off.
 | **2**  | ❌ one or more paths couldn't be enumerated, hashed, or written |
 | **64** | ❌ usage: invalid options, or an argument that isn't UTF-8      |
 
-Per-path failures (a missing path, a permission-denied directory, an unreadable file, one that changed or was replaced while it was hashed, a name that is not UTF-8, a malformed Mach-O in a mode that parses it) are written to standard error and set exit code `2`.
+Per-path failures (a missing path, a permission-denied directory, an unreadable file, one that changed or was replaced while it was hashed, a name that is not UTF-8) are written to standard error and set exit code `2`.
 Errors and warnings never abort the rest of the scan.
 
 ## Hash functions
@@ -372,7 +408,7 @@ We follow Trend Micro's recommendations and backport the Java fix from TLSH 4.6.
 The `tlsh` tool reads a file's size into a 32-bit `int` instead: it calls a file "too small" when that size modulo 4 GiB is 2 GiB or more, and hashes only that many bytes of any other.
 
 We report on standard error each file TLSH cannot hash: under 50 bytes, with too little variation, and greater than ~4 GB ([discussion](https://github.com/trendmicro/tlsh/issues/84)).
-Neither changes the exit status, and `--quiet` leaves them out.
+Neither changes the exit status, and `--quiet` leaves them in: it shortens standard output alone.
 
 A TLSH distance counts file length: padding, such as appended null bytes, adds to it even when the content is the same.
 `--xlen` leaves the length out of `--match`, as the `tlsh` tool's `-xlen` does: a 50 KB binary padded with zeros to 2.9 MB is 1 away from itself instead of 505.

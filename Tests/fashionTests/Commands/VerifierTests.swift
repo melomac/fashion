@@ -162,6 +162,7 @@ final class VerifierTests: XCTestCase {
         let directory = try self.directory("crafted")
         let file = try self.crafted("crafted", in: directory, size: 0x1110, segments: [("__DATA", 0x2000, 0x1000, 0x1000, 0x100, 3), ("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5), ("__LINKEDIT", 0x3000, 0x1000, 0x1100, 0x10, 1)])
         self.assertVerify(file.path, [
+            "\(file.path): no external symbol table",
             "\(file.path): segment __TEXT's file offset 0x0 is out of order after __DATA's 0x1000",
             "\(file.path): segment __TEXT's address 0x1000 is out of order after __DATA's 0x2000",
             "\(file.path): segment __LINKEDIT's file offset 0x1100 is not page aligned",
@@ -202,6 +203,7 @@ final class VerifierTests: XCTestCase {
         data.store(UInt32(0xdefa_0002), at: 12)
         try data.write(to: file)
         self.assertVerify(file.path, [
+            "\(file.path): no external symbol table",
             "\(file.path): filetype unknown(3740925954), which no loader knows",
             "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it",
             "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses",
@@ -216,6 +218,7 @@ final class VerifierTests: XCTestCase {
         let directory = try self.directory("wrap")
         let file = try self.crafted("wrap", in: directory, size: 0x1002, segments: [("__TEXT", 0, 0x1000, 0, 0x1000, 5), ("__DATA", UInt64.max, 2, 0x1000, 2, 3)])
         self.assertVerify(file.path, [
+            "\(file.path): no external symbol table",
             "\(file.path): segment __DATA's address 0xffffffffffffffff and vmsize 0x2 wrap around the address space",
             "\(file.path): __TEXT has no sections",
             "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
@@ -608,7 +611,7 @@ final class VerifierTests: XCTestCase {
         XCTAssertTrue(twice.contains(": the symbol table and the symbol table overlap in __LINKEDIT"))
         var without = program
         without.store(UInt32(0x7f), at: symtab.data.startIndex)
-        XCTAssertEqual(try self.verify(without, "without", in: directory).lines.first, ": LC_DYSYMTAB without LC_SYMTAB")
+        XCTAssertEqual(try self.verify(without, "without", in: directory).lines.prefix(2), [": no external symbol table", ": LC_DYSYMTAB without LC_SYMTAB"])
 
         let text = try self.section("__TEXT", "__text", in: program)
         let both = self.appending(self.unixthread(rip: program.load(UInt64.self, at: text + 32)), to: program)
@@ -805,6 +808,11 @@ final class VerifierTests: XCTestCase {
         var uuid = program
         try uuid.store(UInt32(0x7f), at: self.command(UInt32(LC_UUID), in: program).data.startIndex)
         XCTAssertEqual(try self.verify(uuid, "uuid", in: directory).lines, [": no LC_UUID"])
+
+        // No symbol table: what symhash says too, and the LC_DYSYMTAB left without it, both before the table itself.
+        var symtab = program
+        try symtab.store(UInt32(0x7f), at: self.command(UInt32(LC_SYMTAB), in: program).data.startIndex)
+        XCTAssertEqual(try self.verify(symtab, "symtab", in: directory).lines.prefix(2), [": no external symbol table", ": LC_DYSYMTAB without LC_SYMTAB"])
 
         var dylinker = program
         let command = try self.command(UInt32(LC_LOAD_DYLINKER), in: program)
@@ -1252,6 +1260,9 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(self.verify(odd.path).lines.count, 1)
         XCTAssertEqual(try Hasher.parse([odd.path, "--verify", "--quiet"]).scan(), 0)
         XCTAssertEqual(try Thinner.parse([odd.path, "--verify"]).scan(), 0)
+        // --quiet names the file once for its findings, as thinr names it for its artifacts.
+        XCTAssertEqual(Verify.lines(for: odd.path, quiet: true, reporter: Reporter(console: Console())).map(\.text), [odd.path])
+        XCTAssertEqual(try Verify.parse(["-q", odd.path]).scan(), 0)
     }
 
     /**
@@ -1356,6 +1367,7 @@ final class VerifierTests: XCTestCase {
         [UInt32(0x1000), 0, 0, 0, 0, 0, 0, 0].forEach { data.appendUInt32($0) } // offset, align, reloff, nreloc, flags, reserved
         let file = try self.crafted("past", in: directory, size: 0x2000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5)], commands: [data])
         self.assertVerify(file.path, [
+            "\(file.path): no external symbol table",
             "\(file.path): segment __DATA's address 0x0 is out of order after __TEXT's 0x1000",
             "\(file.path): segments __DATA and __TEXT overlap in memory",
             "\(file.path): __TEXT has no sections",
@@ -1381,7 +1393,7 @@ final class VerifierTests: XCTestCase {
         data.store(UInt32(MH_PRELOAD), at: 12) // no loader maps it: its segments are held to no page
         try data.write(to: file)
         let start = ContinuousClock.now
-        self.assertVerify(file.path, ["\(file.path): \(count) segments with an empty name", "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it", "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses"])
+        self.assertVerify(file.path, ["\(file.path): no external symbol table", "\(file.path): \(count) segments with an empty name", "\(file.path): no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it", "\(file.path): neither a __LINKEDIT segment nor an LC_SYMTAB ends the image, which codesign's strict validation refuses"])
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(10), "every pair of segments compared")
     }
 
@@ -1847,6 +1859,7 @@ final class VerifierTests: XCTestCase {
         self.assertVerify(file.path, [
             "\(file.path): load command #2, LC_SEGMENT_64, is 0x30 bytes, not its structure's 0x48, which dyld refuses",
             "\(file.path): load command #3, LC_BUILD_VERSION, is 0x10 bytes, not its structure's 0x18, which dyld refuses",
+            "\(file.path): no external symbol table",
             "\(file.path): __TEXT has no sections",
             "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
             "\(file.path): no LC_UUID",
@@ -1922,7 +1935,7 @@ final class VerifierTests: XCTestCase {
             [UInt32(0x100 + index * 0x10), 0, 0, 0, 0, 0, 0, 0].forEach { segment.appendUInt32($0) } // offset, align, reloff, nreloc, flags, reserved
         }
         let file = try self.crafted("sections", in: directory, size: 0x1000, segments: [], commands: [segment])
-        self.assertVerify(file.path, (0 ..< 8).map { "\(file.path): section __TEXT,__s\($0)'s address range \((0x5000_0000 + $0 * 0x10).hex)...\((0x5000_0010 + $0 * 0x10).hex) lies outside its segment's 0x1000...0x2000" } + [
+        self.assertVerify(file.path, ["\(file.path): no external symbol table"] + (0 ..< 8).map { "\(file.path): section __TEXT,__s\($0)'s address range \((0x5000_0000 + $0 * 0x10).hex)...\((0x5000_0010 + $0 * 0x10).hex) lies outside its segment's 0x1000...0x2000" } + [
             "\(file.path): and 4 more lines on 4 more sections or pair of them",
             "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
             "\(file.path): no LC_UUID",
@@ -1943,6 +1956,7 @@ final class VerifierTests: XCTestCase {
         odd.appendUInt32(UInt32(LC_UUID)); odd.appendUInt32(28); odd.append(Data(count: 20))
         let file = try self.crafted("counted", in: directory, size: 0x1000, segments: [("__TEXT", 0x1000, 0x1000, 0, 0x1000, 5)], commands: Array(repeating: odd, count: 10))
         let rest = [
+            "\(file.path): no external symbol table",
             "\(file.path): __TEXT has no sections",
             "\(file.path): no LC_MAIN nor LC_UNIXTHREAD for an executable",
             "\(file.path): no MH_DYLDLINK: a static executable",

@@ -37,6 +37,8 @@ struct Verify: ParsableCommand {
  What the parser refuses, by the kernel's own rules, is reported in red and counted, as hash mode reports it, and so
  is a signature Security cannot read, after the lines of its image. In a universal file the slice is named by its
  architecture, and the other slices' lines are kept.
+
+ With --quiet, an original file with findings is printed once.
  */
 extension Verify {
     /**
@@ -44,17 +46,18 @@ extension Verify {
      parsed. `trapSignals` as `Hasher.scan(trapSignals:)`.
      */
     func scan(trapSignals: Bool = false) -> Int32 {
-        logger.info("\(self.scan.sort ? "Verify sorted" : "Verify", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
+        logger.info("\(self.scan.sort ? "Verify sorted" : "Verify", privacy: .public)\(self.scan.quiet ? " quiet" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let run = self.scan.run(trapSignals: trapSignals, activity: "verifying") { Self.lines(for: $0, reporter: $1) }
+        let quiet = self.scan.quiet
+        let run = self.scan.run(trapSignals: trapSignals, activity: "verifying") { Self.lines(for: $0, quiet: quiet, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
 
     /**
      The lines to print for one file: each finding, which the unified log gets as a notice too, as `log(_:)` leaves it,
-     and each refusal, which the reporter logs as an error.
+     and each refusal, which the reporter logs as an error; `quiet` as `Line.quiet(_:naming:)`.
      */
-    static func lines(for path: String, reporter: Reporter) -> [Line] {
+    static func lines(for path: String, quiet: Bool = false, reporter: Reporter) -> [Line] {
         var lines: [Line] = []
         self.verify(path) { finding, arch in
             logger.notice("\(arch.map { "\(path) (\($0))" } ?? path, privacy: .public): \(finding, privacy: .public)")
@@ -62,7 +65,7 @@ extension Verify {
         } refused: { error, arch in
             lines.append(reporter.report(path: "\(path)\(arch.map { " (\($0))" } ?? "")", message: File.message(for: error), tint: Digester.tint(for: error)))
         }
-        return lines
+        return quiet ? Line.quiet(lines, naming: path) : lines
     }
 
     /**

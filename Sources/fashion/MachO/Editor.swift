@@ -54,8 +54,14 @@ enum MachOEditor {
         /// UPX packed it, and what decompressed fails a check: kept as it is, under --keep, in place of `unpacked`.
         static let decompressed = Edits(rawValue: 1 << 5)
 
-        /// The edits in the order they are done, each with the suffix `thin` names an artifact by for it.
-        static let suffixes: [(Edits, String)] = [(.exact, "_exact"), (.unsigned, "_unsigned"), (.decompressed, "_decompressed"), (.unpacked, "_unpacked"), (.exactUnpacked, "_exact"), (.unsignedUnpacked, "_unsigned")]
+        /// The edits in the order they are done, each with the word an artifact is named by for it: `_unsigned` in a
+        /// file's name, `unsigned` in hash mode's label (`Artifact`).
+        static let names: [(Edits, String)] = [(.exact, "exact"), (.unsigned, "unsigned"), (.decompressed, "decompressed"), (.unpacked, "unpacked"), (.exactUnpacked, "exact"), (.unsignedUnpacked, "unsigned")]
+
+        /// The words for these edits, in the order they were done: `["exact", "unsigned"]`.
+        var words: [String] {
+            Self.names.filter { self.contains($0.0) }.map(\.1)
+        }
     }
 
     /// An image as one edit leaves it: what was done to it so far, and its bytes, in memory or ranges of the file.
@@ -133,14 +139,10 @@ enum MachOEditor {
             }
             return (File(editing: file, pieces: edit.states.last!.pieces), [edit.states], file, nil)
         case let .fat(archs):
-            // Two slices of one architecture, which the kernel refuses, are named apart, the second `x86_64_2`, as
-            // the artifacts of them are.
-            var named: [String: Int] = [:]
-            let slices = try archs.map { arch -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in
+            // Each slice is named as Universal.named names it, the second of one architecture apart, as the artifacts
+            // of them are.
+            let slices = try Universal.named(archs).map { arch, name -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
-                let count = named[arch.name, default: 0] + 1
-                named[arch.name] = count
-                let name = count == 1 ? arch.name : "\(arch.name)_\(count)"
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                         // An archive, which lipo aligns to 2^3 whatever its architecture.

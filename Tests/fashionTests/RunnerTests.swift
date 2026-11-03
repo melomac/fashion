@@ -116,9 +116,37 @@ final class RunnerTests: XCTestCase {
     }
 
     /**
-     --slices is a Mach-O-aware mode: a broken slice is reported whether or not --exact is set, after its architecture.
+     A thin Mach-O that does not parse is hashed as it is under every flag, said once on standard error, uncounted,
+     so the run succeeds: hash mode hashes every file. Under --symhash it has no symhash, said in those words, and
+     prints nothing.
      */
-    func testSlicesRejectsMalformedSliceInsideFat() throws {
+    func testAMalformedThinMachOIsHashedAsItIs() throws {
+        let bad = try self.write(self.machO(overhang: 8), name: "thin-bad")
+        defer {
+            try? FileManager.default.removeItem(at: bad)
+        }
+        let digest = try XCTUnwrap(ByteHash.sha256.digest(self.machO(overhang: 8)))
+        let refusal = "fashion: \(bad.path): Invalid Mach-O: sizeofcmds 32 does not hold a load-command table in the 56-byte slice"
+        for flags in [["--unsign"], ["--unpack"], ["--exact"], ["--slices"], ["--slices", "--unsign", "--exact"]] {
+            let (status, errors) = try runFashion(flags + [bad.path])
+            XCTAssertEqual(status, 0, "\(flags)")
+            XCTAssertEqual(errors, [refusal + ", hashed as it is"], "\(flags)")
+            let lines = try Digester(Hasher.parse([bad.path, "--quiet"] + flags)).lines(for: bad.path, reporter: Reporter(console: Console()))
+            XCTAssertEqual(lines.filter { !$0.diagnostic }.map(\.text), [digest], "\(flags)")
+        }
+        for flags in [["--symhash"], ["--symhash", "--unpack", "--unsign"]] {
+            let (status, errors) = try runFashion(flags + [bad.path])
+            XCTAssertEqual(status, 0, "\(flags)")
+            XCTAssertEqual(errors, [refusal + ", no symhash as it is"], "\(flags)")
+            XCTAssertEqual(try Digester(Hasher.parse([bad.path] + flags)).lines(for: bad.path, reporter: Reporter(console: Console())).filter { !$0.diagnostic }.count, 0, "\(flags)")
+        }
+    }
+
+    /**
+     --slices reads each slice as a Mach-O: a broken one is said after its architecture, whether or not --exact is
+     set, and hashed as the table places it, so the run succeeds, as hash mode hashes every file.
+     */
+    func testSlicesSaysAMalformedSliceInsideFat() throws {
         let bad = try self.write(self.fat(wrapping: self.machO(overhang: 8)), name: "fat-bad")
         let good = try self.write(self.fat(wrapping: self.machO()), name: "fat-ok")
         defer {
@@ -126,20 +154,20 @@ final class RunnerTests: XCTestCase {
             try? FileManager.default.removeItem(at: good)
         }
 
-        let rejected = try self.run(bad, slices: true)
-        XCTAssertEqual(rejected, 2)
+        XCTAssertEqual(try self.run(bad, slices: true), 0)
         let (status, errors) = try runFashion(["--slices", bad.path])
-        XCTAssertEqual(status, 2)
+        XCTAssertEqual(status, 0)
         XCTAssertEqual(errors.count, 1)
         XCTAssertTrue(try XCTUnwrap(errors.first).hasPrefix("fashion: \(bad.path) ("), errors.first ?? "")
         XCTAssertTrue(try XCTUnwrap(errors.first).contains("): Invalid Mach-O: "), errors.first ?? "")
+        XCTAssertTrue(try XCTUnwrap(errors.first).hasSuffix(", hashed as the table places it"), errors.first ?? "")
         let accepted = try self.run(good, slices: true)
         XCTAssertEqual(accepted, 0)
     }
 
     /**
      --exact ends a slice where it lies in the universal file: with 100 bytes appended inside the slice, the file
-     still hashes whole, and the slice without them.
+     still hashes whole, then the slice as the table places it, then without them, the state thinr --exact writes.
      */
     func testExactTrimsEachSliceInPlace() throws {
         let slice = self.machO()
@@ -151,7 +179,7 @@ final class RunnerTests: XCTestCase {
 
         let digester = try Digester(Hasher.parse([url.path, "--slices", "--exact", "--quiet"]))
         let lines = digester.lines(for: url.path, reporter: Reporter(console: Console())).map(\.text)
-        XCTAssertEqual(lines, try [ByteHash.sha256.digest(fat), ByteHash.sha256.digest(slice)])
+        XCTAssertEqual(lines, try [ByteHash.sha256.digest(fat), ByteHash.sha256.digest(slice + Data(repeating: 0x41, count: 100)), ByteHash.sha256.digest(slice)])
     }
 
     /**
@@ -237,7 +265,7 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try lines("tlsh", ["--quiet"]), [(directory / "tlsh").path])
         // The greens of a match follow the algorithm of the digest that matched: full for an exact one, and for an
         // ssdeep as similar as can be.
-        let tints = try Digester(Hasher.parse([directory.path] + targets + ["--quiet"])).lines(for: (directory / "both").path, reporter: Reporter(console: Console())).map(\.tint)
+        let tints = try Digester(Hasher.parse([directory.path] + targets + ["--quiet"])).lines(for: (directory / "both").path, reporter: Reporter(console: Console())).filter { !$0.diagnostic }.map(\.tint)
         XCTAssertEqual(tints, [.match(distance: 0)])
         let scored = try Digester(Hasher.parse([directory.path] + targets)).lines(for: (directory / "ssdeep").path, reporter: Reporter(console: Console())).map(\.tint)
         XCTAssertEqual(scored, [.match(distance: 0)])
@@ -304,8 +332,8 @@ final class RunnerTests: XCTestCase {
 
     /**
      The mode flags pick the input and the shape the function: under --symhash a SHA-1 target is the SHA-1 of the
-     symbol list, an ssdeep or TLSH target its ssdeep or TLSH, and the file's own SHA-1 is not looked for. One
-     line per file, as a symhash search prints.
+     symbol list, an ssdeep or TLSH target its ssdeep or TLSH, and the file's own SHA-1 is not looked for. Each
+     matching slice prints its line, labeled, as a symhash search prints it without a target.
      */
     func testMixedTargetsUnderSymhash() throws {
         let path = "/bin/ls"
@@ -318,10 +346,20 @@ final class RunnerTests: XCTestCase {
             XCTAssertEqual(digester.algorithms, Algorithm.allCases.filter { algorithm in targets.contains { Targets.shape(of: $0) == algorithm } })
             return digester.lines(for: path, reporter: Reporter(console: Console())).filter { !$0.diagnostic }.map(\.text)
         }
-        XCTAssertEqual(try lines([sha1]), ["\(sha1)  \(path)"])
-        XCTAssertEqual(try lines([tlsh]), ["\(tlsh)    0  \(path)"])
-        XCTAssertEqual(try lines([ssdeep]), [OutputFormatter.formatLine(digest: ssdeep, score: 100, path: path, algorithm: .ssdeep)])
-        XCTAssertEqual(try lines([tlsh, sha1]), ["\(sha1)  \(path)"])
+        /// The slices whose symhash by `algorithm` is `digest`, each as its matched line prints, with `score`.
+        func matched(_ algorithm: Algorithm, _ digest: String, score: Int? = nil) -> [String] {
+            digests.filter { $0.algorithm == algorithm && $0.digest == digest }.map { OutputFormatter.formatLine(digest: digest, score: score, path: $0.display(path), algorithm: algorithm) }
+        }
+        XCTAssertFalse(matched(.sha1, sha1).isEmpty)
+        XCTAssertEqual(try lines([sha1]), matched(.sha1, sha1))
+        XCTAssertEqual(try lines([tlsh]), matched(.tlsh, tlsh, score: 0))
+        // The ssdeep of one slice's symbols is close to the other slices', so they match too, by their distance.
+        let fuzzy = try lines([ssdeep])
+        XCTAssertEqual(fuzzy.first, matched(.ssdeep, ssdeep, score: 100).first)
+        XCTAssertEqual(fuzzy.count, digests.filter { $0.algorithm == .ssdeep }.count)
+        XCTAssertTrue(fuzzy.allSatisfy { line in digests.contains { line.hasSuffix("  \($0.display(path))") } }, "\(fuzzy)")
+        // Both algorithms match in each slice, so each prints both lines, in the algorithms' order.
+        XCTAssertEqual(try lines([tlsh, sha1]), digests.filter { $0.algorithm == .sha1 && $0.digest == sha1 }.flatMap { [OutputFormatter.formatLine(digest: sha1, score: nil, path: $0.display(path), algorithm: .sha1), OutputFormatter.formatLine(digest: tlsh, score: 0, path: $0.display(path), algorithm: .tlsh)] })
         XCTAssertEqual(try lines([XCTUnwrap(ByteHash.sha1.digest(File(path: path)))]), [])
     }
 
@@ -368,7 +406,7 @@ final class RunnerTests: XCTestCase {
 
     /**
      A file or slice TLSH makes no digest of is named on stderr, after the slice it is, and the run still succeeds:
-     the universal file has a digest, its mostly zero slice none.
+     the universal file has a digest, its mostly zero slice none. --quiet shortens standard output alone.
      */
     func testTLSHCaveatsDoNotFail() throws {
         let tiny = try self.write(Data("tiny file\n".utf8), name: "tlsh-tiny")
@@ -384,8 +422,7 @@ final class RunnerTests: XCTestCase {
             "fashion: \(tiny.path): TLSH cannot hash: input too small (10 bytes, minimum 50)",
             "fashion: \(fat.path) (arm64): TLSH cannot hash: not enough variation in input",
         ])
-        // --quiet keeps them off stderr.
-        XCTAssertEqual(try runFashion(["--algo", "tlsh", "--slices", "-j", "1", "-q", tiny.path, fat.path]).errors, [])
+        XCTAssertEqual(try runFashion(["--algo", "tlsh", "--slices", "-j", "1", "-q", tiny.path, fat.path]).errors, errors)
     }
 
     /**

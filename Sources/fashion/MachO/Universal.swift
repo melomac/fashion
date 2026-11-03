@@ -67,6 +67,20 @@ enum Universal {
         }
     }
 
+    /**
+     Each architecture of a universal file with the name it goes by in what is said, hashed or written of it: its
+     `name`, and for two slices of one architecture, which the kernel refuses, the second numbered, `x86_64_2`, so
+     that a digest, a diagnostic or an artifact of either tells which one. The order is the table's.
+     */
+    static func named(_ archs: [Architecture]) -> [(arch: Architecture, name: String)] {
+        var counts: [String: Int] = [:]
+        return archs.map { arch in
+            let count = counts[arch.name, default: 0] + 1
+            counts[arch.name] = count
+            return (arch, count == 1 ? arch.name : "\(arch.name)_\(count)")
+        }
+    }
+
     // MARK: - Open
 
     /**

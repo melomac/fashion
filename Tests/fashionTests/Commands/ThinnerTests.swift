@@ -5,8 +5,8 @@ import os
 import XCTest
 
 /**
- `fashion thin`: each architecture of a universal Mach-O written out beside it, byte for byte; a second run leaves it
- alone, another file in its place is overwritten and said so, a symlink in its place is left alone.
+ `fashion thin`: each architecture of a universal Mach-O listed, and written out beside it with --write, byte for byte;
+ a second run leaves it alone, another file in its place is replaced and logged, a symlink in its place is left alone.
  */
 final class ThinnerTests: XCTestCase {
     private func directory(_ name: String) throws -> URL {
@@ -37,7 +37,7 @@ final class ThinnerTests: XCTestCase {
         try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
     }
 
-    func testSlicesAreWrittenBesideTheFile() throws {
+    func testSlicesAreWrittenBesideTheFileWithWrite() throws {
         let directory = try self.directory("ls")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -46,7 +46,7 @@ final class ThinnerTests: XCTestCase {
 
         // One line per artifact, its path, and the artifacts beside the file: the bytes of each slice as the fat
         // table places them, named as codesign spells the architecture, which reads each as the thin Mach-O it is.
-        let lines = Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: false, reporter: Reporter(console: Console()))
+        let lines = Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console()))
         XCTAssertEqual(lines.map(\.text), slices.map { "\(ls.path)_\($0.name)" })
         XCTAssertTrue(lines.allSatisfy { !$0.diagnostic && $0.tint == .none })
         XCTAssertEqual(try codesignArchs("/bin/ls"), Set(slices.map(\.name)))
@@ -70,14 +70,14 @@ final class ThinnerTests: XCTestCase {
             try? FileManager.default.removeItem(at: directory)
         }
         let (ls, _, slices) = try self.universalLs(in: directory)
-        XCTAssertEqual(try Thinner.parse([directory.path]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse(["--write", directory.path]).scan(), 0)
         let artifacts = slices.map { directory / "ls_\($0.name)" }
         let before = try artifacts.map { try FileManager.default.attributesOfItem(atPath: $0.path)[.modificationDate] as? Date }
 
-        let (status, errors) = try runFashion(["thinr", ls.path])
+        let (status, errors) = try runFashion(["thinr", "--write", ls.path])
         XCTAssertEqual(status, 0)
         XCTAssertEqual(errors, [])
-        XCTAssertEqual(Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), artifacts.map(\.path))
+        XCTAssertEqual(Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), artifacts.map(\.path))
         XCTAssertEqual(try artifacts.map { try FileManager.default.attributesOfItem(atPath: $0.path)[.modificationDate] as? Date }, before)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 1 + slices.count)
     }
@@ -97,37 +97,96 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
-     Without --write, a different file under an artifact's name stays as it is, executable bit included, and
-     standard error names it with its size and SHA-256 and the slice's; the run fails.
+     Without --write, nothing is written: the lines name the artifacts as hash mode labels the states, one per slice
+     and per state, the directory holds the file alone after, and the run succeeds. The edits are made all the
+     same, so --unsign lists the unsigned state of each slice.
      */
-    func testDifferentFilesInTheWayAreReportedAndLeftAlone() throws {
-        let (directory, ls, data, slices, other) = try self.lsWithFilesInTheWay("differs")
+    func testWithoutWriteArtifactsAreListedAndNotWritten() throws {
+        let directory = try self.directory("list")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let (ls, _, slices) = try self.universalLs(in: directory)
+
+        let (status, errors) = try runFashion(["thinr", ls.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [])
+        let lines = Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: false, reporter: Reporter(console: Console()))
+        XCTAssertEqual(lines.map(\.text), slices.map { "\(ls.path) (\($0.name))" })
+        XCTAssertTrue(lines.allSatisfy { !$0.diagnostic && $0.tint == .none })
+        XCTAssertEqual(Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), slices.flatMap { ["\(ls.path) (\($0.name))", "\(ls.path) (\($0.name), unsigned)"] })
+        XCTAssertEqual(try Thinner.parse([directory.path, "--unsign", "--unpack", "--exact"]).scan(), 0)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["ls"])
+    }
+
+    /**
+     With --quiet, a file that has artifacts is printed once, its own path, written or not; one with none prints
+     nothing, and what is reported about a file stands: a malformed one is reported and nothing else.
+     */
+    func testQuietNamesTheFileOnce() throws {
+        let directory = try self.directory("quiet")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let (ls, _, slices) = try self.universalLs(in: directory)
+        let thin = directory / "thin"
+        try Universal.sliceData(fileData: Data(contentsOf: ls), arch: slices[0]).write(to: thin)
+        // A fat table pointing past the end of the file, malformed.
+        var table = Data()
+        table.appendUInt32BE(FAT_MAGIC)
+        table.appendUInt32BE(1)
+        table.appendInt32BE(CPU_TYPE_X86_64)
+        table.appendInt32BE(CPU_SUBTYPE_X86_64_ALL)
+        [4096, 4096, 12].forEach { table.appendUInt32BE(UInt32($0)) }
+        let fat = directory / "fat"
+        try table.write(to: fat)
+        let reporter = Reporter(console: Console())
+
+        for write in [false, true] {
+            let lines = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: write, quiet: true, reporter: reporter)
+            XCTAssertEqual(lines.map(\.text), [ls.path], "write \(write)")
+            XCTAssertTrue(lines.allSatisfy { !$0.diagnostic && $0.tint == .none })
+            XCTAssertEqual(Thinner.lines(for: thin.path, exact: false, unsign: false, unpack: false, write: write, quiet: true, reporter: reporter).count, 0)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, write ? 3 + 2 * slices.count : 3)
+        }
+        XCTAssertEqual(reporter.errorCount, 0)
+        let malformed = Thinner.lines(for: fat.path, exact: false, unsign: false, unpack: false, write: false, quiet: true, reporter: reporter)
+        XCTAssertEqual(malformed.count, 1)
+        XCTAssertEqual(malformed.first?.diagnostic, true)
+        XCTAssertEqual(reporter.errorCount, 1)
+        XCTAssertEqual(try Thinner.parse(["-q", "--unsign", directory.path]).scan(), 2)
+    }
+
+    /**
+     Without --write, a different file under an artifact's name is not looked at: it stays as it is, executable bit
+     included, the artifact is listed by its label as any other, and nothing is said.
+     */
+    func testWithoutWriteFilesInTheWayAreNotLookedAt() throws {
+        let (directory, ls, _, slices, other) = try self.lsWithFilesInTheWay("differs")
         defer {
             try? FileManager.default.removeItem(at: directory)
         }
 
         let (status, errors) = try runFashion(["thinr", ls.path])
-        XCTAssertEqual(status, 2)
-        XCTAssertEqual(errors, slices.map { slice in
-            let bytes = data[slice.offset ..< slice.offset + slice.length]
-            return "fashion: \(ls.path)_\(slice.name): exists and differs, 10 bytes, sha256 \(self.sha256(other)) where the artifact is \(bytes.count) bytes, sha256 \(self.sha256(bytes)); left alone without --write"
-        })
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [])
         for slice in slices {
             let artifact = directory / "ls_\(slice.name)"
             XCTAssertEqual(try Data(contentsOf: artifact), other)
             XCTAssertEqual(try self.mode(artifact) & 0o111, 0o111)
         }
         let lines = Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: false, reporter: Reporter(console: Console()))
-        XCTAssertEqual(lines.count, slices.count)
-        XCTAssertTrue(lines.allSatisfy { $0.diagnostic && $0.tint == .error })
+        XCTAssertEqual(lines.map(\.text), slices.map { "\(ls.path) (\($0.name))" })
+        XCTAssertTrue(lines.allSatisfy { !$0.diagnostic })
     }
 
     /**
      An artifact is written beside its name under a temporary one, 45 bytes whatever the artifact's, and renamed into
-     it: a file of 240 bytes' name gets its `_unsigned` artifact, 249, replaced under --write, where a temporary named
-     after the artifact would run past the 255 a name may have.
+     it: a file of 240 bytes' name gets its `_unsigned` artifact, 249, under --write, where a temporary named after
+     the artifact would run past the 255 a name may have. A different file under that name cannot be kept, its backup
+     name would run past them too: it is reported, and keeps its name and bytes.
      */
-    func testWriteReplacesAnArtifactWhateverItsNameLength() throws {
+    func testWriteWritesAnArtifactWhateverItsNameLength() throws {
         let directory = try self.directory("long-name")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -136,21 +195,33 @@ final class ThinnerTests: XCTestCase {
         let long = directory / String(repeating: "n", count: 240)
         try FileManager.default.copyItem(at: self.codesignedFile(data, in: directory), to: long)
         let artifact = long.path + "_unsigned"
-        try Data("something else".utf8).write(to: URL(fileURLWithPath: artifact))
-        let left = Thinner.lines(for: long.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console()))
-        XCTAssertTrue(left.first?.text.contains("exists and differs") ?? false, left.first?.text ?? "")
+        let listed = Thinner.lines(for: long.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console()))
+        XCTAssertEqual(listed.map(\.text), ["\(long.path) (unsigned)"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: artifact))
 
         let written = Thinner.lines(for: long.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console()))
         XCTAssertEqual(written.map(\.text), [artifact])
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: artifact)), data)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasPrefix(".fashion-") }, [])
+
+        try Data("something else".utf8).write(to: URL(fileURLWithPath: artifact))
+        let reporter = Reporter(console: Console())
+        let refused = Thinner.lines(for: long.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter)
+        XCTAssertEqual(refused.count, 1)
+        XCTAssertTrue(refused[0].diagnostic)
+        XCTAssertTrue(refused[0].text.lowercased().contains("too long"), refused[0].text)
+        XCTAssertEqual(reporter.errorCount, 1)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: artifact)), Data("something else".utf8))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.contains("~") }, [])
     }
 
     /**
-     With --write, a different file under an artifact's name is replaced by the slice, without the execute
-     bit it had, and nothing is said on standard error: the unified log alone records the replacement.
+     With --write, a different file under an artifact's name gives it up to the slice, written without the execute
+     bit, and is kept beside as the conflict backup, `ls_x86_64~<seconds>.<milliseconds>`, bytes and execute bit as
+     they were; the backup's path is printed after the artifact's, and nothing is said on standard error: the unified
+     log records both.
      */
-    func testWriteReplacesDifferentFilesQuietly() throws {
+    func testWriteKeepsDifferentFilesAsConflictBackups() throws {
         let (directory, ls, data, slices, _) = try self.lsWithFilesInTheWay("write")
         defer {
             try? FileManager.default.removeItem(at: directory)
@@ -164,18 +235,30 @@ final class ThinnerTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: artifact), data[slice.offset ..< slice.offset + slice.length])
             XCTAssertEqual(try self.mode(artifact) & 0o111, 0)
         }
-        // The lines of such a run are the artifacts alone.
+        let backups = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.contains("~") }
+        XCTAssertEqual(backups.count, slices.count)
+        for backup in backups {
+            XCTAssertNotNil(backup.wholeMatch(of: /ls_[^~]+~[0-9]+\.[0-9]{3}/), backup)
+            XCTAssertEqual(try Data(contentsOf: directory / backup), Data("in the way".utf8))
+            XCTAssertEqual(try self.mode(directory / backup) & 0o111, 0o111)
+        }
+        // The lines of such a run are the artifacts, each followed by the backup of what was in its way.
         try Data("in the way".utf8).write(to: directory / "ls_\(slices[0].name)")
         let lines = Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console()))
-        XCTAssertEqual(lines.map(\.text), slices.map { "\(ls.path)_\($0.name)" })
+        XCTAssertEqual(lines.count, slices.count + 1)
+        XCTAssertEqual(lines[0].text, "\(ls.path)_\(slices[0].name)")
+        XCTAssertTrue(lines[1].text.hasPrefix("\(ls.path)_\(slices[0].name)~"), lines[1].text)
+        XCTAssertEqual(lines.dropFirst(2).map(\.text), slices.dropFirst().map { "\(ls.path)_\($0.name)" })
         XCTAssertTrue(lines.allSatisfy { !$0.diagnostic })
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: lines[1].text)), Data("in the way".utf8))
         // Nothing is left beside the artifacts: each was written under a temporary name and renamed into its own.
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasPrefix(".fashion-") }, [])
     }
 
     /**
-     A hard link under an artifact's name, to a file elsewhere: --write renames a new file over the name, as
-     `lipo` writes its output, rather than writing into the file the name links to, which keeps its bytes and mode.
+     A hard link under an artifact's name, to a file elsewhere: --write renames the link aside as the conflict
+     backup, still a link to the file, and places a new file under the name, rather than writing into the file the
+     name links to, which keeps its bytes and mode.
      */
     func testWriteLeavesAFileLinkedUnderAnArtifactsNameAlone() throws {
         let directory = try self.directory("hardlink")
@@ -193,13 +276,18 @@ final class ThinnerTests: XCTestCase {
         try FileManager.default.linkItem(at: victim, to: link)
 
         let lines = Thinner.lines(for: ls.path, exact: false, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console()))
-        XCTAssertEqual(lines.map(\.text), slices.map { "\(ls.path)_\($0.name)" })
+        XCTAssertEqual(lines.count, slices.count + 1)
+        let backup = lines[1].text
+        XCTAssertTrue(backup.hasPrefix(link.path + "~"), backup)
+        XCTAssertEqual([lines[0].text] + lines.dropFirst(2).map(\.text), slices.map { "\(ls.path)_\($0.name)" })
         XCTAssertEqual(try Data(contentsOf: victim), notes)
         XCTAssertEqual(try self.mode(victim) & 0o777, 0o755)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: backup)), notes)
+        XCTAssertEqual(try self.mode(URL(fileURLWithPath: backup)) & 0o777, 0o755)
         XCTAssertEqual(try Data(contentsOf: link), data[slices[0].offset ..< slices[0].offset + slices[0].length])
         XCTAssertEqual(try self.mode(link) & 0o111, 0)
-        // Nothing is left of the new file but the artifact it became.
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), (["elsewhere", "ls"] + slices.map { "ls_\($0.name)" }).sorted())
+        // Nothing is left of the new file but the artifact it became, and the backup beside it.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), (["elsewhere", "ls", URL(fileURLWithPath: backup).lastPathComponent] + slices.map { "ls_\($0.name)" }).sorted())
     }
 
     /**
@@ -267,7 +355,7 @@ final class ThinnerTests: XCTestCase {
         try Data("not a Mach-O".utf8).write(to: directory / "text")
 
         for name in ["thin", "text"] {
-            XCTAssertEqual(Thinner.lines(for: (directory / name).path, exact: false, unsign: false, unpack: false, write: false, reporter: Reporter(console: Console())).count, 0)
+            XCTAssertEqual(Thinner.lines(for: (directory / name).path, exact: false, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console())).count, 0)
         }
         XCTAssertEqual(try Thinner.parse([directory.path]).scan(), 0)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 2)
@@ -293,7 +381,7 @@ final class ThinnerTests: XCTestCase {
         try data.write(to: fat)
 
         let reporter = Reporter(console: Console())
-        let lines = Thinner.lines(for: fat.path, exact: false, unsign: false, unpack: false, write: false, reporter: reporter)
+        let lines = Thinner.lines(for: fat.path, exact: false, unsign: false, unpack: false, write: true, reporter: reporter)
         XCTAssertEqual(lines.count, 1)
         XCTAssertEqual(lines.first?.tint, .malformed)
         XCTAssertEqual(lines.first?.diagnostic, true)
@@ -320,12 +408,12 @@ final class ThinnerTests: XCTestCase {
         let artifact = directory / "fat_x86_64"
 
         let reporter = Reporter(console: Console())
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: false, write: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: false, write: true, reporter: reporter).map(\.text), [artifact.path])
         XCTAssertEqual(reporter.errorCount, 0)
         XCTAssertEqual(try Data(contentsOf: artifact), fat[4096...])
         try FileManager.default.removeItem(at: artifact)
 
-        let lines = Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: false, reporter: reporter)
+        let lines = Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter)
         XCTAssertEqual(lines.count, 1)
         XCTAssertTrue(try XCTUnwrap(lines.first).text.hasPrefix("fashion: \(file.path) (x86_64): Invalid Mach-O: sizeofcmds 4294967295 does not hold"))
         XCTAssertEqual(lines.first?.tint, .malformed)
@@ -380,9 +468,9 @@ final class ThinnerTests: XCTestCase {
         let artifact = directory / "fat_x86_64"
         let exact = directory / "fat_x86_64_exact"
 
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [artifact.path])
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), [artifact.path])
         XCTAssertEqual(try Data(contentsOf: artifact), slice)
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [artifact.path, exact.path])
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), [artifact.path, exact.path])
         XCTAssertEqual(try Data(contentsOf: exact), slice.prefix(end))
         XCTAssertEqual(try Data(contentsOf: artifact), slice)
         XCTAssertEqual(try codesignArchs(exact.path), ["x86_64"])
@@ -404,13 +492,13 @@ final class ThinnerTests: XCTestCase {
         try image.write(to: directory / "plain")
         let reporter = Reporter(console: Console())
 
-        XCTAssertEqual(Thinner.lines(for: (directory / "padded").path, exact: false, unsign: false, unpack: false, write: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Thinner.lines(for: (directory / "plain").path, exact: true, unsign: false, unpack: false, write: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Thinner.lines(for: (directory / "padded").path, exact: true, unsign: false, unpack: false, write: false, reporter: reporter).map(\.text), [(directory / "padded_exact").path])
+        XCTAssertEqual(Thinner.lines(for: (directory / "padded").path, exact: false, unsign: false, unpack: false, write: true, reporter: reporter).count, 0)
+        XCTAssertEqual(Thinner.lines(for: (directory / "plain").path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter).count, 0)
+        XCTAssertEqual(Thinner.lines(for: (directory / "padded").path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter).map(\.text), [(directory / "padded_exact").path])
         XCTAssertEqual(try Data(contentsOf: directory / "padded_exact"), image)
         XCTAssertEqual(reporter.errorCount, 0)
         // Through the binary: a second pass over the directory finds the artifact in place and writes nothing new.
-        let (status, errors) = try runFashion(["thinr", "--exact", directory.path])
+        let (status, errors) = try runFashion(["thinr", "--write", "--exact", directory.path])
         XCTAssertEqual(status, 0)
         XCTAssertEqual(errors, [])
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["padded", "padded_exact", "plain"])
@@ -449,7 +537,7 @@ final class ThinnerTests: XCTestCase {
             for name in ["fat", "fat_x86_64"] {
                 group.enter()
                 let thread = Thread {
-                    let lines = Thinner.lines(for: (directory / name).path, exact: true, unsign: false, unpack: false, write: false, reporter: reporter)
+                    let lines = Thinner.lines(for: (directory / name).path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter)
                     texts.withLock { $0 += lines.map(\.text) }
                     group.leave()
                 }
@@ -505,7 +593,7 @@ final class ThinnerTests: XCTestCase {
             try data.write(to: copy)
             _ = try codesign(["-s", "-", copy.path])
             XCTAssertNotEqual(try Data(contentsOf: copy), data)
-            XCTAssertEqual(try self.hashLines(copy.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], original.lastPathComponent)
+            XCTAssertEqual(try self.hashLines(copy.path, ["--unsign"]).last, try ByteHash.sha256.digest(data), original.lastPathComponent)
             XCTAssertEqual(try self.hashLines(original.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], original.lastPathComponent)
         }
         let reporter = Reporter(console: Console())
@@ -516,13 +604,13 @@ final class ThinnerTests: XCTestCase {
         let signedSlices = archs.map { Universal.sliceData(fileData: signedUniversal, arch: $0) }
         let originals = try [x86, arm].map { try Data(contentsOf: $0) }
         for (file, artifacts) in [("x86_64", ["x86_64_unsigned": originals[0]]), ("arm64", ["arm64_unsigned": originals[1]]), ("universal", ["universal_x86_64": signedSlices[0], "universal_x86_64_unsigned": originals[0], "universal_arm64": signedSlices[1], "universal_arm64_unsigned": originals[1]])] {
-            let lines = Thinner.lines(for: (signed / file).path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter)
+            let lines = Thinner.lines(for: (signed / file).path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter)
             XCTAssertEqual(Set(lines.map(\.text)), Set(artifacts.keys.map { (signed / $0).path }))
             for (name, original) in artifacts {
                 XCTAssertEqual(try Data(contentsOf: signed / name), original, name)
             }
         }
-        XCTAssertEqual(Thinner.lines(for: x86.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(Thinner.lines(for: x86.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).count, 0)
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
@@ -546,12 +634,12 @@ final class ThinnerTests: XCTestCase {
         XCTAssertEqual(archs.map(\.align), [12, 14])
         _ = try codesign(["-s", "-", universal.path])
         let reporter = Reporter(console: Console())
-        let artifacts = Thinner.lines(for: universal.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text)
+        let artifacts = Thinner.lines(for: universal.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text)
         XCTAssertEqual(Set(artifacts), Set(["universal_x86_64", "universal_x86_64_unsigned", "universal_arm64", "universal_arm64_unsigned"].map { (directory / $0).path }))
         XCTAssertEqual(reporter.errorCount, 0)
         let expected = directory / "expected"
         try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", (directory / "universal_x86_64_unsigned").path, (directory / "universal_arm64_unsigned").path, "-output", expected.path]), "cannot run lipo")
-        XCTAssertEqual(try self.hashLines(universal.path, ["--unsign"]), try [ByteHash.sha256.digest(Data(contentsOf: expected))])
+        XCTAssertEqual(try self.hashLines(universal.path, ["--unsign"]).last, try ByteHash.sha256.digest(Data(contentsOf: expected)))
     }
 
     /**
@@ -599,8 +687,8 @@ final class ThinnerTests: XCTestCase {
                 let data = try Data(contentsOf: original)
                 let signed = try self.codesignedFile(data, in: directory)
                 XCTAssertEqual(try XCTUnwrap(MachO(File(path: signed.path))).findSegment("__LINKEDIT")?.load(segment_command_64.self).vmsize, 0x4000, "\(name): codesign rounds to 16 KiB")
-                XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], name)
-                XCTAssertEqual(Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
+                XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]).last, try ByteHash.sha256.digest(data), name)
+                XCTAssertEqual(Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
                 XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: signed.path + "_unsigned")), data, name)
             }
         }
@@ -635,7 +723,7 @@ final class ThinnerTests: XCTestCase {
             for original in [linked, stripped] {
                 let data = try Data(contentsOf: original)
                 let signed = try self.codesignedFile(data, in: directory)
-                XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], original.lastPathComponent)
+                XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]).last, try ByteHash.sha256.digest(data), original.lastPathComponent)
             }
         }
     }
@@ -720,8 +808,8 @@ final class ThinnerTests: XCTestCase {
             let name = original.lastPathComponent
             let data = try Data(contentsOf: original)
             let signed = try self.codesignedFile(data, in: directory)
-            XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]), try [ByteHash.sha256.digest(data)], name)
-            XCTAssertEqual(Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
+            XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]).last, try ByteHash.sha256.digest(data), name)
+            XCTAssertEqual(Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
             XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: signed.path + "_unsigned")), data, name)
         }
     }
@@ -776,21 +864,21 @@ final class ThinnerTests: XCTestCase {
         let (_, _, slices) = try self.universalLs(in: directory)
         let expected = (["ls"] + slices.flatMap { ["ls_\($0.name)", "ls_\($0.name)_unsigned"] }).sorted()
 
-        XCTAssertEqual(try Thinner.parse(["--unsign", directory.path]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse(["--write", "--unsign", directory.path]).scan(), 0)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), expected)
-        XCTAssertEqual(try Thinner.parse([directory.path]).scan(), 0)
-        XCTAssertEqual(try Thinner.parse(["--unsign", directory.path]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse(["--write", directory.path]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse(["--write", "--unsign", directory.path]).scan(), 0)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), expected)
 
         // The same files, made of ls_x86_64 and the others alone: thin over ls finds them in place.
         try FileManager.default.removeItem(at: directory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         _ = try self.universalLs(in: directory)
-        XCTAssertEqual(try Thinner.parse([directory.path]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse(["--write", directory.path]).scan(), 0)
         try FileManager.default.removeItem(at: directory / "ls")
-        XCTAssertEqual(try Thinner.parse(["--unsign", directory.path]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse(["--write", "--unsign", directory.path]).scan(), 0)
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: directory / "ls")
-        XCTAssertEqual(try Thinner.parse(["--unsign", directory.path]).scan(), 0)
+        XCTAssertEqual(try Thinner.parse(["--write", "--unsign", directory.path]).scan(), 0)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), expected)
     }
 
@@ -809,10 +897,13 @@ final class ThinnerTests: XCTestCase {
         XCTAssertNotEqual(try self.hashLines(ls.path), try self.hashLines(resigned.path))
 
         for arguments in [[], ["--slices"], ["--algo", "cdhash"]] {
-            XCTAssertEqual(try self.hashLines(ls.path, ["--unsign"] + arguments), try self.hashLines(resigned.path, ["--unsign"] + arguments), "\(arguments)")
+            // The files as they are differ by their signatures, and so does the signed state of each slice under
+            // --slices: the unsigned states, the whole file's then each slice's, every other line, agree.
+            let unsigned = { (lines: [String]) in arguments == ["--slices"] ? lines.enumerated().filter { $0.offset % 2 == 1 }.map(\.element) : arguments.isEmpty ? Array(lines.dropFirst()) : lines }
+            XCTAssertEqual(try unsigned(self.hashLines(ls.path, ["--unsign"] + arguments)), try unsigned(self.hashLines(resigned.path, ["--unsign"] + arguments)), "\(arguments)")
         }
         for file in [ls, resigned] {
-            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).count, 2 * slices.count)
+            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).count, 2 * slices.count)
         }
         // Each ends with its string table, without the padding that aligned the signature after it.
         for slice in slices {
@@ -836,7 +927,7 @@ final class ThinnerTests: XCTestCase {
         }
         let (plain, slice) = try self.fatX86(appended: Data())
         try plain.write(to: directory / "plain")
-        XCTAssertEqual(Thinner.lines(for: (directory / "plain").path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).count, 2)
+        XCTAssertEqual(Thinner.lines(for: (directory / "plain").path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).count, 2)
         let unsigned = try Data(contentsOf: directory / "plain_x86_64_unsigned")
         let (seven, _) = try self.fatX86(appended: Data(repeating: 0x4a, count: 7))
         try seven.write(to: directory / "seven")
@@ -846,7 +937,7 @@ final class ThinnerTests: XCTestCase {
         try eight.write(to: file)
         let artifact = directory / "eight_x86_64_exact_unsigned"
 
-        XCTAssertEqual(Thinner.lines(for: (directory / "seven").path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).count, 2)
+        XCTAssertEqual(Thinner.lines(for: (directory / "seven").path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).count, 2)
         XCTAssertEqual(try Data(contentsOf: directory / "seven_x86_64_unsigned"), unsigned)
 
         let oracle = directory / "oracle"
@@ -854,21 +945,25 @@ final class ThinnerTests: XCTestCase {
         XCTAssertThrowsError(try codesign(["--remove-signature", oracle.path]))
         let reporter = Reporter(console: Console())
         let states = [(directory / "eight_x86_64").path, (directory / "eight_x86_64_exact").path, artifact.path]
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text), states)
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text), states)
         XCTAssertEqual(reporter.errorCount, 0)
         XCTAssertEqual(try Data(contentsOf: directory / "eight_x86_64"), slice + junk)
         XCTAssertEqual(try Data(contentsOf: directory / "eight_x86_64_exact"), slice)
         XCTAssertEqual(try Data(contentsOf: artifact), unsigned)
         XCTAssertFalse(FileManager.default.fileExists(atPath: (directory / "eight_x86_64_unsigned").path))
+        // Hash mode cuts as needed as thinr does, and says nothing of it.
         let (status, errors) = try runFashion(["--unsign", file.path])
-        XCTAssertEqual(status, 2)
-        XCTAssertEqual(errors, ["fashion: \(file.path) (x86_64): LC_CODE_SIGNATURE does not point to end of file"])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [])
         XCTAssertEqual(try runFashion(["thinr", "--unsign", file.path]).status, 0)
 
         // The same states with the flag, found in place; the whole file as unsign writes it, named for its slice.
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), states)
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: true, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), states)
         XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: Reporter(console: Console())).map(\.text), [(directory / "eight_exact_unsigned").path])
-        XCTAssertEqual(try self.hashLines(file.path, ["--unsign", "--exact", "--slices"]), try self.hashLines((directory / "plain").path, ["--unsign", "--slices"]))
+        // --slices digests the file as it is, then whole as the edits left it, then every state of the slice, as the
+        // table places it, cut, then cut and unsigned: the last is what plain's unsigned slice is.
+        XCTAssertEqual(try self.hashLines(file.path, ["--unsign", "--exact", "--slices"]).count, 5)
+        XCTAssertEqual(try self.hashLines(file.path, ["--unsign", "--exact", "--slices"]).last, try self.hashLines((directory / "plain").path, ["--unsign", "--slices"]).last)
     }
 
     /**
@@ -892,7 +987,7 @@ final class ThinnerTests: XCTestCase {
         try moved.write(to: directory / "first")
 
         for name in ["last", "first"] {
-            XCTAssertEqual(Thinner.lines(for: (directory / name).path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), [(directory / "\(name)_unsigned").path])
+            XCTAssertEqual(Thinner.lines(for: (directory / name).path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), [(directory / "\(name)_unsigned").path])
         }
         XCTAssertEqual(try Data(contentsOf: directory / "first_unsigned"), try Data(contentsOf: directory / "last_unsigned"))
     }
@@ -914,14 +1009,83 @@ final class ThinnerTests: XCTestCase {
             let file = directory / name
             try self.codesigned(original, in: directory).write(to: file)
 
-            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: Reporter(console: Console())).map(\.text), ["\(file.path)_unsigned"])
+            XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), ["\(file.path)_unsigned"])
             XCTAssertEqual(try Data(contentsOf: directory / "\(name)_unsigned"), original, name)
         }
     }
 
     /**
+     hash mode's --slices digests every state thinr writes, labeled by the artifact's name, `x86_64, unsigned`, so the digests are those
+     of the files thinr --write leaves and match them; a file in place of an artifact that holds other bytes is hashed
+     too, under its own path, and said on standard error, while one that holds the state is noted in the log alone.
+     */
+    func testSlicesDigestEveryStateAndAFileInPlace() throws {
+        let directory = try self.directory("states")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let (ls, _, slices) = try self.universalLs(in: directory)
+        let reporter = Reporter(console: Console())
+        let artifacts = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text)
+        XCTAssertEqual(artifacts, slices.flatMap { ["\(ls.path)_\($0.name)", "\(ls.path)_\($0.name)_unsigned"] })
+        func hashed(_ arguments: [String] = []) throws -> (said: [String], digests: [String], subjects: [String]) {
+            let lines = try Digester(Hasher.parse([ls.path, "--slices", "--unsign"] + arguments)).lines(for: ls.path, reporter: reporter)
+            let printed = lines.filter { !$0.diagnostic }.map { $0.text.components(separatedBy: "  ") }
+            return (lines.filter(\.diagnostic).map(\.text), printed.map { $0.first ?? "" }, printed.map { $0.dropFirst().joined(separator: "  ") })
+        }
+
+        // Every artifact in place, byte for byte: the file as it is, then whole as unsign writes it, then one line per
+        // state, labeled, its digest the file's, nothing said.
+        let inPlace = try hashed()
+        XCTAssertEqual(inPlace.said, [])
+        XCTAssertEqual(inPlace.subjects, [ls.path, "\(ls.path) (unsigned)"] + slices.flatMap { ["\(ls.path) (\($0.name))", "\(ls.path) (\($0.name), unsigned)"] })
+        XCTAssertEqual(inPlace.digests.first, try self.sha256(Data(contentsOf: ls)))
+        XCTAssertEqual(inPlace.digests.dropFirst(2), try artifacts.map { try self.sha256(Data(contentsOf: URL(fileURLWithPath: $0))) }[...])
+
+        // Other bytes under an artifact's name: said, with both identities, and hashed under its own path.
+        let stale = Data("stale".utf8)
+        try stale.write(to: URL(fileURLWithPath: artifacts[1]))
+        let differs = try hashed()
+        XCTAssertEqual(differs.said.count, 1)
+        XCTAssertTrue(differs.said[0].hasPrefix("fashion: \(artifacts[1]): exists and differs, 5 bytes, sha256 \(self.sha256(stale)) where the state is "), differs.said[0])
+        XCTAssertEqual(differs.subjects, inPlace.subjects[0 ... 3] + [artifacts[1]] + inPlace.subjects[4...])
+        XCTAssertEqual(differs.digests[4], self.sha256(stale))
+        XCTAssertEqual(reporter.errorCount, 0)
+
+        // Plain hash mode names its one state too, the file as unsign writes it whole, and compares that artifact:
+        // in place and the same, nothing said; stale, said and hashed under its own path.
+        let whole = (directory / "ls_unsigned").path
+        XCTAssertEqual(Unsigner.lines(for: ls.path, write: true, reporter: reporter).map(\.text), [whole])
+        let unsigned = try Digester(Hasher.parse([ls.path, "--unsign"])).lines(for: ls.path, reporter: reporter)
+        XCTAssertEqual(unsigned.map(\.text), try ["\(self.sha256(Data(contentsOf: ls)))  \(ls.path)", "\(self.sha256(Data(contentsOf: URL(fileURLWithPath: whole))))  \(ls.path) (unsigned)"])
+        try stale.write(to: URL(fileURLWithPath: whole))
+        let staleWhole = try Digester(Hasher.parse([ls.path, "--unsign"])).lines(for: ls.path, reporter: reporter)
+        XCTAssertEqual(staleWhole.filter(\.diagnostic).count, 1)
+        XCTAssertEqual(staleWhole.filter { !$0.diagnostic }.map(\.text).last, "\(self.sha256(stale))  \(whole)")
+        XCTAssertEqual(try Digester(Hasher.parse([ls.path])).lines(for: ls.path, reporter: reporter).map(\.text).count, 1)
+
+        // --symhash walks the same states, without the whole file's line: the symbols of each slice, signed then
+        // unsigned, the same; the stale file is said, and has no symbols to print.
+        let symbols = try Digester(Hasher.parse([ls.path, "--symhash", "--unsign"])).lines(for: ls.path, reporter: reporter)
+        XCTAssertEqual(symbols.filter(\.diagnostic).count, 1)
+        let symhashed = symbols.filter { !$0.diagnostic }.map { $0.text.components(separatedBy: "  ") }
+        XCTAssertEqual(symhashed.map { $0.dropFirst().joined(separator: "  ") }, slices.flatMap { ["\(ls.path) (\($0.name))", "\(ls.path) (\($0.name), unsigned)"] })
+        for signed in stride(from: 0, to: symhashed.count, by: 2) {
+            XCTAssertEqual(symhashed[signed].first, symhashed[signed + 1].first, "\(symhashed[signed])")
+        }
+
+        // Both match: the state by its digest, the file in place by what it holds; the warning is said either way.
+        func matched(_ arguments: [String]) throws -> [String] {
+            try self.hashLines(ls.path, ["--slices"] + arguments).filter { !$0.hasPrefix("fashion: ") }
+        }
+        XCTAssertEqual(try matched(["--unsign", "--match", inPlace.digests[2]]), [ls.path])
+        XCTAssertEqual(try matched(["--unsign", "--match", self.sha256(stale)]), [ls.path])
+        XCTAssertEqual(try matched(["--match", self.sha256(stale)]), [])
+    }
+
+    /**
      Two slices of one architecture, which the kernel refuses, come out under names of their own, the second numbered,
-     `ls_x86_64` and `ls_x86_64_2`, and their states after them.
+     `ls_x86_64` and `ls_x86_64_2`, and their states after them; hash mode's --slices labels their digests the same.
      */
     func testSlicesOfOneArchitectureAreNamedApart() throws {
         let directory = try self.directory("twice")
@@ -933,9 +1097,11 @@ final class ThinnerTests: XCTestCase {
         let file = directory / "ls"
         try makeUniversal([x86, x86]).write(to: file)
         let reporter = Reporter(console: Console())
-        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text), [file.path + "_x86_64", file.path + "_x86_64_unsigned", file.path + "_x86_64_2", file.path + "_x86_64_2_unsigned"])
+        XCTAssertEqual(Thinner.lines(for: file.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text), [file.path + "_x86_64", file.path + "_x86_64_unsigned", file.path + "_x86_64_2", file.path + "_x86_64_2_unsigned"])
         XCTAssertEqual(try Data(contentsOf: directory / "ls_x86_64_2"), slice)
         XCTAssertEqual(try Data(contentsOf: directory / "ls_x86_64_2_unsigned"), try Data(contentsOf: directory / "ls_x86_64_unsigned"))
+        let labeled = try Digester(Hasher.parse([file.path, "--slices", "--algo", "sha256"])).lines(for: file.path, reporter: reporter).map { $0.text.components(separatedBy: "  ").last ?? "" }
+        XCTAssertEqual(labeled, [file.path, "\(file.path) (x86_64)", "\(file.path) (x86_64_2)"])
         XCTAssertEqual(reporter.errorCount, 0)
     }
 

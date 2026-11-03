@@ -15,12 +15,13 @@ final class HasherTests: XCTestCase {
     }
 
     /**
-     A signature changes neither the symbols nor a XAR table of contents, so --unsign would be silently ignored.
+     A signature changes no XAR table of contents, so --unsign is refused with --xar-toc; the symbols neither, but
+     --symhash takes the flags of a run as --slices does, and labels the state.
      */
-    func testUnsignDoesNotApplyToSymbolsOrXarToc() {
-        let refused = "--unsign does not apply to --symhash or --xar-toc."
-        XCTAssertEqual(usageError(["x", "--unsign", "--symhash"]), refused)
-        XCTAssertEqual(usageError(["x", "--unsign", "--xar-toc"]), refused)
+    func testUnsignDoesNotApplyToXarToc() {
+        XCTAssertEqual(usageError(["x", "--unsign", "--xar-toc"]), "--unsign does not apply to --xar-toc.")
+        XCTAssertNil(usageError(["x", "--unsign", "--symhash"]))
+        XCTAssertNil(usageError(["x", "--unsign", "--unpack", "--exact", "--symhash"]))
         XCTAssertNil(usageError(["x", "--unsign", "--slices", "--exact"]))
         XCTAssertNil(usageError(["x", "--unsign", "--algo", "cdhash"]))
     }
@@ -36,8 +37,8 @@ final class HasherTests: XCTestCase {
         XCTAssertEqual(usageError(["x", "--symhash", "--algo", "git"]), "--symhash does not support the git algorithm.")
         XCTAssertEqual(usageError(["x", "--xar-toc", "--algo", "cdhash"]), "--xar-toc does not support the cdhash algorithm.")
         XCTAssertEqual(usageError(["x", "--slices", "--algo", "cdhash"]), "--slices does not support the cdhash algorithm; use --algo cdhash on its own.")
-        XCTAssertEqual(usageError(["x", "--exact", "--symhash"]), "--exact does not apply to --symhash or --xar-toc.")
-        XCTAssertEqual(usageError(["x", "--exact", "--xar-toc"]), "--exact does not apply to --symhash or --xar-toc.")
+        XCTAssertNil(usageError(["x", "--exact", "--symhash"]))
+        XCTAssertEqual(usageError(["x", "--exact", "--xar-toc"]), "--exact does not apply to --xar-toc.")
         XCTAssertEqual(usageError(["x", "--decompress"]), "--decompress requires --xar-toc.")
         XCTAssertNil(usageError(["x", "--xar-toc", "--decompress", "--algo", "sha1"]))
     }

@@ -37,11 +37,11 @@ final class UnsignerTests: XCTestCase {
         let artifact = directory / "ls_unsigned"
         XCTAssertEqual(Unsigner.lines(for: ls.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         let unsigned = try Data(contentsOf: artifact)
-        XCTAssertEqual(try self.hashLines(ls.path, ["--unsign"]), try [ByteHash.sha256.digest(unsigned)])
+        XCTAssertEqual(try self.hashLines(ls.path, ["--unsign"]).last, try ByteHash.sha256.digest(unsigned))
         XCTAssertEqual(try self.hashLines(artifact.path, ["--unsign"]), try [ByteHash.sha256.digest(unsigned)])
 
         // thin leaves the signed slices beside the unsigned ones: lipo gets the unsigned ones.
-        let slices = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text).filter { $0.hasSuffix("_unsigned") }
+        let slices = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text).filter { $0.hasSuffix("_unsigned") }
         XCTAssertGreaterThan(slices.count, 1)
         let lipo = directory / "lipo"
         try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create"] + slices + ["-output", lipo.path]), "cannot run lipo")
@@ -51,6 +51,61 @@ final class UnsignerTests: XCTestCase {
         // A second run finds the artifact in place.
         XCTAssertEqual(Unsigner.lines(for: ls.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         XCTAssertEqual(reporter.errorCount, 0)
+    }
+
+    /**
+     Without --write, a different file under the artifact's name stays as it is, executable bit included, and standard
+     error names it with its size and SHA-256 and the artifact's; the run fails. With --write it is replaced, without
+     the execute bit, and nothing is said: the unified log alone records the replacement.
+     */
+    func testADifferentFileInTheWayIsReportedAndLeftAloneWithoutWrite() throws {
+        let directory = try self.directory("differs")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let ls = directory / "ls"
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: ls)
+        let artifact = directory / "ls_unsigned"
+        let other = Data("in the way".utf8)
+        try other.write(to: artifact)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: artifact.path)
+
+        let (status, errors) = try runFashion(["unsign", ls.path])
+        XCTAssertEqual(status, 2)
+        XCTAssertEqual(errors.count, 1)
+        let prefix = try "fashion: \(artifact.path): exists and differs, 10 bytes, sha256 \(XCTUnwrap(ByteHash.sha256.digest(other))) where the artifact is "
+        XCTAssertTrue(errors.first?.hasPrefix(prefix) ?? false, errors.first ?? "")
+        XCTAssertTrue(errors.first?.hasSuffix("; left alone without --write") ?? false, errors.first ?? "")
+        XCTAssertEqual(try Data(contentsOf: artifact), other)
+        XCTAssertEqual(try XCTUnwrap(FileManager.default.attributesOfItem(atPath: artifact.path)[.posixPermissions] as? Int) & 0o111, 0o111)
+
+        let (written, quiet) = try runFashion(["unsign", "--write", ls.path])
+        XCTAssertEqual(written, 0)
+        XCTAssertEqual(quiet, [])
+        XCTAssertEqual(try self.hashLines(ls.path, ["--unsign"]).last, try ByteHash.sha256.digest(Data(contentsOf: artifact)))
+        XCTAssertEqual(try XCTUnwrap(FileManager.default.attributesOfItem(atPath: artifact.path)[.posixPermissions] as? Int) & 0o111, 0)
+    }
+
+    /**
+     With --quiet, a file that has an artifact is printed once, its own path, and the artifact is written all the same;
+     the artifact, which has nothing to unsign, prints nothing.
+     */
+    func testQuietNamesTheFileOnce() throws {
+        let directory = try self.directory("quiet")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let ls = directory / "ls"
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: ls)
+        let reporter = Reporter(console: Console())
+        let artifact = directory / "ls_unsigned"
+
+        XCTAssertEqual(Unsigner.lines(for: ls.path, write: false, quiet: true, reporter: reporter).map(\.text), [ls.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifact.path))
+        XCTAssertEqual(Unsigner.lines(for: artifact.path, write: false, quiet: true, reporter: reporter).count, 0)
+        XCTAssertEqual(reporter.errorCount, 0)
+        XCTAssertEqual(try Unsigner.parse(["-q", directory.path]).scan(), 0)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["ls", "ls_unsigned"])
     }
 
     /**
@@ -81,7 +136,7 @@ final class UnsignerTests: XCTestCase {
         let command = try XCTUnwrap(Fashion.parseAsRoot(["unsign", signed.path]) as? Unsigner)
         XCTAssertEqual(command.scan(), 0)
         XCTAssertEqual(try Data(contentsOf: signed / "sample_unsigned"), data)
-        XCTAssertEqual(Thinner.lines(for: (signed / "sample").path, exact: false, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text), [(signed / "sample_unsigned").path])
+        XCTAssertEqual(Thinner.lines(for: (signed / "sample").path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text), [(signed / "sample_unsigned").path])
     }
 
     /**
@@ -103,9 +158,9 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(Unpacker.lines(for: padded.path, write: false, reporter: reporter).count, 0)
         XCTAssertEqual(Unsigner.lines(for: original.path, write: false, reporter: reporter).count, 0)
         let artifact = directory / "padded_exact"
-        XCTAssertEqual(Thinner.lines(for: padded.path, exact: true, unsign: false, unpack: false, write: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(Thinner.lines(for: padded.path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter).map(\.text), [artifact.path])
         XCTAssertEqual(try Data(contentsOf: artifact), data)
-        XCTAssertEqual(try self.hashLines(padded.path, ["--exact", "--unsign"]), try [XCTUnwrap(ByteHash.sha256.digest(data))])
+        XCTAssertEqual(try self.hashLines(padded.path, ["--exact", "--unsign"]).last, try XCTUnwrap(ByteHash.sha256.digest(data)))
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
@@ -135,14 +190,14 @@ final class UnsignerTests: XCTestCase {
         let artifact = directory / "fat_unsigned"
         XCTAssertEqual(Unsigner.lines(for: fat.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         let written = try Data(contentsOf: artifact)
-        XCTAssertEqual(try self.hashLines(fat.path, ["--exact", "--unsign"]), try [XCTUnwrap(ByteHash.sha256.digest(written))])
+        XCTAssertEqual(try self.hashLines(fat.path, ["--exact", "--unsign"]).last, try XCTUnwrap(ByteHash.sha256.digest(written)))
         guard case let .fat(archs) = try Universal.open(data: written), archs.count == 2 else {
             return XCTFail("the artifact is not universal")
         }
         XCTAssertEqual(Universal.sliceData(fileData: written, arch: archs[0]), try Data(contentsOf: x86))
         XCTAssertEqual(Universal.sliceData(fileData: written, arch: archs[1]), armData + Data(repeating: 0x4a, count: 8))
 
-        let lines = Thinner.lines(for: fat.path, exact: true, unsign: true, unpack: false, write: false, reporter: reporter).map(\.text)
+        let lines = Thinner.lines(for: fat.path, exact: true, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text)
         XCTAssertEqual(Set(lines), Set(["fat_x86_64", "fat_x86_64_unsigned", "fat_arm64", "fat_arm64_exact"].map { (directory / $0).path }))
         XCTAssertEqual(try Data(contentsOf: directory / "fat_arm64_exact"), armData)
         XCTAssertEqual(try self.hashLines(fat.path, ["--exact", "--unsign", "--slices"]).last, try XCTUnwrap(ByteHash.sha256.digest(armData)))
@@ -173,8 +228,10 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: artifact), data)
         XCTAssertEqual(reporter.errorCount, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: (directory / "appended_unsigned").path))
-        XCTAssertEqual(try self.hashLines(file.path, ["--exact", "--unsign"]), try [XCTUnwrap(ByteHash.sha256.digest(data))])
-        XCTAssertEqual(try runFashion(["--unsign", file.path]).errors, ["fashion: \(file.path): LC_CODE_SIGNATURE does not point to end of file"])
+        XCTAssertEqual(try self.hashLines(file.path, ["--exact", "--unsign"]).last, try XCTUnwrap(ByteHash.sha256.digest(data)))
+        // Hash mode cuts as needed too, and names the state for it.
+        XCTAssertEqual(try self.hashLines(file.path, ["--unsign"]).last, try XCTUnwrap(ByteHash.sha256.digest(data)))
+        XCTAssertEqual(try runFashion(["--unsign", file.path]).errors, [])
 
         try FileManager.default.removeItem(at: artifact)
         let (status, errors) = try runFashion(["unsign", file.path])
@@ -240,7 +297,11 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [refusal])
         XCTAssertEqual(reporter.errorCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unsigned"))
-        XCTAssertEqual(try runFashion(["--unsign", file.path]).errors, [refusal])
+        // Hash mode hashes the file as it is, the refusal a warning: the run succeeds.
+        let (status, errors) = try runFashion(["--unsign", file.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [refusal + ", hashed as it is"])
+        XCTAssertEqual(try self.hashLines(file.path, ["--unsign"]), try [refusal + ", hashed as it is", XCTUnwrap(ByteHash.sha256.digest(data))])
     }
 
     /**

@@ -106,6 +106,7 @@ left out, with the reason.
 | More than 64 MiB of load commands | this tool's own limit, as the symbol names': refused red before the table is read; no loader has one | |
 | A superblob declaring more than 64 MiB | this tool's own limit, as the load commands': refused red before it is read, in hash mode as in `verify`; Security reads what the length says and the kernel maps what `LC_CODE_SIGNATURE` says, a sparse file costing either the length in memory | |
 | `LC_DYSYMTAB` without `LC_SYMTAB`; `LC_DYLD_INFO` with `LC_DYLD_CHAINED_FIXUPS`; `LC_DYSYMTAB` relocation tables beside `LC_DYLD_CHAINED_FIXUPS` or `LC_DYLD_INFO_ONLY` | dyld `validStructureLinkedit`, "malformed mach-o contains LC_DYLD_CHAINED_FIXUPS and local relocations" | ran |
+| No `LC_SYMTAB`, "no external symbol table" | ld64 always writes one and `strip` keeps it; a UPX stub has none, and `--symhash` has nothing to hash, which it says in the same words. No loader wants it: dyld reads the table through `LC_DYSYMTAB` and the exports trie | ran (arm64, chained fixups, ad hoc signed, `LC_SYMTAB` cut out of the table) |
 | `LC_DYLD_INFO` beside `LC_DYLD_INFO_ONLY`, `LC_ROUTINES` beside `LC_ROUTINES_64` | dyld `validStructureLoadCommands` counts each pair as one command: "multiple LC_DYLD_INFO load commands found" | |
 | No `LC_UUID` | dyld `validLinkedit` "missing LC_UUID" (SDK ≥ 14) | dyld aborted |
 | No `LC_LOAD_DYLIB` at all | dyld "must link with at least libSystem.dylib" (SDK ≥ 13) | dyld aborted |

@@ -25,10 +25,9 @@ extension UnpackError: LocalizedError {
 }
 
 /**
- A Mach-O image UPX packed, after UPX's `PackMachBase` (`p_mach.cpp`, UPX 5.2.1, and its development branch for the
- arm64 filter 0x53). `init` mirrors `canUnpack`: it finds the pack header UPX leaves before `__LINKEDIT`, and reads the
- offset of the packed data from it. `unpack()` mirrors `unpack`: it decompresses the image block by block, to the bytes
- `upx -d` writes.
+ A Mach-O image UPX packed, after UPX's `PackMachBase` (`p_mach.cpp`, UPX 5.3.0). `init` mirrors `canUnpack`: it finds
+ the pack header UPX leaves before `__LINKEDIT`, and reads the offset of the packed data from it. `unpack()` mirrors
+ `unpack`: it decompresses the image block by block, to the bytes `upx -d` writes.
 
  `init` takes any Mach-O and returns nil for one UPX did not pack. That includes a file UPX would throw on before it
  finds a pack header, for headers or load commands its packer never writes. It also includes a file whose pack header
@@ -999,7 +998,7 @@ struct PackMach {
     /**
      Undo the filter UPX applied to a block before compressing it, to make branch targets repeat: the x86 call and
      jump trick (0x46, and 0x49 with conditional jumps), the ARM and arm64 branch tricks (0x50, 0x52, and 0x53 with
-     conditional branches, which UPX added after 5.2.1), and the PowerPC one (0xd0), the filters its Mach-O packers
+     conditional branches, which UPX 5.3.0 added), and the PowerPC one (0xd0), the filters its Mach-O packers
      use, each with `cto`, the byte that marks a filtered target.
      */
     static func unfilter(_ b: UnsafeMutableRawBufferPointer, id: UInt8, cto: UInt8) throws {

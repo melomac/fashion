@@ -77,19 +77,22 @@ private let logger = Logger(subsystem: "fashion", category: "runner")
 
 /**
  One digest of a file: of the whole file, or of one of its slices, named by `label` (`arm64`, `x86_64, ADHOC, sha256`),
- by `algorithm`, which tells how it is matched and printed.
+ or of a file found in place of a slice's artifact, named by its own `path`; by `algorithm`, which tells how it is
+ matched and printed.
  */
 struct DigestResult {
     let digest: String
     let algorithm: Algorithm
     var label: String?
     var tint = Tint.none
+    var path: String?
 
     /**
-     The path as printed: `path (label)`, or the bare path for the whole file.
+     The path as printed: `path (label)`, the bare path for the whole file, or the file's own path for one in place of
+     an artifact.
      */
     func display(_ path: String) -> String {
-        self.label.map { "\(path) (\($0))" } ?? path
+        self.path ?? self.label.map { "\(path) (\($0))" } ?? path
     }
 }
 
@@ -103,6 +106,16 @@ struct Line {
     let text: String
     var tint = Tint.none
     var diagnostic = false
+
+    /**
+     `lines` under --quiet, for the commands that print paths: the diagnostics stand, and the file is named once,
+     `path`, for whatever else was said of it, its artifacts or its findings; nothing for a file nothing was said of.
+     Hash mode prints its digests alone instead (`Digester.lines(for:reporter:)`).
+     */
+    static func quiet(_ lines: [Line], naming path: String) -> [Line] {
+        let reports = lines.filter(\.diagnostic)
+        return reports + (reports.count < lines.count ? [Line(text: OutputFormatter.formatPath(path))] : [])
+    }
 }
 
 /**
@@ -894,11 +907,11 @@ struct Digester {
      What a scan digests in each file. Every mode but cdhash streams bytes through a `ByteHash`.
      */
     enum Mode {
-        /// The whole file, or its Mach-O image with --exact.
+        /// The file as it is, then whole as the edits left it.
         case file([ByteHash])
-        /// The whole file, then each architecture of a universal binary.
+        /// The file as it is, then whole as the edits left it, then every state of each slice, as thinr lists them.
         case slices([ByteHash])
-        /// The external symbol names of each Mach-O slice.
+        /// The external symbol names of each Mach-O slice, in every state.
         case symhash([ByteHash], separator: String, sortSymbols: Bool)
         /// The table of contents of a XAR archive.
         case xarToc([ByteHash], decompress: Bool)
@@ -928,7 +941,7 @@ struct Digester {
         self.algorithms = self.targets.algorithms.isEmpty ? [command.resolvedAlgorithm] : self.targets.algorithms
         self.score = command.resolvedScore
         self.negate = command.matchOptions.negate
-        self.quiet = command.hash.quiet
+        self.quiet = command.scan.quiet
         self.exact = command.hash.exact
         self.unsign = command.hash.unsign
         self.unpack = command.hash.unpack
@@ -954,12 +967,12 @@ struct Digester {
     // MARK: - Output Lines
 
     /**
-     The lines to print for one file: every digest or, in match mode, every matching one. A quiet match names the file
-     once, and so does a symhash search, which reports files rather than slices (the slices of one binary usually share
-     a symhash). A match is green, a fuzzy one by its distance. Negated, match mode prints a file no digest of which
-     matched as plain hash mode prints it, the path alone when quiet, and nothing for one that matched. The file's
-     diagnostics come first: a file that cannot be hashed is reported, in red when it is malformed, after the
-     architecture of the slice at fault in a universal file, and prints nothing else.
+     The lines to print for one file: every digest or, in match mode, every matching one, each as plain hash mode
+     prints it, the slice or state labeled. A quiet match names the file once. A match is green, a fuzzy one by its
+     distance. Negated, match mode prints a file no digest of which matched as plain hash mode prints it, the path
+     alone when quiet, and nothing for one that matched. The file's diagnostics come first: a file that cannot be
+     read is reported in red and prints nothing else; what the edits refuse is a warning, and the file prints as it
+     is.
      */
     func lines(for path: String, reporter: Reporter) -> [Line] {
         var diagnostics: [Line] = []
@@ -990,10 +1003,6 @@ struct Digester {
                 let tint = self.matchTint(match.score, algorithm: result.algorithm)
                 if self.quiet {
                     lines = [Line(text: OutputFormatter.formatPath(path), tint: tint)]
-                    break
-                }
-                if case .symhash = self.mode {
-                    lines = [Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: path, algorithm: result.algorithm), tint: tint)]
                     break
                 }
                 lines.append(Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: result.algorithm), tint: tint))
@@ -1058,43 +1067,105 @@ struct Digester {
         // One descriptor for everything read from the file, whose size when it is opened is the size hashed, or the
         // size of its edit, unpacked or without signatures, which every mode then reads as the file.
         let read = try File(path: path)
-        // A modified UPX packed it, or the file is cut short of its last page: a second look, whatever --quiet keeps
-        // off, like a signature that does not hold.
-        let opened = try self.exact ? MachOEditor.padded(read, caveat: { note(reporter.warn(path: path, message: $0)) }) : read
+        // A modified UPX packed it, or the file is cut short of its last page, which --exact pads: a second look,
+        // like a signature that does not hold.
         let warned = { (arch: String?, message: String) in
             note(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
         }
-        let file: File
-        do {
-            file = try self.unsign || self.unpack ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: self.unsign, unpack: self.unpack, caveat: warned)?.file ?? opened : opened
-        } catch where self.unpack && Self.isUnpackError(error) {
-            // Packed data that does not hold, or an image unpacked from it that does not, in the file or a slice of a
-            // universal one: --unpack hashes every file, so the file is hashed packed, as it is, every slice of it,
-            // the ones that unpacked included, the refusal said in a warning after the slice at fault; with --unsign,
-            // its signatures out. thinr and unpack refuse it in red instead, and write what decompressed under --keep.
-            let subject = Self.subject(path, of: error)
-            note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")hashed packed"))
-            file = try self.unsign ? MachOEditor.edit(opened, exact: self.exact ? .always : .never, unsign: true, unpack: false, caveat: warned)?.file ?? opened : opened
+        // The edits, with --exact alone the cut and the padding, kept whole for every state to be digested; the file
+        // is what every mode then reads, and `source` what the states are pieces of. Hash mode hashes every file: an
+        // edit the editor refuses, a Mach-O it cannot parse or a signature it cannot take out, is said once, in a
+        // warning after the slice at fault, and the file is hashed as it is, with no state and no second parse; the
+        // run exits as if nothing was refused. thinr, unsign and unpack refuse such a file in red, having nothing to
+        // write.
+        var refused = false
+        // Whether what was refused is a slice of a universal file, which keeps its slices as the table places them,
+        // where a thin file refused parses no better a second time and is not opened again.
+        var refusedSlice = false
+        // What becomes of a file that is refused, in the mode's words.
+        let fate = switch self.mode {
+        case .symhash: "no symhash as it is"
+        default: "hashed as it is"
         }
-        // What TLSH leaves out of a digest, or why it made none, named after the architecture it is about, unless
-        // --quiet keeps the lines alone.
-        let caveat = { (arch: String?, message: String) in
-            guard !self.quiet else {
-                return
+        func edit(unsign: Bool, unpack: Bool) -> (file: File, states: [[MachOEditor.State]], source: File, archs: [Universal.Architecture]?)? {
+            do {
+                return try MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: unsign, unpack: unpack, caveat: warned)
+            } catch where unpack && Self.isUnpackError(error) {
+                // Packed data that does not hold, or an image unpacked from it that does not, in the file or a slice
+                // of a universal one: the file is hashed packed, every slice of it, the ones that unpacked included;
+                // with --unsign, its signatures out. unpack writes what decompressed under --keep.
+                let subject = Self.subject(path, of: error)
+                note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")hashed packed"))
+                return self.unsign || self.exact ? edit(unsign: self.unsign, unpack: false) : nil
+            } catch {
+                refused = true
+                refusedSlice = error is SliceError
+                let subject = Self.subject(path, of: error)
+                note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")\(fate)"))
+                return nil
             }
+        }
+        let edited = self.unsign || self.unpack || self.exact ? edit(unsign: self.unsign, unpack: self.unpack) : nil
+        let file = edited?.file ?? read
+        // Whether the file is universal, by the editor's word where it refused the file, or by its table; a thin
+        // Mach-O that does not parse, which no edit was asked of, is refused here the same way.
+        func isUniversal() throws -> Bool {
+            if refused {
+                return refusedSlice
+            }
+            if let fat = try self.isUniversal(file, warned: warned, fate: fate) {
+                return fat
+            }
+            refused = true
+            return false
+        }
+        // What TLSH leaves out of a digest, or why it made none, or that an image has no symbol table, named after
+        // the architecture or state it is about. --quiet shortens standard output alone: every line for standard
+        // error stands.
+        let caveat = { (arch: String?, message: String) in
             note(reporter.inform(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
         }
-        return switch self.mode {
+        switch self.mode {
         case let .file(hashes):
-            try self.fileDigests(file, hashes: hashes, caveat: { caveat(nil, $0) })
+            // The file as it is, then as the edits left it, one artifact named for them as unsign and unpack name
+            // theirs, or none.
+            // The editor cut every image already when it ran: the whole is not cut a second time, which the lenient
+            // end rule would refuse on an image cut back to its segments' bytes.
+            return try self.artifactDigests(ArtifactWriter.whole(file, exact: self.exact && edited == nil && !refused, states: edited?.states), of: path, reporter: reporter, note: note, whole: {
+                try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
+            }, digests: Self.byteDigests(hashes, caveat: caveat))
         case let .slices(hashes):
-            try self.sliceDigests(file, hashes: hashes, caveat: caveat)
+            // The file as it is, then as the edits left it whole, then each slice's states; a thin file's whole is its
+            // last state, printed once.
+            let fat = try isUniversal()
+            let slices = try !fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: edited?.archs)
+            return try self.artifactDigests(fat ? ArtifactWriter.whole(file, exact: self.exact && edited == nil && !refused, states: edited?.states) + slices : slices, of: path, reporter: reporter, note: note, whole: {
+                try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
+            }, digests: Self.byteDigests(hashes, caveat: caveat))
         case let .symhash(hashes, separator, sortSymbols):
-            try SymHash.compute(file, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
+            // The same states, their symbols; a thin file's own come first, as it is, and a universal file's slices
+            // as the table places them are states of their own.
+            let fat = try isUniversal()
+            return try self.artifactDigests(!fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: edited?.archs), of: path, reporter: reporter, note: note, whole: {
+                // A thin file's own symbols, unless the editor refused it, which was said: a file that does not parse
+                // as it is, cut short of its last page say, is said to have none where the edits padded it and went on.
+                guard !fat, !refused else {
+                    return []
+                }
+                do {
+                    return try SymHash.compute(read, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
+                } catch {
+                    let subject = Self.subject(path, of: error)
+                    note(reporter.warn(path: subject, message: "\(File.message(for: error)), no symhash as it is"))
+                    return []
+                }
+            }, digests: { bytes, label in
+                try (SymHash.digests(of: bytes, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(label, $0) }), { try ArtifactWriter.identity(of: bytes) })
+            })
         case let .xarToc(hashes, decompress):
-            try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { caveat(nil, $0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
+            return try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { caveat(nil, $0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
         case .cdhash:
-            try self.cdHashDigests(file, path: path, reporter: reporter, note: note)
+            return try self.cdHashDigests(file, path: path, reporter: reporter, note: note)
         }
     }
 
@@ -1127,56 +1198,102 @@ struct Digester {
     }
 
     /**
-     The whole-file digests, then each architecture of a universal binary's, each trimmed when --exact is set.
-     */
-    private func sliceDigests(_ file: File, hashes: [ByteHash], caveat: (_ arch: String?, _ message: String) -> Void) throws -> [DigestResult] {
-        // Read the container first, so a malformed one fails before any hashing.
-        let slices = try self.sliceRanges(file)
+     The digests of a file, then of its `artifacts`, the states `thinr`, `unsign` and `unpack` write
+     (`ArtifactWriter.slices`, `ArtifactWriter.whole`), one line per state, each labeled by its artifact's name,
+     `unsigned`, `x86_64`, `x86_64, exact, unsigned`: a digest matches an artifact's and tells which state it is, in
+     every mode, --slices or not. `whole` makes the first lines, the file as it is on disk, which a file nothing was
+     done to prints alone, as it always did. `digests` makes one state's digests, of its bytes or of their symbols,
+     with the state's size and SHA-256 for the comparison below: the byte hashes have them from the read that digested
+     the state, a symhash takes a read of its own when a file is in place.
 
-        var results = try self.fileDigests(file, hashes: hashes, caveat: { caveat(nil, $0) })
-        for slice in slices {
+     A file found in place of an artifact, `ls_x86_64_unsigned` beside `ls`, is compared to the state by size and
+     SHA-256, as `thinr` compares before writing: the same bytes are noted in the unified log; different ones are
+     digested too, under their own path, and said on standard error and in the log with both identities, so a stale
+     artifact shows beside its state and matches by what it holds. A file in place that cannot be read is said the
+     same way, and the state stands.
+     */
+    private func artifactDigests(_ artifacts: [Artifact], of path: String, reporter: Reporter, note: (Line) -> Void, whole: () throws -> [DigestResult], digests: (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: () throws -> ArtifactWriter.Identity)) throws -> [DigestResult] {
+        var results = try whole()
+        for artifact in artifacts {
+            let label = artifact.label
+            let state: (digests: [(hash: ByteHash, digest: String)], identity: () throws -> ArtifactWriter.Identity)
             do {
-                for (hash, digest) in try ByteHash.digests(hashes, file, range: slice.range, caveat: { caveat(slice.arch, $0) }) {
-                    results.append(DigestResult(digest: digest, algorithm: hash.algorithm, label: slice.arch))
-                }
+                state = try digests(artifact.bytes, label)
             } catch {
-                throw SliceError(arch: slice.arch, error: error)
+                // A slice as the table places it that is no Mach-O for symhash to read, say: said, and left out.
+                note(reporter.warn(path: "\(path) (\(label))", message: "\(File.message(for: error)), left out"))
+                continue
+            }
+            results += state.digests.map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm, label: label) }
+
+            let target = path + artifact.suffix
+            do {
+                guard let found = try ArtifactWriter.inPlace(at: target) else {
+                    continue
+                }
+                let identity = try ArtifactWriter.identity(of: found)
+                let expected = try state.identity()
+                guard identity != expected else {
+                    logger.info("\(target, privacy: .public): in place, \(identity.description, privacy: .public)")
+                    continue
+                }
+                note(reporter.warn(path: target, message: "exists and differs, \(identity) where the state is \(expected)"))
+                results += try digests(found, label).digests.map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm, path: target) }
+            } catch {
+                note(reporter.warn(path: target, message: File.message(for: error)))
             }
         }
         return results
     }
 
     /**
-     Where each architecture of a universal binary lies in the file, as Security's `Universal` places a `MachO` at its
-     offset; none for any other file. Each slice is validated as a thin Mach-O, so a malformed slice is rejected like a
-     malformed thin file, after its architecture, and trimmed to its logical end when --exact is set. Only the headers
-     are read.
+     What `artifactDigests` digests a state's bytes by under the byte hashes: `hashes`, and SHA-256 for the comparison
+     with a file in place, in the one read; `caveat` hears what TLSH leaves out, after the state's label.
      */
-    private func sliceRanges(_ file: File) throws -> [(range: Range<Int>, arch: String)] {
-        guard case let .fat(archs) = try Universal.open(file) else {
-            return []
-        }
-
-        return try archs.map { arch in
-            // Parse even without --exact: a malformed slice is an error either way. A slice that is not Mach-O at
-            // all is hashed whole.
-            let image: MachO?
-            do {
-                image = try MachO(file, offset: arch.offset, length: arch.length)
-            } catch {
-                throw SliceError(arch: arch.name, error: error)
-            }
-            let length = image.map { self.exact ? $0.logicalEnd() : arch.length } ?? arch.length
-            return (arch.offset ..< arch.offset + length, arch.name)
+    private static func byteDigests(_ hashes: [ByteHash], caveat: @escaping (_ arch: String?, _ message: String) -> Void) -> (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: () throws -> ArtifactWriter.Identity) {
+        let hashed = hashes.contains { $0.algorithm == .sha256 } ? hashes : hashes + [ByteHash(.sha256)!] // nil for cdhash alone
+        return { bytes, label in
+            let all = try ByteHash.digests(hashed, bytes, caveat: { caveat(label, $0) })
+            let digest = all.first { $0.hash.algorithm == .sha256 }?.digest ?? ""
+            return (all.filter { digest in hashes.contains { $0.algorithm == digest.hash.algorithm } }, { ArtifactWriter.Identity(size: bytes.size, digest: digest) })
         }
     }
 
     /**
-     The digests of the whole file, read once for every hash, or with --exact of a Mach-O's logical content only:
-     `fileEnd` reads just the headers.
+     Whether `file` is universal, each of its architectures read as a thin Mach-O, as Security's `Universal` places a
+     `MachO` at its offset: a malformed slice is said to `warned` after its name (`Universal.named`), --exact or not,
+     and hashed as the table places it, as `lipo -thin` takes it, since hash mode hashes every file. A thin Mach-O
+     that does not parse is said the same way, with `fate`, and is nil: neither universal nor an image to read. A
+     file that cannot be read throws. Only the headers are read.
+     */
+    private func isUniversal(_ file: File, warned: (_ arch: String?, _ message: String) -> Void, fate: String) throws -> Bool? {
+        let universal: Universal
+        do {
+            universal = try Universal.open(file)
+        } catch let error as Errno {
+            throw error
+        } catch {
+            warned(nil, "\(File.message(for: error)), \(fate)")
+            return nil
+        }
+        guard case let .fat(archs) = universal else {
+            return false
+        }
+        for (arch, name) in Universal.named(archs) {
+            do {
+                _ = try MachO(file, offset: arch.offset, length: arch.length)
+            } catch {
+                warned(name, "\(File.message(for: error)), hashed as the table places it")
+            }
+        }
+        return true
+    }
+
+    /**
+     The digests of the whole file as it is, read once for every hash, unlabeled: the first lines of every file, and
+     the only ones of a file the flags do nothing to. The --exact cut is a state of its own (`Artifact`).
      */
     private func fileDigests(_ file: File, hashes: [ByteHash], caveat: (String) -> Void) throws -> [DigestResult] {
-        let range = try self.exact ? 0 ..< Universal.fileEnd(file) : nil
-        return try ByteHash.digests(hashes, file, range: range, caveat: caveat).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
+        try ByteHash.digests(hashes, file, caveat: caveat).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
     }
 }

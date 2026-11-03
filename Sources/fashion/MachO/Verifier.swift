@@ -444,6 +444,11 @@ struct MachOVerifier {
                 found.append("LC_BUILD_VERSION and LC_VERSION_MIN_* both")
             }
         }
+        // ld64 always writes an LC_SYMTAB and strip keeps it; a UPX stub has none, and symhash has nothing to hash.
+        // dyld loads an image without one all the same.
+        if counts[UInt32(LC_SYMTAB)] == nil {
+            found.append("no external symbol table")
+        }
         if counts[UInt32(LC_DYSYMTAB)] != nil, counts[UInt32(LC_SYMTAB)] == nil {
             found.append("LC_DYSYMTAB without LC_SYMTAB")
         }

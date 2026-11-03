@@ -10,8 +10,8 @@ private enum HashOptionError: Error, Equatable {
     case unsupportedSymHashAlgorithm(Algorithm)
     case unsupportedXarCDHash
     case unsupportedSlicesCDHash
-    case exactWithIncompatibleMode
-    case unsignWithIncompatibleMode
+    case exactWithXarToc
+    case unsignWithXarToc
     case unpackWithXarToc
     case decompressWithoutXarToc
     case negativeScore
@@ -36,10 +36,10 @@ extension HashOptionError: LocalizedError {
             "--xar-toc does not support the cdhash algorithm."
         case .unsupportedSlicesCDHash:
             "--slices does not support the cdhash algorithm; use --algo cdhash on its own."
-        case .exactWithIncompatibleMode:
-            "--exact does not apply to --symhash or --xar-toc."
-        case .unsignWithIncompatibleMode:
-            "--unsign does not apply to --symhash or --xar-toc."
+        case .exactWithXarToc:
+            "--exact does not apply to --xar-toc."
+        case .unsignWithXarToc:
+            "--unsign does not apply to --xar-toc."
         case .unpackWithXarToc:
             "--unpack does not apply to --xar-toc."
         case .decompressWithoutXarToc:
@@ -192,24 +192,13 @@ struct Hasher: ParsableCommand {
             }
         }
 
-        // Flags that are silently ignored outside the mode they belong to.
-        if self.hash.exact, self.symbolOptions.symhash || self.xarOptions.xarToc {
-            throw ValidationError(HashOptionError.exactWithIncompatibleMode)
-        }
-        if self.hash.unsign, self.symbolOptions.symhash || self.xarOptions.xarToc {
-            throw ValidationError(HashOptionError.unsignWithIncompatibleMode)
-        }
-        if self.hash.unpack, self.xarOptions.xarToc {
-            throw ValidationError(HashOptionError.unpackWithXarToc)
-        }
-        if self.xarOptions.decompress, !self.xarOptions.xarToc {
-            throw ValidationError(HashOptionError.decompressWithoutXarToc)
-        }
         // A target is compared with --algo, whose digests it must be shaped like, or without --algo with the algorithm
         // its shape names: one shaped like none would scan everything and match nothing.
         for target in self.matchOptions.match where !Targets.fits(target, self.hash.algo) {
             throw ValidationError(self.hash.algo.map { HashOptionError.targetNotOfAlgorithm(target, $0) } ?? .targetOfNoShape(target))
         }
+
+        // Match mode
         if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.tlsh) {
             throw ValidationError(HashOptionError.xlenWithoutTLSHTarget)
         }
@@ -225,11 +214,31 @@ struct Hasher: ParsableCommand {
         if self.matchOptions.score != nil, self.matchOptions.match.isEmpty {
             throw ValidationError(HashOptionError.scoreWithoutMatch)
         }
-        if self.symbolOptions.separator != nil, !self.symbolOptions.symhash {
-            throw ValidationError(HashOptionError.separatorWithoutSymHash)
+
+        // Symbol mode
+        if !self.symbolOptions.symhash {
+            if self.symbolOptions.separator != nil {
+                throw ValidationError(HashOptionError.separatorWithoutSymHash)
+            }
+            if self.symbolOptions.order != nil {
+                throw ValidationError(HashOptionError.orderWithoutSymHash)
+            }
         }
-        if self.symbolOptions.order != nil, !self.symbolOptions.symhash {
-            throw ValidationError(HashOptionError.orderWithoutSymHash)
+
+        // XAR TOC mode
+        if self.xarOptions.xarToc {
+            // The Mach-O edits mean nothing to a XAR archive.
+            if self.hash.exact {
+                throw ValidationError(HashOptionError.exactWithXarToc)
+            }
+            if self.hash.unsign {
+                throw ValidationError(HashOptionError.unsignWithXarToc)
+            }
+            if self.hash.unpack {
+                throw ValidationError(HashOptionError.unpackWithXarToc)
+            }
+        } else if self.xarOptions.decompress {
+            throw ValidationError(HashOptionError.decompressWithoutXarToc)
         }
     }
 
@@ -286,16 +295,13 @@ extension Hasher {
 // MARK: - Option Groups
 
 struct HasherOptions: ParsableArguments {
-    @Option(name: .shortAndLong, help: "Hash algorithm")
+    @Option(name: .shortAndLong, help: ArgumentHelp("Hash algorithm", valueName: "algorithm"))
     var algo: Algorithm?
 
-    @Flag(name: .shortAndLong, help: "Quiet mode: digest(s) or matched path(s) only.")
-    var quiet = false
-
-    @Flag(help: "Hash individual Mach-O architectures.")
+    @Flag(name: [.customShort("t"), .customLong("thin"), .long], help: "Hash individual Mach-O architectures.")
     var slices = false
 
-    @Flag(name: .shortAndLong, help: "Hash an exact Mach-O image, dropping appended bytes.")
+    @Flag(name: [.short, .long, .customLong("strict")], help: "Hash an exact Mach-O image, dropping appended bytes.")
     var exact = false
 
     @Flag(name: [.customShort("i"), .long], help: "Hash a Mach-O image, removing the code signature.")
