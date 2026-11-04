@@ -32,7 +32,11 @@ struct Thinner: ParsableCommand {
 }
 
 struct ThinnerOptions: ParsableArguments {
-    @Flag(name: .shortAndLong, help: "Read the exact Mach-O image, dropping appended bytes.")
+#if SECURITY_STRICT_VALIDATION
+    @Flag(name: [.short, .long, .customLong("strict")], help: "Read an exact Mach-O image, dropping appended bytes.")
+#else
+    @Flag(name: .shortAndLong, help: "Read an exact Mach-O image, dropping appended bytes.")
+#endif
     var exact = false
 
     @Flag(name: [.customShort("i"), .long], help: "Read and restore a Mach-O image, removing the code signature.")
@@ -41,7 +45,7 @@ struct ThinnerOptions: ParsableArguments {
     @Flag(name: [.customShort("p"), .long], help: "Read and restore a UPX-packed Mach-O image, unpacked without UPX.")
     var unpack = false
 
-    @Flag(name: .shortAndLong, help: "Verify a Mach-O image for anomalies")
+    @Flag(name: .shortAndLong, help: "Verify a Mach-O image for anomalies.")
     var verify = false
 
     @Flag(name: .shortAndLong, help: "Write the artifacts beside the file, rename conflicting file.")

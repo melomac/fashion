@@ -301,7 +301,11 @@ struct HasherOptions: ParsableArguments {
     @Flag(name: [.customShort("t"), .customLong("thin"), .long], help: "Hash individual Mach-O architectures.")
     var slices = false
 
+#if SECURITY_STRICT_VALIDATION
     @Flag(name: [.short, .long, .customLong("strict")], help: "Hash an exact Mach-O image, dropping appended bytes.")
+#else
+    @Flag(name: .shortAndLong, help: "Hash an exact Mach-O image, dropping appended bytes.")
+#endif
     var exact = false
 
     @Flag(name: [.customShort("i"), .long], help: "Hash a Mach-O image, removing the code signature.")
