@@ -104,6 +104,17 @@ fuzzer_runtime() {
 build() {
     local runtime
     runtime=$(fuzzer_runtime)
+
+    # The products are remade when their sources are newer, which a toolchain update leaves as they are, though a
+    # module built under one SDK or compiler is refused by the next. The compiler and the SDK are stamped in the
+    # tree, and everything built goes when the stamp changes; the corpora, logs and artifacts stay.
+    local toolchain
+    toolchain=$(xcrun swiftc -version 2>&1 | head -1; xcrun -sdk macosx --show-sdk-version)
+    if [ "$(cat "$build/toolchain" 2>/dev/null)" != "$toolchain" ]; then
+        rm -rf "$build/modules" "$build/objects" "$build/strict" "$build/segments" "${bin:?}"
+        mkdir -p "$build"
+        echo "$toolchain" > "$build/toolchain"
+    fi
     mkdir -p "$build/modules" "$build/objects" "$bin"
 
     # swiftc as SwiftPM runs it for the package, plus the sanitizers for the code under test.
