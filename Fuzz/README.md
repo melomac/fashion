@@ -57,9 +57,11 @@ included, since it names them all up front.
 A run adds to the corpora, mostly units that differ from another by a comparison operand, which value profiling
 keeps and which pile up over days to where a worker starts near its memory limit. `make fuzz-merge` merges each
 corpus into an empty one, keeping what reaches an edge the rest does not, and with `FUZZ_FROM` takes another tree's
-corpora in the same way, which is how a tree moves. A reseed merges the corpora grown so far into the seeded ones, so
-new fixtures cost no coverage. `make fuzz-clean` drops the corpora, logs and artifacts and keeps the binaries: the
-next run seeds and reports from nothing.
+corpora in the same way, which is how a tree moves; the harnesses merge in parallel, as many as the cores hold, and
+the binaries run with Swift's hashing seed fixed, fuzzing and merging alike, so that a unit reaches the same edges
+every time and a merge of the same units twice keeps the same set. A reseed merges the corpora grown so far into the
+seeded ones, so new fixtures cost no coverage. `make fuzz-clean` drops the corpora, logs and artifacts and keeps the
+binaries: the next run seeds and reports from nothing.
 
 The corpora are seeded with every fixture the tests build (hand-made, compiled or codesigned: `FASHION_FIXTURES` in
 TestHelpers.swift keeps them while `swift test` runs), with `/bin/ls` whole and by slice, with a XAR of this directory,
