@@ -34,6 +34,12 @@ logs=$build/logs
 jobs=${FUZZ_JOBS:-2}
 cores=${FUZZ_CORES:-$(sysctl -n hw.ncpu)}
 
+# Swift seeds its hashing per process, so code that walks a Set or a Dictionary takes its branches in another order
+# each run, and libFuzzer, counting branch hits, sees features come and go: the same units merged twice into nothing
+# kept 1753 then 1756 of verify's, 1736 in both, where with the seed fixed both passes kept the same 1730. The
+# binaries run with it fixed, fuzzing and merging alike, so a unit reaches the same edges every time.
+export SWIFT_DETERMINISTIC_HASHING=1
+
 # The harnesses: each is Fuzz/<name>.swift, with an LLVMFuzzerTestOneInput, and fuzzes corpus/<name>.
 harnesses="macho cdhash xar symhash diff bytehash unpack decompress verify signer der"
 
@@ -372,48 +378,84 @@ PYTHON
     done
 }
 
+# One harness's corpus merged: from `$2`, a directory of corpora, into this tree's, or into an empty one that takes its
+# place when `$2` is empty; under each binary of the harness in turn, the second seeing what the first kept.
+merge_one() {
+    local harness=$1 from=$2 name source target before count
+    if [ -n "$from" ]; then
+        source=$from/$harness
+        target=$corpus/$harness
+        [ -d "$source" ] || return 0
+        mkdir -p "$target"
+    else
+        source=$corpus/$harness
+        target=$source.merging
+        [ -d "$source" ] || return 0
+        rm -rf "$target"
+        mkdir -p "$target"
+    fi
+    before=$(ls "$target" | wc -l | tr -d ' ')
+    count=$(ls "$source" | wc -l | tr -d ' ')
+    for name in $(binaries "$harness"); do
+        mkdir -p "$artifacts/$name"
+        "$bin/$name" -merge=1 -max_len="$(max_len "$harness")" -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" \
+            -artifact_prefix="$artifacts/$name/" "$target" "$source" > "$logs/merge-$name.log" 2>&1 ||
+            echo "merging $source under $name failed, see $logs/merge-$name.log" >&2
+    done
+    if [ -n "$from" ]; then
+        echo "$target: $(($(ls "$target" | wc -l | tr -d ' ') - before)) of $source's $count units added"
+    else
+        rm -rf "$source"
+        mv "$target" "$source"
+        echo "$source: $(ls "$source" | wc -l | tr -d ' ') of its $count units kept"
+    fi
+}
+
 # The corpora of another tree, $1 (its corpus/<harness>, or <harness> under it), merged into these: libFuzzer runs
 # each of its units once under each binary of the harness and keeps those that reach an edge the corpus here does
 # not, so a tree's gains move without its bulk. Without a tree, each corpus is merged into an empty one that takes
 # its place: minimized. Edges alone decide, not the comparison operands value profiling keeps, which a run finds
 # again within its first minute; a unit that crashes or times out is left out and its artifact written.
 merge() {
-    local from=${1:-} harness name source target before count
-    if [ -n "$from" ]; then
-        shift
-        if [ -d "$from/corpus" ]; then
-            from=$from/corpus
-        fi
+    # A tree is whatever the first argument names that is no harness; what follows names the harnesses.
+    local from= harness running=0
+    if [ -n "${1:-}" ]; then
+        case " $harnesses " in
+            *" $1 "*) ;;
+            *)
+                from=$1
+                shift
+                if [ -d "$from/corpus" ]; then
+                    from=$from/corpus
+                fi
+                if [ ! -d "$from" ]; then
+                    echo "no tree at $from, nor a harness of that name; there are: $harnesses" >&2
+                    exit 2
+                fi
+                ;;
+        esac
     fi
-    mkdir -p "$logs"
-    for harness in ${*:-$harnesses}; do
-        if [ -n "$from" ]; then
-            source=$from/$harness
-            target=$corpus/$harness
-            [ -d "$source" ] || continue
-            mkdir -p "$target"
-        else
-            source=$corpus/$harness
-            target=$source.merging
-            rm -rf "$target"
-            mkdir -p "$target"
-        fi
-        before=$(ls "$target" | wc -l | tr -d ' ')
-        count=$(ls "$source" | wc -l | tr -d ' ')
-        for name in $(binaries "$harness"); do
-            mkdir -p "$artifacts/$name"
-            "$bin/$name" -merge=1 -max_len="$(max_len "$harness")" -rss_limit_mb=2048 -malloc_limit_mb="$(malloc_limit "$harness")" \
-                -artifact_prefix="$artifacts/$name/" "$target" "$source" > "$logs/merge-$name.log" 2>&1 ||
-                echo "merging $source under $name failed, see $logs/merge-$name.log" >&2
-        done
-        if [ -n "$from" ]; then
-            echo "$target: $(($(ls "$target" | wc -l | tr -d ' ') - before)) of $source's $count units added"
-        else
-            rm -rf "$source"
-            mv "$target" "$source"
-            echo "$source: $(ls "$source" | wc -l | tr -d ' ') of its $count units kept"
-        fi
+    for harness in "$@"; do
+        case " $harnesses " in
+            *" $harness "*) ;;
+            *)
+                echo "no harness named $harness; there are: $harnesses" >&2
+                exit 2
+                ;;
+        esac
     done
+    mkdir -p "$logs"
+    # A merge runs one process, so as many harnesses go at once as there are cores, the rest as those end; each says
+    # its line as it ends, so the lines come in that order.
+    for harness in ${*:-$harnesses}; do
+        if [ "$running" -ge "$cores" ]; then
+            wait
+            running=0
+        fi
+        merge_one "$harness" "$from" &
+        running=$((running + 1))
+    done
+    wait
 }
 
 run() {
