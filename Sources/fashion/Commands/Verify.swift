@@ -64,7 +64,7 @@ extension Verify {
             logger.notice("\(arch.map { "\(path) (\($0))" } ?? path, privacy: .public): \(finding, privacy: .public)")
             lines.append(Line(text: "\(OutputFormatter.formatPath(path))\(arch.map { " (\($0))" } ?? ""): \(finding)"))
         } refused: { error, arch in
-            lines.append(reporter.report(path: "\(path)\(arch.map { " (\($0))" } ?? "")", message: File.message(for: error), tint: Digester.tint(for: error)))
+            lines.append(reporter.report(path: arch.map { "\(path) (\($0))" } ?? path, error: error))
         }
         return quiet ? Line.quiet(lines, naming: path) : lines
     }

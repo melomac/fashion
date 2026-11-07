@@ -24,8 +24,8 @@ import System
  QoS userInitiated                  64 paths          QoS userInitiated
  +--------------------------+       +---------+       +--------------------------------+
  | FileWalker (fts)         |  put  |         |  take | output.started(index, path)    |
- | unsorted: as found       |------>| (index, |------>| work(path), hash: Digester     |
- | --sort: roots in natural |       |  path)  |       |   digests(path), by mode:      |
+ | unsorted: as found       |------>| (index, |------>| open(path), work(file):        |
+ | --sort: roots in natural |       |  path)  |       |   hash: digests(file) by mode: |
  | order, each directory    |       |         |       |     symhash | xar-toc |        |
  | by fashion_fts_compare   |       +---------+       |     cdhash | slices | file     |
  | walk errors -> Reporter  |                         |   -> [DigestResult]            |
@@ -554,6 +554,31 @@ final class Reporter: @unchecked Sendable {
     }
 
     /**
+     A path that could not be worked on, for `error`: after the architecture of the slice at fault, in a universal
+     file (`subject(_:of:)`), with the message as `File.message(for:)` has it, red for a file whose own bytes are
+     malformed and yellow for any other failure (`tint(for:)`).
+     */
+    func report(path: String, error: Error) -> Line {
+        self.report(path: Self.subject(path, of: error), message: File.message(for: error), tint: Self.tint(for: error))
+    }
+
+    /// What a diagnostic about `error` names: the file, or the architecture of the slice at fault in a universal one.
+    static func subject(_ path: String, of error: Error) -> String {
+        (error as? SliceError).map { "\(path) (\($0.arch))" } ?? path
+    }
+
+    /**
+     Red for a file whose own bytes are malformed: its Mach-O, signature or XAR does not parse, or goes past a limit only
+     a crafted file reaches. Yellow for any other failure: the file could not be read, or changed while it was hashed.
+     */
+    static func tint(for error: Error) -> Tint {
+        if let slice = error as? SliceError {
+            return self.tint(for: slice.error)
+        }
+        return error is ParserError || error is CDHashError || error is XARParser.XARError || error is UnpackError ? .malformed : .error
+    }
+
+    /**
      A file that was hashed but deserves a second look, like a failure but uncounted: it leaves the exit status alone.
      */
     func warn(path: String, message: String) -> Line {
@@ -998,7 +1023,7 @@ struct Digester {
         do {
             results = try self.digests(file, reporter: reporter) { diagnostics.append($0) }
         } catch {
-            return diagnostics + [reporter.report(path: Self.subject(path, of: error), message: File.message(for: error), tint: Self.tint(for: error))]
+            return diagnostics + [reporter.report(path: path, error: error)]
         }
 
         var lines: [Line] = []
@@ -1055,25 +1080,9 @@ struct Digester {
         return .match(distance: Double(score) / Double(max(min(self.score, 300), 1)))
     }
 
-    /**
-     Red for a file whose own bytes are malformed: its Mach-O, signature or XAR does not parse, or goes past a limit only
-     a crafted file reaches. Yellow for any other failure: the file could not be read, or changed while it was hashed.
-     */
-    static func tint(for error: Error) -> Tint {
-        if let slice = error as? SliceError {
-            return self.tint(for: slice.error)
-        }
-        return error is ParserError || error is CDHashError || error is XARParser.XARError || error is UnpackError ? .malformed : .error
-    }
-
     /// Whether `error` is UPX data that does not hold, in the file or in a slice of a universal one.
-    static func isUnpackError(_ error: Error) -> Bool {
+    private static func isUnpackError(_ error: Error) -> Bool {
         error is UnpackError || (error as? SliceError)?.error is UnpackError
-    }
-
-    /// What a diagnostic about `error` names: the file, or the architecture of the slice at fault in a universal one.
-    static func subject(_ path: String, of error: Error) -> String {
-        (error as? SliceError).map { "\(path) (\($0.arch))" } ?? path
     }
 
     // MARK: - Digests
@@ -1113,13 +1122,13 @@ struct Digester {
                 // Packed data that does not hold, or an image unpacked from it that does not, in the file or a slice
                 // of a universal one: the file is hashed packed, every slice of it, the ones that unpacked included;
                 // with --unsign, its signatures out. unpack writes what decompressed under --keep.
-                let subject = Self.subject(path, of: error)
+                let subject = Reporter.subject(path, of: error)
                 note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")hashed packed"))
                 return self.unsign || self.exact ? edit(unsign: self.unsign, unpack: false) : nil
             } catch {
                 refused = true
                 refusedSlice = error is SliceError
-                let subject = Self.subject(path, of: error)
+                let subject = Reporter.subject(path, of: error)
                 note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")\(fate)"))
                 return nil
             }
@@ -1184,12 +1193,12 @@ struct Digester {
                 do {
                     return try SymHash.compute(read, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
                 } catch {
-                    let subject = Self.subject(path, of: error)
+                    let subject = Reporter.subject(path, of: error)
                     note(reporter.warn(path: subject, message: "\(File.message(for: error)), no symhash as it is"))
                     return []
                 }
             }, digests: { bytes, label in
-                try (SymHash.digests(of: bytes, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(label, $0) }), { try ArtifactWriter.identity(of: bytes) })
+                (try SymHash.digests(of: bytes, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(label, $0) }), nil)
             })
         case let .xarToc(hashes, decompress):
             return try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { caveat(nil, $0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
@@ -1232,8 +1241,8 @@ struct Digester {
      `unsigned`, `x86_64`, `x86_64, exact, unsigned`: a digest matches an artifact's and tells which state it is, in
      every mode, --slices or not. `whole` makes the first lines, the file as it is on disk, which a file nothing was
      done to prints alone, as it always did. `digests` makes one state's digests, of its bytes or of their symbols,
-     with the state's size and SHA-256 for the comparison below: the byte hashes have them from the read that digested
-     the state, a symhash takes a read of its own when a file is in place.
+     with the state's size and SHA-256 for the comparison below where the read that digested the state has them, as
+     the byte hashes' does, or nil, as a symhash's, which then takes a read of its own when a file is in place.
 
      A file found in place of an artifact, `ls_x86_64_unsigned` beside `ls`, is compared to the state by size and
      SHA-256, as `thinr` compares before writing: the same bytes are noted in the unified log; different ones are
@@ -1241,11 +1250,11 @@ struct Digester {
      artifact shows beside its state and matches by what it holds. A file in place that cannot be read is said the
      same way, and the state stands.
      */
-    private func artifactDigests(_ artifacts: [Artifact], of path: String, reporter: Reporter, note: (Line) -> Void, whole: () throws -> [DigestResult], digests: (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: () throws -> ArtifactWriter.Identity)) throws -> [DigestResult] {
+    private func artifactDigests(_ artifacts: [Artifact], of path: String, reporter: Reporter, note: (Line) -> Void, whole: () throws -> [DigestResult], digests: (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?)) throws -> [DigestResult] {
         var results = try whole()
         for artifact in artifacts {
             let label = artifact.label
-            let state: (digests: [(hash: ByteHash, digest: String)], identity: () throws -> ArtifactWriter.Identity)
+            let state: (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?)
             do {
                 state = try digests(artifact.bytes, label)
             } catch {
@@ -1261,7 +1270,7 @@ struct Digester {
                     continue
                 }
                 let identity = try ArtifactWriter.identity(of: found)
-                let expected = try state.identity()
+                let expected = try state.identity ?? ArtifactWriter.identity(of: artifact.bytes)
                 guard identity != expected else {
                     logger.info("\(target, privacy: .public): in place, \(identity.description, privacy: .public)")
                     continue
@@ -1279,12 +1288,12 @@ struct Digester {
      What `artifactDigests` digests a state's bytes by under the byte hashes: `hashes`, and SHA-256 for the comparison
      with a file in place, in the one read; `caveat` hears what TLSH leaves out, after the state's label.
      */
-    private static func byteDigests(_ hashes: [ByteHash], caveat: @escaping (_ arch: String?, _ message: String) -> Void) -> (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: () throws -> ArtifactWriter.Identity) {
+    private static func byteDigests(_ hashes: [ByteHash], caveat: @escaping (_ arch: String?, _ message: String) -> Void) -> (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?) {
         let hashed = hashes.contains { $0.algorithm == .sha256 } ? hashes : hashes + [ByteHash(.sha256)!] // nil for cdhash alone
         return { bytes, label in
             let all = try ByteHash.digests(hashed, bytes, caveat: { caveat(label, $0) })
             let digest = all.first { $0.hash.algorithm == .sha256 }?.digest ?? ""
-            return (all.filter { digest in hashes.contains { $0.algorithm == digest.hash.algorithm } }, { ArtifactWriter.Identity(size: bytes.size, digest: digest) })
+            return (all.filter { digest in hashes.contains { $0.algorithm == digest.hash.algorithm } }, ArtifactWriter.Identity(size: bytes.size, digest: digest))
         }
     }
 

@@ -92,6 +92,9 @@ struct ArtifactWriter {
     /// Whether what decompressed of a UPX image that fails a check is written as it is, `_decompressed`, to look at by
     /// hand.
     var keep = false
+    /// Whether the file is named once, its own path, for its artifacts' lines, as --quiet shortens standard output;
+    /// what is reported about it stands (`Line.quiet`).
+    var quiet = false
 
     /// What is done with an artifact.
     enum Mode {
@@ -112,11 +115,11 @@ struct ArtifactWriter {
      whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead,
      after the architecture of the slice at fault in a universal file, and nothing is written, but what decompressed
      of a UPX image under `keep`, before the report. An image a modified UPX packed is warned about before its
-     artifacts, which are written.
+     artifacts, which are written. With `quiet`, the file's path stands for its artifacts' lines, once.
      */
     func lines(for read: File, reporter: Reporter) -> [Line] {
         let path = read.path
-        let artifacts: [Artifact]
+        let lines: [Line]
         var caveats: [Line] = []
         // What decompressed of an image that fails a check, or decoded under no key where a key was applied, under
         // keep, named for its slice and the edits before it.
@@ -129,13 +132,13 @@ struct ArtifactWriter {
                 kept.append(Artifact(name: (arch.map { [$0] } ?? []) + edits.words, bytes: File(editing: read, pieces: [.bytes(data)])))
             } : nil) : nil
             let source = edited?.source ?? read
-            artifacts = try self.split ? Self.slices(of: source, exact: self.exact, states: edited?.states, archs: edited?.archs) : Self.whole(edited?.file ?? source, exact: self.exact, states: edited?.states)
+            let artifacts = try self.split ? Self.slices(of: source, exact: self.exact, states: edited?.states, archs: edited?.archs) : Self.whole(edited?.file ?? source, exact: self.exact, states: edited?.states)
+            lines = caveats + self.written(kept + artifacts, for: path, reporter: reporter)
         } catch {
             // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
-            return caveats + self.written(kept, for: path, reporter: reporter) + [reporter.report(path: Digester.subject(path, of: error), message: File.message(for: error), tint: Digester.tint(for: error))]
+            lines = caveats + self.written(kept, for: path, reporter: reporter) + [reporter.report(path: path, error: error)]
         }
-
-        return caveats + self.written(kept + artifacts, for: path, reporter: reporter)
+        return self.quiet ? Line.quiet(lines, naming: path) : lines
     }
 
     /// The lines for `artifacts` written beside `path`, each named after it with its suffix: its path, or what kept it
@@ -380,7 +383,7 @@ struct ArtifactWriter {
     }
 
     /**
-     The regular file under `path`, for hash mode to compare to the state it stands for (`Digester.sliceDigests`):
+     The regular file under `path`, for hash mode to compare to the state it stands for (`Digester.artifactDigests`):
      nil where there is none, or something else, a symbolic link say, which is left alone as `write` leaves it.
      */
     static func inPlace(at path: String) throws -> File? {

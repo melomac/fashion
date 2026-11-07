@@ -398,10 +398,10 @@ final class RunnerTests: XCTestCase {
         var data = Data()
         [MH_MAGIC_64, UInt32(bitPattern: CPU_TYPE_ARM64), 0, UInt32(MH_EXECUTE), 1, 0x1000, 0, 0].forEach { data.appendUInt32($0) }
         XCTAssertThrowsError(try Universal.open(data: data)) { error in
-            XCTAssertEqual(Digester.tint(for: error).sgr(), "31")
+            XCTAssertEqual(Reporter.tint(for: error).sgr(), "31")
         }
-        XCTAssertEqual(Digester.tint(for: Errno.permissionDenied).sgr(), "33")
-        XCTAssertEqual(Digester.tint(for: FileError.replaced).sgr(), "33")
+        XCTAssertEqual(Reporter.tint(for: Errno.permissionDenied).sgr(), "33")
+        XCTAssertEqual(Reporter.tint(for: FileError.replaced).sgr(), "33")
     }
 
     /**

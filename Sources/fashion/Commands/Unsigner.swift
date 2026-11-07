@@ -61,15 +61,18 @@ extension Unsigner {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Unsign\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.scan.quiet ? " quiet" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (write, quiet) = (self.unsign.write, self.scan.quiet)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "unsigning") { Self.lines(for: $0, write: write, quiet: quiet, reporter: $1) }
+        let writer = ArtifactWriter(self)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "unsigning") { writer.lines(for: $0, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
+}
 
-    /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unsigned, whole; `quiet` as
-    /// `Line.quiet(_:naming:)`.
-    static func lines(for file: File, write: Bool, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        let lines = ArtifactWriter(exact: false, unsign: true, unpack: false, split: false, mode: write ? .replace : .write).lines(for: file, reporter: reporter)
-        return quiet ? Line.quiet(lines, naming: file.path) : lines
+extension ArtifactWriter {
+    /**
+     The writer `unsign` scans with, built once from the command: the file whole, without its signatures, written,
+     and a different file under the artifact's name replaced with --write.
+     */
+    init(_ command: Unsigner) {
+        self.init(exact: false, unsign: true, unpack: false, split: false, mode: command.unsign.write ? .replace : .write, quiet: command.scan.quiet)
     }
 }

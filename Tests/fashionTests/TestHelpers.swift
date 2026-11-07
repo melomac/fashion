@@ -561,7 +561,9 @@ func residentBytes() -> Int {
 
 /**
  The work on one file over its path, as the scan hands the work the file it opened (`ScanOptions.open(_:reporter:work:)`):
- the lines for the file at `path`, or the report of a path that cannot be opened, which the work does not see.
+ the lines for the file at `path`, or the report of a path that cannot be opened, which the work does not see. The
+ artifact commands' work is the writer each builds from its flags (`ArtifactWriter.init(_:)`), the flags parsed as the
+ command line gives them.
  */
 extension Digester {
     func lines(for path: String, reporter: Reporter) -> [Line] {
@@ -570,20 +572,26 @@ extension Digester {
 }
 
 extension Thinner {
-    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, write: Bool, keep: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, exact: exact, unsign: unsign, unpack: unpack, write: write, keep: keep, quiet: quiet, reporter: reporter) }
+    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, write: Bool, keep: Bool = false, quiet: Bool = false, reporter: Reporter) throws -> [Line] {
+        let flags = [(exact, "--exact"), (unsign, "--unsign"), (unpack, "--unpack"), (write, "--write"), (keep, "--keep"), (quiet, "--quiet")].filter(\.0).map(\.1)
+        let writer = try ArtifactWriter(Thinner.parse(flags + [path]))
+        return ScanOptions.open(path, reporter: reporter) { writer.lines(for: $0, reporter: reporter) }
     }
 }
 
 extension Unsigner {
-    static func lines(for path: String, write: Bool, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, write: write, quiet: quiet, reporter: reporter) }
+    static func lines(for path: String, write: Bool, quiet: Bool = false, reporter: Reporter) throws -> [Line] {
+        let flags = [(write, "--write"), (quiet, "--quiet")].filter(\.0).map(\.1)
+        let writer = try ArtifactWriter(Unsigner.parse(flags + [path]))
+        return ScanOptions.open(path, reporter: reporter) { writer.lines(for: $0, reporter: reporter) }
     }
 }
 
 extension Unpacker {
-    static func lines(for path: String, write: Bool, keep: Bool = false, unsign: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, write: write, keep: keep, unsign: unsign, quiet: quiet, reporter: reporter) }
+    static func lines(for path: String, write: Bool, keep: Bool = false, unsign: Bool = false, quiet: Bool = false, reporter: Reporter) throws -> [Line] {
+        let flags = [(write, "--write"), (keep, "--keep"), (unsign, "--unsign"), (quiet, "--quiet")].filter(\.0).map(\.1)
+        let writer = try ArtifactWriter(Unpacker.parse(flags + [path]))
+        return ScanOptions.open(path, reporter: reporter) { writer.lines(for: $0, reporter: reporter) }
     }
 }
 

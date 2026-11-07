@@ -74,15 +74,19 @@ extension Unpacker {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Unpack\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.scan.quiet ? " quiet" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (write, keep, unsign, quiet) = (self.unpack.write, self.unpack.keep, self.unpack.unsign, self.scan.quiet)
-        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { Self.lines(for: $0, write: write, keep: keep, unsign: unsign, quiet: quiet, reporter: $1) }
+        let writer = ArtifactWriter(self)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "unpacking") { writer.lines(for: $0, reporter: $1) }
         return run.errorCount > 0 ? 2 : 0
     }
+}
 
-    /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unpacked, whole, and with `unsign` the
-    /// signature the unpacked image kept out too; `quiet` as `Line.quiet(_:naming:)`.
-    static func lines(for file: File, write: Bool, keep: Bool = false, unsign: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        let lines = ArtifactWriter(exact: false, unsign: unsign, unpack: true, split: false, mode: write ? .replace : .write, keep: keep).lines(for: file, reporter: reporter)
-        return quiet ? Line.quiet(lines, naming: file.path) : lines
+extension ArtifactWriter {
+    /**
+     The writer `unpack` scans with, built once from the command: the file whole, what UPX packed unpacked, with
+     --unsign the signature the unpacked image kept out too, written, and a different file under the artifact's name
+     replaced with --write.
+     */
+    init(_ command: Unpacker) {
+        self.init(exact: false, unsign: command.unpack.unsign, unpack: true, split: false, mode: command.unpack.write ? .replace : .write, keep: command.unpack.keep, quiet: command.scan.quiet)
     }
 }

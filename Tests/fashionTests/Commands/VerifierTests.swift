@@ -325,7 +325,7 @@ final class VerifierTests: XCTestCase {
         _ = try codesign(["--remove-signature", apple.path])
         let vmsize = try XCTUnwrap(XCTUnwrap(MachO(File(path: apple.path))).findSegment("__LINKEDIT")).load(segment_command_64.self).vmsize
         self.assertVerify(apple.path, ["\(apple.path): __LINKEDIT's vmsize \(vmsize.hex) is a signature's 16 KiB rounding on an image without one: a signature came out"])
-        XCTAssertEqual(Unsigner.lines(for: signed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"])
+        XCTAssertEqual(try Unsigner.lines(for: signed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"])
         self.assertVerify(signed.path + "_unsigned", [])
 
         // A stripped image built for macOS 10.13 records no linker, since ld writes LC_VERSION_MIN_MACOSX for it; its
@@ -1277,9 +1277,10 @@ final class VerifierTests: XCTestCase {
         try program.write(to: file)
         let reporter = Reporter(console: Console())
         let digester = try Digester(Hasher.parse([file.path, "--quiet"]))
+        let thinner = try ArtifactWriter(Thinner.parse([file.path]))
         var opened: [File] = []
         XCTAssertEqual(ScanOptions.open(file.path, reporter: reporter) { opened.append($0); return digester.lines(for: $0, reporter: reporter) }.count, 1)
-        XCTAssertTrue(ScanOptions.open(file.path, reporter: reporter) { opened.append($0); return Thinner.lines(for: $0, exact: false, unsign: false, unpack: false, write: false, reporter: reporter) }.filter(\.diagnostic).isEmpty)
+        XCTAssertTrue(ScanOptions.open(file.path, reporter: reporter) { opened.append($0); return thinner.lines(for: $0, reporter: reporter) }.filter(\.diagnostic).isEmpty)
         XCTAssertEqual(opened.map(\.path), [file.path, file.path])
         XCTAssertEqual(opened.map(\.size), [program.count, program.count])
         XCTAssertEqual(reporter.errorCount, 0)

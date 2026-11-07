@@ -102,9 +102,9 @@ extension Thinner {
     func scan(trapSignals: Bool = false) -> Int32 {
         logger.info("Thin\(self.scan.sort ? " sorted" : "", privacy: .public)\(self.thin.exact ? " exact" : "", privacy: .public)\(self.thin.unsign ? " unsign" : "", privacy: .public)\(self.thin.unpack ? " unpack" : "", privacy: .public)\(self.thin.keep ? " keep" : "", privacy: .public)\(self.thin.verify ? " verifying" : "", privacy: .public)\(self.scan.quiet ? " quiet" : "", privacy: .public) with \(String(self.scan.resolvedJobs, pluralizing: "job"), privacy: .public) in \(String(self.scan.paths.count, pluralizing: "path"), privacy: .public): \(self.scan.paths.joined(separator: ", "), privacy: .public)")
 
-        let (exact, unsign, unpack, write, keep, quiet, verify) = (self.thin.exact, self.thin.unsign, self.thin.unpack, self.thin.write, self.thin.keep, self.scan.quiet, self.thin.verify)
+        let (writer, verify) = (ArtifactWriter(self), self.thin.verify)
         let run = self.scan.run(trapSignals: trapSignals, activity: "thinning") { file, reporter in
-            let lines = Self.lines(for: file, exact: exact, unsign: unsign, unpack: unpack, write: write, keep: keep, quiet: quiet, reporter: reporter)
+            let lines = writer.lines(for: file, reporter: reporter)
             if verify {
                 // The same descriptor, after the artifacts: what the log says is about the bytes that were thinned.
                 Verify.log(file)
@@ -113,11 +113,14 @@ extension Thinner {
         }
         return run.errorCount > 0 ? 2 : 0
     }
+}
 
-    /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` split: listed without `write`, written
-    /// and replaced with it. `quiet` keeps the diagnostics and puts the file's path, once, for the artifacts' paths.
-    static func lines(for file: File, exact: Bool, unsign: Bool, unpack: Bool, write: Bool, keep: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        let lines = ArtifactWriter(exact: exact, unsign: unsign, unpack: unpack, split: true, mode: write ? .replace : .list, keep: keep).lines(for: file, reporter: reporter)
-        return quiet ? Line.quiet(lines, naming: file.path) : lines
+extension ArtifactWriter {
+    /**
+     The writer `thinr` scans with, built once from the command as `Digester` is from `hash`: every state of each
+     slice split, listed without --write, written and replaced with it.
+     */
+    init(_ command: Thinner) {
+        self.init(exact: command.thin.exact, unsign: command.thin.unsign, unpack: command.thin.unpack, split: true, mode: command.thin.write ? .replace : .list, keep: command.thin.keep, quiet: command.scan.quiet)
     }
 }

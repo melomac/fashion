@@ -35,21 +35,21 @@ final class UnsignerTests: XCTestCase {
         }
         let reporter = Reporter(console: Console())
         let artifact = directory / "ls_unsigned"
-        XCTAssertEqual(Unsigner.lines(for: ls.path, write: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(try Unsigner.lines(for: ls.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         let unsigned = try Data(contentsOf: artifact)
         XCTAssertEqual(try self.hashLines(ls.path, ["--unsign"]).last, try ByteHash.sha256.digest(unsigned))
         XCTAssertEqual(try self.hashLines(artifact.path, ["--unsign"]), try [ByteHash.sha256.digest(unsigned)])
 
         // thin leaves the signed slices beside the unsigned ones: lipo gets the unsigned ones.
-        let slices = Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text).filter { $0.hasSuffix("_unsigned") }
+        let slices = try Thinner.lines(for: ls.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text).filter { $0.hasSuffix("_unsigned") }
         XCTAssertGreaterThan(slices.count, 1)
         let lipo = directory / "lipo"
         try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create"] + slices + ["-output", lipo.path]), "cannot run lipo")
         XCTAssertEqual(unsigned, try Data(contentsOf: lipo))
 
-        XCTAssertEqual(Unsigner.lines(for: artifact.path, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(try Unsigner.lines(for: artifact.path, write: false, reporter: reporter).count, 0)
         // A second run finds the artifact in place.
-        XCTAssertEqual(Unsigner.lines(for: ls.path, write: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(try Unsigner.lines(for: ls.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
@@ -100,9 +100,9 @@ final class UnsignerTests: XCTestCase {
         let reporter = Reporter(console: Console())
         let artifact = directory / "ls_unsigned"
 
-        XCTAssertEqual(Unsigner.lines(for: ls.path, write: false, quiet: true, reporter: reporter).map(\.text), [ls.path])
+        XCTAssertEqual(try Unsigner.lines(for: ls.path, write: false, quiet: true, reporter: reporter).map(\.text), [ls.path])
         XCTAssertTrue(FileManager.default.fileExists(atPath: artifact.path))
-        XCTAssertEqual(Unsigner.lines(for: artifact.path, write: false, quiet: true, reporter: reporter).count, 0)
+        XCTAssertEqual(try Unsigner.lines(for: artifact.path, write: false, quiet: true, reporter: reporter).count, 0)
         XCTAssertEqual(reporter.errorCount, 0)
         XCTAssertEqual(try Unsigner.parse(["-q", directory.path]).scan(), 0)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), ["ls", "ls_unsigned"])
@@ -126,17 +126,17 @@ final class UnsignerTests: XCTestCase {
         try Data("text\n".utf8).write(to: signed / "text")
 
         let reporter = Reporter(console: Console())
-        XCTAssertEqual(Unsigner.lines(for: (signed / "sample").path, write: false, reporter: reporter).map(\.text), [(signed / "sample_unsigned").path])
+        XCTAssertEqual(try Unsigner.lines(for: (signed / "sample").path, write: false, reporter: reporter).map(\.text), [(signed / "sample_unsigned").path])
         XCTAssertEqual(try Data(contentsOf: signed / "sample_unsigned"), data)
-        XCTAssertEqual(Unsigner.lines(for: original.path, write: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Unsigner.lines(for: (signed / "text").path, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(try Unsigner.lines(for: original.path, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(try Unsigner.lines(for: (signed / "text").path, write: false, reporter: reporter).count, 0)
         XCTAssertEqual(reporter.errorCount, 0)
 
         try FileManager.default.removeItem(at: signed / "sample_unsigned")
         let command = try XCTUnwrap(Fashion.parseAsRoot(["unsign", signed.path]) as? Unsigner)
         XCTAssertEqual(command.scan(), 0)
         XCTAssertEqual(try Data(contentsOf: signed / "sample_unsigned"), data)
-        XCTAssertEqual(Thinner.lines(for: (signed / "sample").path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text), [(signed / "sample_unsigned").path])
+        XCTAssertEqual(try Thinner.lines(for: (signed / "sample").path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text), [(signed / "sample_unsigned").path])
     }
 
     /**
@@ -154,11 +154,11 @@ final class UnsignerTests: XCTestCase {
         try (data + Data(repeating: 0x4a, count: 8)).write(to: padded)
 
         let reporter = Reporter(console: Console())
-        XCTAssertEqual(Unsigner.lines(for: padded.path, write: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Unpacker.lines(for: padded.path, write: false, reporter: reporter).count, 0)
-        XCTAssertEqual(Unsigner.lines(for: original.path, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(try Unsigner.lines(for: padded.path, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(try Unpacker.lines(for: padded.path, write: false, reporter: reporter).count, 0)
+        XCTAssertEqual(try Unsigner.lines(for: original.path, write: false, reporter: reporter).count, 0)
         let artifact = directory / "padded_exact"
-        XCTAssertEqual(Thinner.lines(for: padded.path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(try Thinner.lines(for: padded.path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter).map(\.text), [artifact.path])
         XCTAssertEqual(try Data(contentsOf: artifact), data)
         XCTAssertEqual(try self.hashLines(padded.path, ["--exact", "--unsign"]).last, try XCTUnwrap(ByteHash.sha256.digest(data)))
         XCTAssertEqual(reporter.errorCount, 0)
@@ -188,7 +188,7 @@ final class UnsignerTests: XCTestCase {
 
         let reporter = Reporter(console: Console())
         let artifact = directory / "fat_unsigned"
-        XCTAssertEqual(Unsigner.lines(for: fat.path, write: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(try Unsigner.lines(for: fat.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         let written = try Data(contentsOf: artifact)
         XCTAssertEqual(try self.hashLines(fat.path, ["--exact", "--unsign"]).last, try XCTUnwrap(ByteHash.sha256.digest(written)))
         guard case let .fat(archs) = try Universal.open(data: written), archs.count == 2 else {
@@ -197,7 +197,7 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(Universal.sliceData(fileData: written, arch: archs[0]), try Data(contentsOf: x86))
         XCTAssertEqual(Universal.sliceData(fileData: written, arch: archs[1]), armData + Data(repeating: 0x4a, count: 8))
 
-        let lines = Thinner.lines(for: fat.path, exact: true, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text)
+        let lines = try Thinner.lines(for: fat.path, exact: true, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text)
         XCTAssertEqual(Set(lines), Set(["fat_x86_64", "fat_x86_64_unsigned", "fat_arm64", "fat_arm64_exact"].map { (directory / $0).path }))
         XCTAssertEqual(try Data(contentsOf: directory / "fat_arm64_exact"), armData)
         XCTAssertEqual(try self.hashLines(fat.path, ["--exact", "--unsign", "--slices"]).last, try XCTUnwrap(ByteHash.sha256.digest(armData)))
@@ -224,7 +224,7 @@ final class UnsignerTests: XCTestCase {
 
         let reporter = Reporter(console: Console())
         let artifact = directory / "appended_exact_unsigned"
-        XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(try Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         XCTAssertEqual(try Data(contentsOf: artifact), data)
         XCTAssertEqual(reporter.errorCount, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: (directory / "appended_unsigned").path))
@@ -260,7 +260,7 @@ final class UnsignerTests: XCTestCase {
         XCTAssertEqual(try codesignArchs(file.path), ["x86_64", "arm64"])
         let reporter = Reporter(console: Console())
         let artifact = directory / "fat_unsigned"
-        XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [artifact.path])
+        XCTAssertEqual(try Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [artifact.path])
         let unsigned = try Data(contentsOf: artifact)
         XCTAssertEqual(UInt32(bigEndian: unsigned.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }), 1, "nfat_arch counts the x86_64 slice alone")
         guard case let .fat(archs) = try Universal.open(path: artifact.path) else {
@@ -294,7 +294,7 @@ final class UnsignerTests: XCTestCase {
         try data.write(to: file)
         let reporter = Reporter(console: Console())
         let refusal = "fashion: \(file.path): LC_CODE_SIGNATURE points inside the load commands"
-        XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [refusal])
+        XCTAssertEqual(try Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [refusal])
         XCTAssertEqual(reporter.errorCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_unsigned"))
         // Hash mode hashes the file as it is, the refusal a warning: the run succeeds.
@@ -366,7 +366,7 @@ final class UnsignerTests: XCTestCase {
             try FileManager.default.copyItem(at: file, to: oracle)
             _ = try codesign(["--remove-signature", oracle.path])
             let reporter = Reporter(console: Console())
-            XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_unsigned"], name)
+            XCTAssertEqual(try Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_unsigned"], name)
             let unsigned = try Data(contentsOf: URL(fileURLWithPath: file.path + "_unsigned"))
             XCTAssertEqual(unsigned, try roundTrip ? original : Data(contentsOf: oracle), name)
             XCTAssertEqual(unsigned.count, try Data(contentsOf: oracle).count, name)
@@ -385,7 +385,7 @@ final class UnsignerTests: XCTestCase {
             try crafted.write(to: file)
             XCTAssertNil(try XCTUnwrap(MachO(File(data: crafted))).removingSignature(end: crafted.count), name)
             let reporter = Reporter(console: Console())
-            XCTAssertEqual(Unsigner.lines(for: file.path, write: false, reporter: reporter).count, 0, name)
+            XCTAssertEqual(try Unsigner.lines(for: file.path, write: false, reporter: reporter).count, 0, name)
             _ = try execute("/usr/bin/codesign", ["--remove-signature", file.path])
             XCTAssertEqual(try Data(contentsOf: file), crafted, "\(name): codesign leaves it as it is")
         }

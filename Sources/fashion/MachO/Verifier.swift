@@ -1062,7 +1062,7 @@ struct MachOVerifier {
      line, or none.
      */
     private static func sizeClaim(_ packed: PackMach) -> [String] {
-        guard let sizes = packed.claimedSizes, sizes.pInfo != sizes.header else {
+        guard let sizes = (try? packed.claimedSizes()) ?? nil, sizes.pInfo != sizes.header else {
             return []
         }
         return ["UPX's p_info claims \(sizes.pInfo) bytes for the original where its pack header, under its checksum, says \(sizes.header)"]
