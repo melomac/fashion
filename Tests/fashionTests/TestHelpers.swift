@@ -600,3 +600,19 @@ extension Verify {
         ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, quiet: quiet, reporter: reporter) }
     }
 }
+
+/// The encoder the tests craft DER with, which the product only reads.
+extension DER {
+    /// `content` under `tag`, its length in the short form or the long one.
+    static func encode(_ tag: UInt8, _ content: Data) -> Data {
+        var encoded = Data([tag])
+        if content.count < 0x80 {
+            encoded.append(UInt8(content.count))
+        } else {
+            let bytes = withUnsafeBytes(of: UInt32(content.count).bigEndian) { Data($0) }.drop { $0 == 0 }
+            encoded.append(0x80 | UInt8(bytes.count))
+            encoded.append(contentsOf: bytes)
+        }
+        return encoded + content
+    }
+}
