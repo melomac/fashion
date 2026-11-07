@@ -275,10 +275,11 @@ extension Hasher {
         }
 
         let verify = self.hash.verify
-        let run = self.scan.run(trapSignals: trapSignals, activity: "hashing") { path, reporter in
-            let lines = digester.lines(for: path, reporter: reporter)
+        let run = self.scan.run(trapSignals: trapSignals, activity: "hashing") { file, reporter in
+            let lines = digester.lines(for: file, reporter: reporter)
             if verify {
-                Verify.log(path)
+                // The same descriptor, after the digests: what the log says is about the bytes that were hashed.
+                Verify.log(file)
             }
             return lines
         }

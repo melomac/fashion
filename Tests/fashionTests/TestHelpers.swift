@@ -558,3 +558,37 @@ func residentBytes() -> Int {
     }
     return status == KERN_SUCCESS ? Int(info.resident_size) : 0
 }
+
+/**
+ The work on one file over its path, as the scan hands the work the file it opened (`ScanOptions.open(_:reporter:work:)`):
+ the lines for the file at `path`, or the report of a path that cannot be opened, which the work does not see.
+ */
+extension Digester {
+    func lines(for path: String, reporter: Reporter) -> [Line] {
+        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, reporter: reporter) }
+    }
+}
+
+extension Thinner {
+    static func lines(for path: String, exact: Bool, unsign: Bool, unpack: Bool, write: Bool, keep: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
+        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, exact: exact, unsign: unsign, unpack: unpack, write: write, keep: keep, quiet: quiet, reporter: reporter) }
+    }
+}
+
+extension Unsigner {
+    static func lines(for path: String, write: Bool, quiet: Bool = false, reporter: Reporter) -> [Line] {
+        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, write: write, quiet: quiet, reporter: reporter) }
+    }
+}
+
+extension Unpacker {
+    static func lines(for path: String, write: Bool, keep: Bool = false, unsign: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
+        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, write: write, keep: keep, unsign: unsign, quiet: quiet, reporter: reporter) }
+    }
+}
+
+extension Verify {
+    static func lines(for path: String, quiet: Bool = false, reporter: Reporter) -> [Line] {
+        ScanOptions.open(path, reporter: reporter) { self.lines(for: $0, quiet: quiet, reporter: reporter) }
+    }
+}

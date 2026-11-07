@@ -114,14 +114,14 @@ struct ArtifactWriter {
      of a UPX image under `keep`, before the report. An image a modified UPX packed is warned about before its
      artifacts, which are written.
      */
-    func lines(for path: String, reporter: Reporter) -> [Line] {
+    func lines(for read: File, reporter: Reporter) -> [Line] {
+        let path = read.path
         let artifacts: [Artifact]
         var caveats: [Line] = []
         // What decompressed of an image that fails a check, or decoded under no key where a key was applied, under
         // keep, named for its slice and the edits before it.
         var kept: [Artifact] = []
         do {
-            let read = try File(path: path)
             // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it.
             let edited = try self.unsign || self.unpack || self.exact ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
                 caveats.append(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))

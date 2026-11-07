@@ -81,8 +81,8 @@ extension Unpacker {
 
     /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unpacked, whole, and with `unsign` the
     /// signature the unpacked image kept out too; `quiet` as `Line.quiet(_:naming:)`.
-    static func lines(for path: String, write: Bool, keep: Bool = false, unsign: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        let lines = ArtifactWriter(exact: false, unsign: unsign, unpack: true, split: false, mode: write ? .replace : .write, keep: keep).lines(for: path, reporter: reporter)
-        return quiet ? Line.quiet(lines, naming: path) : lines
+    static func lines(for file: File, write: Bool, keep: Bool = false, unsign: Bool = false, quiet: Bool = false, reporter: Reporter) -> [Line] {
+        let lines = ArtifactWriter(exact: false, unsign: unsign, unpack: true, split: false, mode: write ? .replace : .write, keep: keep).lines(for: file, reporter: reporter)
+        return quiet ? Line.quiet(lines, naming: file.path) : lines
     }
 }

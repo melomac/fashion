@@ -28,7 +28,7 @@ import MachO
  names, and a slice has two against its entry in the table, which `anomalies(slice:)` names.
 
  ```
- Verify.lines(for: path)                   one line per finding, "path[ (arch)]: finding", red for what is refused
+ Verify.lines(for: file)                   one line per finding, "path[ (arch)]: finding", red for what is refused
    |
    Universal.open(file)
    |-- .thin(image) ------> MachOVerifier(image, in: file).anomalies()

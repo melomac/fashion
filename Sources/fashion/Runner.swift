@@ -837,14 +837,14 @@ final class Handoff: @unchecked Sendable {
  */
 extension ScanOptions {
     /**
-     Walk the paths and hand each file to `jobs` threads, which print the lines `work` returns for it; `activity` says
-     what they do to a file, for the status line. Returns whether any line was printed, and how many paths could not
-     be walked or worked on.
+     Walk the paths and hand each file to `jobs` threads, which open it and print the lines `work` returns for it
+     (`open(_:reporter:work:)`); `activity` says what they do to a file, for the status line. Returns whether any
+     line was printed, and how many paths could not be walked, opened or worked on.
 
      `trapSignals` logs the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
      Signal dispositions are process-wide, so only the command line sets it.
      */
-    func run(trapSignals: Bool, activity: String, work: @escaping @Sendable (_ path: String, _ reporter: Reporter) -> [Line]) -> (printedAny: Bool, errorCount: Int) {
+    func run(trapSignals: Bool, activity: String, work: @escaping @Sendable (_ file: File, _ reporter: Reporter) -> [Line]) -> (printedAny: Bool, errorCount: Int) {
         let console = Console()
         let reporter = Reporter(console: console)
         let trap = trapSignals ? SignalTrap(reporter: reporter) : nil
@@ -861,7 +861,7 @@ extension ScanOptions {
             let thread = Thread {
                 while let (index, path) = handoff.take() {
                     output.started(index, path: path)
-                    let lines = work(path, reporter)
+                    let lines = Self.open(path, reporter: reporter) { work($0, reporter) }
                     reporter.fileProcessed()
                     output.finished(index, lines: lines)
                 }
@@ -893,6 +893,23 @@ extension ScanOptions {
         trap?.restore()
 
         return (output.printedAny, reporter.errorCount)
+    }
+
+    /**
+     Open the file at `path` for `work`, and return the lines it makes of it, or the report of a path that cannot be
+     opened, which `work` does not see. The file is opened once, here, for everything the command reads from it and
+     whatever else it does with the file after its lines, `hash --verify` verifying it: one descriptor, as Security's
+     `MachORep` holds one `FileDesc` for everything read of the code it represents, where opening the path again would
+     read whatever it names by then. It is closed once the lines are made.
+     */
+    static func open(_ path: String, reporter: Reporter, work: (File) -> [Line]) -> [Line] {
+        let file: File
+        do {
+            file = try File(path: path)
+        } catch {
+            return [reporter.report(path: path, message: File.message(for: error))]
+        }
+        return work(file)
     }
 }
 
@@ -974,11 +991,12 @@ struct Digester {
      read is reported in red and prints nothing else; what the edits refuse is a warning, and the file prints as it
      is.
      */
-    func lines(for path: String, reporter: Reporter) -> [Line] {
+    func lines(for file: File, reporter: Reporter) -> [Line] {
+        let path = file.path
         var diagnostics: [Line] = []
         let results: [DigestResult]
         do {
-            results = try self.digests(path, reporter: reporter) { diagnostics.append($0) }
+            results = try self.digests(file, reporter: reporter) { diagnostics.append($0) }
         } catch {
             return diagnostics + [reporter.report(path: Self.subject(path, of: error), message: File.message(for: error), tint: Self.tint(for: error))]
         }
@@ -1061,12 +1079,13 @@ struct Digester {
     // MARK: - Digests
 
     /**
-     The digests of one file in the selected mode; `note` hears each of its diagnostics as it comes.
+     The digests of one file, `read` as the scan opened it, in the selected mode; `note` hears each of its diagnostics
+     as it comes.
      */
-    private func digests(_ path: String, reporter: Reporter, note: @escaping (Line) -> Void) throws -> [DigestResult] {
-        // One descriptor for everything read from the file, whose size when it is opened is the size hashed, or the
-        // size of its edit, unpacked or without signatures, which every mode then reads as the file.
-        let read = try File(path: path)
+    private func digests(_ read: File, reporter: Reporter, note: @escaping (Line) -> Void) throws -> [DigestResult] {
+        // The one descriptor the scan opened, whose size when it was opened is the size hashed, or the size of its
+        // edit, unpacked or without signatures, which every mode then reads as the file.
+        let path = read.path
         // A modified UPX packed it, or the file is cut short of its last page, which --exact pads: a second look,
         // like a signature that does not hold.
         let warned = { (arch: String?, message: String) in

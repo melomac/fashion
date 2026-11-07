@@ -68,8 +68,8 @@ extension Unsigner {
 
     /// The lines to print for one file, as `ArtifactWriter.lines(for:reporter:)` unsigned, whole; `quiet` as
     /// `Line.quiet(_:naming:)`.
-    static func lines(for path: String, write: Bool, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        let lines = ArtifactWriter(exact: false, unsign: true, unpack: false, split: false, mode: write ? .replace : .write).lines(for: path, reporter: reporter)
-        return quiet ? Line.quiet(lines, naming: path) : lines
+    static func lines(for file: File, write: Bool, quiet: Bool = false, reporter: Reporter) -> [Line] {
+        let lines = ArtifactWriter(exact: false, unsign: true, unpack: false, split: false, mode: write ? .replace : .write).lines(for: file, reporter: reporter)
+        return quiet ? Line.quiet(lines, naming: file.path) : lines
     }
 }

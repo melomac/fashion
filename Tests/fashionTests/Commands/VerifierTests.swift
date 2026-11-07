@@ -1266,6 +1266,35 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     The scan opens each file once and hands it to the command's work, `ScanOptions.open(_:reporter:work:)`, which
+     `hash --verify` and `thinr --verify` verify through the same descriptor after their lines; a path that cannot be
+     opened is reported in its place, counted, and never handed on.
+     */
+    func testScanHandsTheFileItOpenedToTheWork() throws {
+        let directory = try self.directory("opened")
+        let program = try self.program("x86_64", in: directory)
+        let file = directory / "program"
+        try program.write(to: file)
+        let reporter = Reporter(console: Console())
+        let digester = try Digester(Hasher.parse([file.path, "--quiet"]))
+        var opened: [File] = []
+        XCTAssertEqual(ScanOptions.open(file.path, reporter: reporter) { opened.append($0); return digester.lines(for: $0, reporter: reporter) }.count, 1)
+        XCTAssertTrue(ScanOptions.open(file.path, reporter: reporter) { opened.append($0); return Thinner.lines(for: $0, exact: false, unsign: false, unpack: false, write: false, reporter: reporter) }.filter(\.diagnostic).isEmpty)
+        XCTAssertEqual(opened.map(\.path), [file.path, file.path])
+        XCTAssertEqual(opened.map(\.size), [program.count, program.count])
+        XCTAssertEqual(reporter.errorCount, 0)
+        // What the modes log of the file they were handed, after their lines: a notice each, nothing printed and
+        // nothing counted.
+        opened.forEach(Verify.log)
+        XCTAssertEqual(reporter.errorCount, 0)
+
+        let missing = directory / "missing"
+        XCTAssertEqual(ScanOptions.open(missing.path, reporter: reporter) { opened.append($0); return [] }.map(\.text), ["fashion: \(missing.path): No such file or directory"])
+        XCTAssertEqual(opened.count, 2, "a path that cannot be opened is reported, not handed on")
+        XCTAssertEqual(reporter.errorCount, 1)
+    }
+
+    /**
      A universal file as the kernel, dyld and Security read it: an arm64 slice hidden past the table's count, which
      is a slice to `Universal` as to Security, past a count of none too, or with a subtype dyld does not take, or
      with a range that does not hold, two slices of one architecture, a slice whose table entry names another
