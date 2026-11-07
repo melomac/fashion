@@ -220,6 +220,11 @@ struct MachO {
     // MARK: - Commands (Security's MachOBase)
 
     /// The first load command of type `cmd`, like `MachOBase::findCommand`.
+    /// Whether dyld manages the image (`Header::isDyldManaged`): a dylib, a bundle, a dynamically linked executable.
+    var isDyldManaged: Bool {
+        [UInt32(MH_DYLIB), UInt32(MH_BUNDLE)].contains(self.filetype) || self.filetype == UInt32(MH_EXECUTE) && self.flags & UInt32(MH_DYLDLINK) != 0
+    }
+
     func findCommand(_ cmd: UInt32) -> LoadCommand? {
         self.loadCommands.first { $0.cmd == cmd }
     }

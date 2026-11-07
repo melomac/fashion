@@ -686,7 +686,6 @@ extension MachO {
         if self.uses16KPages {
             return 14
         }
-        let managed = [UInt32(MH_DYLIB), UInt32(MH_BUNDLE)].contains(self.filetype) || self.filetype == UInt32(MH_EXECUTE) && self.flags & UInt32(MH_DYLDLINK) != 0
-        return self.cpuType == CPU_TYPE_ARM && managed ? 14 : 12
+        return self.cpuType == CPU_TYPE_ARM && self.isDyldManaged ? 14 : 12
     }
 }

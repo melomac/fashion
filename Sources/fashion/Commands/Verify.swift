@@ -61,10 +61,10 @@ extension Verify {
         let path = file.path
         var lines: [Line] = []
         self.verify(file) { finding, arch in
-            logger.notice("\(arch.map { "\(path) (\($0))" } ?? path, privacy: .public): \(finding, privacy: .public)")
-            lines.append(Line(text: "\(OutputFormatter.formatPath(path))\(arch.map { " (\($0))" } ?? ""): \(finding)"))
+            logger.notice("\(Reporter.subject(path, arch: arch), privacy: .public): \(finding, privacy: .public)")
+            lines.append(Line(text: "\(Reporter.subject(OutputFormatter.formatPath(path), arch: arch)): \(finding)"))
         } refused: { error, arch in
-            lines.append(reporter.report(path: arch.map { "\(path) (\($0))" } ?? path, error: error))
+            lines.append(reporter.report(path: Reporter.subject(path, arch: arch), error: error))
         }
         return quiet ? Line.quiet(lines, naming: path) : lines
     }
@@ -80,9 +80,9 @@ extension Verify {
     static func log(_ file: File) {
         let path = file.path
         self.verify(file) { finding, arch in
-            logger.notice("\(arch.map { "\(path) (\($0))" } ?? path, privacy: .public): \(finding, privacy: .public)")
+            logger.notice("\(Reporter.subject(path, arch: arch), privacy: .public): \(finding, privacy: .public)")
         } refused: { error, arch in
-            logger.error("\(arch.map { "\(path) (\($0))" } ?? path, privacy: .public): \(File.message(for: error), privacy: .public)")
+            logger.error("\(Reporter.subject(path, arch: arch), privacy: .public): \(File.message(for: error), privacy: .public)")
         }
     }
 

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import os
 import System
@@ -127,7 +128,7 @@ struct ArtifactWriter {
         do {
             // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it.
             let edited = try self.unsign || self.unpack || self.exact ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
-                caveats.append(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
+                caveats.append(reporter.warn(path: Reporter.subject(path, arch: arch), message: message))
             }, keep: self.keep ? { arch, edits, data in
                 kept.append(Artifact(name: (arch.map { [$0] } ?? []) + edits.words, bytes: File(editing: read, pieces: [.bytes(data)])))
             } : nil) : nil
@@ -322,12 +323,15 @@ struct ArtifactWriter {
         // lstat sees a symbolic link as itself, where open would follow it.
         var info = stat()
         guard lstat(path, &info) == 0 else {
+            // Nothing under the name, or no directory on the way to it; anything else lstat says is an error.
+            guard errno == ENOENT || errno == ENOTDIR else {
+                throw Errno(rawValue: errno)
+            }
             do {
-                try Self.place(file, at: path, exclusively: true)
+                return try .written(Self.place(file, at: path, exclusively: true))
             } catch let error as Errno where error == .fileExists {
                 return try Self.write(file, to: path, overwrite: overwrite)
             }
-            return try .written(Self.identity(of: file))
         }
         guard info.st_mode & S_IFMT == S_IFREG else {
             throw ArtifactError.notRegularFileInTheWay
@@ -341,7 +345,7 @@ struct ArtifactWriter {
             return .differs(before: before, after: after)
         }
         let backup = try Self.conflictBackup(path)
-        try Self.place(file, at: path, exclusively: false)
+        _ = try Self.place(file, at: path, exclusively: false)
         return .replaced(before: before, after: after, backup: backup)
     }
 
@@ -368,53 +372,39 @@ struct ArtifactWriter {
     }
 
     /**
-     The regular file under `path`, for hash mode to compare to the state it stands for (`Digester.artifactDigests`):
-     nil where there is none, or something else, a symbolic link say, which is left alone as `write` leaves it.
-     */
-    static func inPlace(at path: String) throws -> File? {
-        var info = stat()
-        guard lstat(path, &info) == 0 else {
-            guard errno == ENOENT || errno == ENOTDIR else {
-                throw Errno(rawValue: errno)
-            }
-            return nil
-        }
-        guard info.st_mode & S_IFMT == S_IFREG else {
-            return nil
-        }
-        return try File(path: path)
-    }
-
-    /**
      `file` written beside `path` under a temporary name and renamed into it, so that a run ended mid-way, by a
      signal or a write error, leaves no part of an artifact under its name: the temporary file is removed as the run
      dies. Its name is the directory's own, 45 bytes, whatever the artifact's, which may run to the 255 a name may
      have. `exclusively` refuses a file that has appeared under the name since (`RENAME_EXCL`), as `Errno.fileExists`.
+     Returns what was placed, its size and SHA-256, summed as it was written.
      */
-    private static func place(_ file: File, at path: String, exclusively: Bool) throws {
+    private static func place(_ file: File, at path: String, exclusively: Bool) throws -> Identity {
         let temporary = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(".fashion-\(UUID().uuidString)").path
         let fd = try FileDescriptor.open(temporary, .writeOnly, options: [.create, .exclusiveCreate], permissions: Self.permissions)
         Self.writing.begin(temporary)
         defer {
             Self.writing.end(temporary)
         }
-        try Self.copy(file, to: fd, at: temporary)
+        let identity = try Self.copy(file, to: fd, at: temporary)
         guard (exclusively ? renamex_np(temporary, path, UInt32(RENAME_EXCL)) : rename(temporary, path)) == 0 else {
             let error = Errno(rawValue: errno)
             unlink(temporary)
             throw error
         }
+        return identity
     }
 
     /**
-     Stream `file` into `fd` and close it; a write that fails leaves no file at `path`, a close that fails either. The
-     descriptor is closed once: a close that fails has given its number up all the same, and another thread may hold it
-     by then.
+     Stream `file` into `fd` and close it, summed as it goes for the identity the log names it by, in the one read; a
+     write that fails leaves no file at `path`, a close that fails either. The descriptor is closed once: a close that
+     fails has given its number up all the same, and another thread may hold it by then.
      */
-    private static func copy(_ file: File, to fd: FileDescriptor, at path: String) throws {
+    private static func copy(_ file: File, to fd: FileDescriptor, at path: String) throws -> Identity {
+        var sha256 = SHA256()
         do {
             try file.stream(0 ..< file.size) { chunk in
                 _ = try fd.writeAll(chunk)
+                sha256.update(bufferPointer: chunk)
             }
         } catch {
             try? fd.close()
@@ -427,6 +417,7 @@ struct ArtifactWriter {
             unlink(path)
             throw error
         }
+        return Identity(size: file.size, digest: sha256.finalize().hexString)
     }
 
     /**

@@ -261,11 +261,6 @@ struct MachOVerifier {
         Self.loadableFiletypes.contains(self.image.filetype)
     }
 
-    /// Whether dyld manages the image (`Header::isDyldManaged`): a dylib, a bundle, a dynamically linked executable.
-    private var isDyldManaged: Bool {
-        [UInt32(MH_DYLIB), UInt32(MH_BUNDLE)].contains(self.image.filetype) || self.image.filetype == UInt32(MH_EXECUTE) && self.image.flags & UInt32(MH_DYLDLINK) != 0
-    }
-
     /// The major version of the SDK the image was built against, as its version command records it; nil without one.
     private var sdkMajor: UInt32? {
         ((try? self.image.version()) ?? nil).map { $0.sdk >> 16 }
@@ -598,7 +593,7 @@ struct MachOVerifier {
         }
         // dyld's validSemanticsSingleSegment, of an image it manages: __DATA_CONST maps rw- too, as a dyld-managed
         // image's __DATA_CONST is written before it is made read-only.
-        if self.isDyldManaged {
+        if self.image.isDyldManaged {
             for segment in segments where segment.name == "__DATA_CONST" && segment.protection != "rw-" {
                 found.append("__DATA_CONST's protection is \(segment.protection), not rw-, which dyld refuses")
             }
@@ -693,7 +688,7 @@ struct MachOVerifier {
                 moreLines += lines.count
             }
         }
-        let recent = self.isDyldManaged && (self.sdkMajor ?? 0) >= 27
+        let recent = self.image.isDyldManaged && (self.sdkMajor ?? 0) >= 27
         for segment in self.segments {
             for section in segment.sections {
                 var lines: [String] = []

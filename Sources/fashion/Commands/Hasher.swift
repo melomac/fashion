@@ -198,14 +198,15 @@ struct Hasher: ParsableCommand {
             throw ValidationError(self.hash.algo.map { HashOptionError.targetNotOfAlgorithm(target, $0) } ?? .targetOfNoShape(target))
         }
 
-        // Match mode
-        if self.matchOptions.xlen, !Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.tlsh) {
+        // Match mode: the targets as the digester builds them, built the once here.
+        let targets = Targets(self.matchOptions.match, algorithm: self.hash.algo)
+        if self.matchOptions.xlen, !targets.algorithms.contains(.tlsh) {
             throw ValidationError(HashOptionError.xlenWithoutTLSHTarget)
         }
         if self.resolvedScore < 0 {
             throw ValidationError(HashOptionError.negativeScore)
         }
-        if self.resolvedScore > 100, Targets(self.matchOptions.match, algorithm: self.hash.algo).algorithms.contains(.ssdeep) {
+        if self.resolvedScore > 100, targets.algorithms.contains(.ssdeep) {
             throw ValidationError(HashOptionError.scoreAboveSSDeep)
         }
         if self.matchOptions.negate, self.matchOptions.match.isEmpty {

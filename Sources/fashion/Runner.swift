@@ -564,7 +564,12 @@ final class Reporter: @unchecked Sendable {
 
     /// What a diagnostic about `error` names: the file, or the architecture of the slice at fault in a universal one.
     static func subject(_ path: String, of error: Error) -> String {
-        (error as? SliceError).map { "\(path) (\($0.arch))" } ?? path
+        self.subject(path, arch: (error as? SliceError)?.arch)
+    }
+
+    /// What a diagnostic names: the file, or the architecture of the slice it is about in a universal one, `arch`.
+    static func subject(_ path: String, arch: String?) -> String {
+        arch.map { "\(path) (\($0))" } ?? path
     }
 
     /**
@@ -1085,6 +1090,13 @@ struct Digester {
         error is UnpackError || (error as? SliceError)?.error is UnpackError
     }
 
+    /// Whether `error` is the file failing to be read, or changing under the read, the file or a slice of a universal
+    /// one: the file's failure, not the edit's or the parse's, which the bytes would meet the same way.
+    private static func isReadError(_ error: Error) -> Bool {
+        let error = (error as? SliceError)?.error ?? error
+        return error is Errno || error is FileError
+    }
+
     // MARK: - Digests
 
     /**
@@ -1098,7 +1110,7 @@ struct Digester {
         // A modified UPX packed it, or the file is cut short of its last page, which --exact pads: a second look,
         // like a signature that does not hold.
         let warned = { (arch: String?, message: String) in
-            note(reporter.warn(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
+            note(reporter.warn(path: Reporter.subject(path, arch: arch), message: message))
         }
         // The edits, with --exact alone the cut and the padding, kept whole for every state to be digested; the file
         // is what every mode then reads, and `source` what the states are pieces of. Hash mode hashes every file: an
@@ -1115,7 +1127,7 @@ struct Digester {
         case .symhash: "no symhash as it is"
         default: "hashed as it is"
         }
-        func edit(unsign: Bool, unpack: Bool) -> MachOEditor.Edit? {
+        func edit(unsign: Bool, unpack: Bool) throws -> MachOEditor.Edit? {
             do {
                 return try MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: unsign, unpack: unpack, caveat: warned)
             } catch where unpack && Self.isUnpackError(error) {
@@ -1124,7 +1136,11 @@ struct Digester {
                 // with --unsign, its signatures out. unpack writes what decompressed under --keep.
                 let subject = Reporter.subject(path, of: error)
                 note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")hashed packed"))
-                return self.unsign || self.exact ? edit(unsign: self.unsign, unpack: false) : nil
+                return self.unsign || self.exact ? try edit(unsign: self.unsign, unpack: false) : nil
+            } catch where Self.isReadError(error) {
+                // The file could not be read, or changed under the read: the file's failure, reported once, where the
+                // bytes would fail the same way.
+                throw error
             } catch {
                 refused = true
                 refusedSlice = error is SliceError
@@ -1133,7 +1149,7 @@ struct Digester {
                 return nil
             }
         }
-        let edited = self.unsign || self.unpack || self.exact ? edit(unsign: self.unsign, unpack: self.unpack) : nil
+        let edited = try self.unsign || self.unpack || self.exact ? edit(unsign: self.unsign, unpack: self.unpack) : nil
         let file = edited?.file ?? read
         // The exact cut alone, which is no edit, for the file as it is: where the editor read the file and changed
         // nothing of it, or did not read it. A file it changed was cut as it went, and is not cut a second time, which
@@ -1163,7 +1179,7 @@ struct Digester {
         // the architecture or state it is about. --quiet shortens standard output alone: every line for standard
         // error stands.
         let caveat = { (arch: String?, message: String) in
-            note(reporter.inform(path: arch.map { "\(path) (\($0))" } ?? path, message: message))
+            note(reporter.inform(path: Reporter.subject(path, arch: arch), message: message))
         }
         switch self.mode {
         case let .file(hashes):
@@ -1224,7 +1240,7 @@ struct Digester {
         for result in results where result.invalid && warned.insert(result.arch ?? "").inserted {
             // Security rejects the signature, so the slice is hashed as unsigned, or its code changed since signing.
             let reason = result.adhoc ? "signature rejected, hashed as unsigned" : "invalid signature (code or signature have been modified)"
-            note(reporter.warn(path: result.arch.map { "\(path) (\($0))" } ?? path, message: reason))
+            note(reporter.warn(path: Reporter.subject(path, arch: result.arch), message: reason))
         }
 
         return results.map { result in
@@ -1272,7 +1288,7 @@ struct Digester {
 
             let target = path + artifact.suffix
             do {
-                guard let found = try ArtifactWriter.inPlace(at: target) else {
+                guard let found = try Self.inPlace(at: target) else {
                     continue
                 }
                 let identity = try ArtifactWriter.identity(of: found)
@@ -1288,6 +1304,25 @@ struct Digester {
             }
         }
         return results
+    }
+
+    /**
+     The regular file under `path`, in place of an artifact, for `artifactDigests` to compare to the state it stands
+     for: nil where there is none, or something else, a symbolic link say, which is left alone as `ArtifactWriter`
+     leaves it.
+     */
+    private static func inPlace(at path: String) throws -> File? {
+        var info = stat()
+        guard lstat(path, &info) == 0 else {
+            guard errno == ENOENT || errno == ENOTDIR else {
+                throw Errno(rawValue: errno)
+            }
+            return nil
+        }
+        guard info.st_mode & S_IFMT == S_IFREG else {
+            return nil
+        }
+        return try File(path: path)
     }
 
     /**
@@ -1315,7 +1350,7 @@ struct Digester {
         let universal: Universal
         do {
             universal = try Universal.open(file)
-        } catch let error as Errno {
+        } catch where Self.isReadError(error) {
             throw error
         } catch {
             warned(nil, "\(File.message(for: error)), \(fate)")
