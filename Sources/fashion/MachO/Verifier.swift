@@ -562,7 +562,7 @@ struct MachOVerifier {
             found.append("\(segments.count) segments, more than the 255 dyld takes")
         }
 
-        let headerSize = image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+        let headerSize = image.headerSize
         let text = segments.first { $0.name == "__TEXT" }
         if let text {
             if text.fileoff != 0 {
@@ -1155,7 +1155,7 @@ struct MachOVerifier {
     private func paddingAnomalies() -> [String] {
         let image = self.image
         var found: [String] = []
-        let headerEnd = UInt64((image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size) + image.sizeofcmds)
+        let headerEnd = UInt64(image.headerSize + image.sizeofcmds)
         var uncovered: [(name: String, gaps: [Range<Int>])] = []
         for segment in self.segments where segment.filesize > 0 && segment.name != "__LINKEDIT" && !segment.sections.isEmpty {
             var gaps: [Range<Int>] = []

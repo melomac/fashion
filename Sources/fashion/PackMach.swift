@@ -6,9 +6,9 @@ enum UnpackError: Error, Equatable {
     /// UPX's `CantUnpackException`: a Mach-O UPX packed whose packed data, or the image unpacked from it, does not hold,
     /// in UPX's words.
     case cantUnpack(String)
-    /// Packed data that decompressed to its end and whose image's headers do not parse, in UPX's words as much; with
-    /// what decompressed, which `thinr` and `unpack` write as it is under --keep.
-    case unverified(String, decompressed: Data)
+    /// Packed data that decompressed to its end and whose image's headers do not parse, in UPX's words as much; what
+    /// decompressed, `thinr` and `unpack` write as it is under --keep, which the editor's `keep` gets.
+    case unverified(String)
     /// An image larger than this tool unpacks in memory, which UPX, bounding each block and not the image, would.
     case imageTooLarge(size: Int, limit: Int)
 }
@@ -16,7 +16,7 @@ enum UnpackError: Error, Equatable {
 extension UnpackError: LocalizedError {
     var errorDescription: String? {
         switch self {
-        case let .cantUnpack(reason), let .unverified(reason, _):
+        case let .cantUnpack(reason), let .unverified(reason):
             "Invalid UPX data: \(reason)"
         case let .imageTooLarge(size, limit):
             "Mach-O too large: the image UPX packed would be \(size) bytes, more than the \(limit) this tool unpacks in memory"
@@ -226,9 +226,8 @@ struct PackMach {
         else {
             return nil
         }
-        let headerSize = image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
-        let header = try image.dataAt(0, count: headerSize)
-        let ncmds = Int(image.word(header, at: 16))
+        let headerSize = image.headerSize
+        let ncmds = image.ncmds
         let headway = image.sizeofcmds
         let segmentSize = image.is64 ? MemoryLayout<segment_command_64>.size : MemoryLayout<segment_command>.size
         guard
@@ -440,8 +439,8 @@ struct PackMach {
      the order of their offsets, then what lies between them and after the last up to the original size; a dylib's
      segments but the first are copied as they are. With it, a word on the image when a modified UPX packed it: the
      marker it bears in place of "UPX!", the byte its filtered blocks are XORed with before they are unfiltered, or
-     both; and words for the log, `notes`, on how it was packed and where its parts lie. Throws for packed data that
-     does not hold.
+     both; and words for the log, `notes`, on how it was packed and where its parts lie (`Unpacked`). Throws for
+     packed data that does not hold.
 
      The pack header holds the Adler-32 of the packed bytes, `c_adler`, and of the original, `u_adler`, neither of
      which the stub or `upx -d` reads for a Mach-O, where `upx -d` checks both for an ELF: a packer writes there what
@@ -451,7 +450,7 @@ struct PackMach {
      once, under which the image bears the packer's sum. Under a key, `decompressed` is the image with its blocks as
      they decoded, under none, for --keep to write; nil otherwise.
      */
-    func unpack() throws -> (data: Data, caveat: String?, notes: [String], decompressed: Data?) {
+    func unpack() throws -> Unpacked {
         var plain = try self.unpack(keeping: false)
         var sums: [String] = []
         if plain.cAdler != self.cAdler {
@@ -463,11 +462,15 @@ struct PackMach {
             return text.isEmpty ? nil : text
         }
         if plain.adler == self.uAdler {
-            return (plain.data, said(0, nil), self.notes(plain), nil)
+            plain.caveat = said(0, nil)
+            plain.notes = self.notes(plain)
+            return plain
         }
         let unverified = "the image sums to \(plain.adler.hex), the pack header says \(self.uAdler.hex)"
         guard plain.filtered else {
-            return (plain.data, said(0, unverified), self.notes(plain), nil)
+            plain.caveat = said(0, unverified)
+            plain.notes = self.notes(plain)
+            return plain
         }
         // Decoded once more, the filtered blocks kept as decoded, so each key is tried over them alone; the
         // first image goes first, so no more than the second and the kept blocks are held at once.
@@ -477,12 +480,18 @@ struct PackMach {
             if try keyed.keyed(key) == self.uAdler {
                 let data = keyed.data
                 _ = try keyed.keyed(0)
-                return (data, said(key, nil), self.notes(keyed), keyed.data)
+                keyed.decompressed = keyed.data
+                keyed.data = data
+                keyed.caveat = said(key, nil)
+                keyed.notes = self.notes(keyed)
+                return keyed
             }
         }
         // The blocks under no key again: the image as UPX unpacks it.
         _ = try keyed.keyed(0)
-        return (keyed.data, said(0, unverified + ", under no XOR key"), self.notes(keyed), nil)
+        keyed.caveat = said(0, unverified + ", under no XOR key")
+        keyed.notes = self.notes(keyed)
+        return keyed
     }
 
     /**
@@ -536,39 +545,47 @@ struct PackMach {
         }
     }
 
-    /// An image unpacked, with what the pass over its blocks summed and saw, and the `p_info` before the blocks.
-    private struct Unpacked {
+    /**
+     An image unpacked, as `upx -d` writes it: its bytes, `data`; a word on it when a modified UPX packed it, `caveat`,
+     nil for UPX's own; words for the log on how it was packed and where its parts lie, `notes`; and under a XOR key,
+     `decompressed`, the image with its blocks as they decoded under none, for --keep to write, nil otherwise. With
+     what the pass over its blocks summed and saw, and the `p_info` before the blocks, for the unpacker alone.
+     */
+    struct Unpacked {
         var data: Data
-        var pass: Pass
-        let pInfo: (progid: UInt32, fileSize: Int, blocksize: Int)
+        var caveat: String?
+        var notes: [String] = []
+        var decompressed: Data?
+        fileprivate var pass: Pass
+        fileprivate let pInfo: (progid: UInt32, fileSize: Int, blocksize: Int)
 
-        var blocks: [Block] {
+        fileprivate var blocks: [Block] {
             self.pass.blocks
         }
 
-        var blockCount: Int {
+        fileprivate var blockCount: Int {
             self.pass.blockCount
         }
 
         /// The Adler-32 of the image as the packer summed it, block by block in the order they were unpacked: combined
         /// as the blocks came, or from the blocks' sums kept for the keys.
-        var adler: UInt32 {
+        fileprivate var adler: UInt32 {
             self.pass.keeping ? UInt32(self.pass.sums.reduce(1 as uLong) { adler32_combine($0, uLong($1.adler), $1.count) }) : UInt32(self.pass.adler)
         }
 
-        var cAdler: UInt32 {
+        fileprivate var cAdler: UInt32 {
             self.pass.cAdler
         }
 
-        var filtered: Bool {
+        fileprivate var filtered: Bool {
             self.pass.filtered
         }
 
-        var methods: Set<UInt8> {
+        fileprivate var methods: Set<UInt8> {
             self.pass.methods
         }
 
-        var filters: Set<UInt8> {
+        fileprivate var filters: Set<UInt8> {
             self.pass.filters
         }
 
@@ -576,7 +593,7 @@ struct PackMach {
          The image with its filtered blocks, kept as decoded, XORed with `key` and unfiltered again in place of
          what the last key made of them, and its Adler-32 so: no block is decoded again for a key.
          */
-        mutating func keyed(_ key: UInt8) throws -> UInt32 {
+        fileprivate mutating func keyed(_ key: UInt8) throws -> UInt32 {
             for kept in self.pass.kept {
                 let sum = try self.data.withUnsafeMutableBytes { buffer in
                     let destination = UnsafeMutableRawBufferPointer(rebasing: buffer[kept.at ..< kept.at + kept.decoded.count])
@@ -613,7 +630,7 @@ struct PackMach {
 
         // The first block, the image's Mach-O headers, read ahead for its load commands: a block of the first segment,
         // so no larger than a block, which UPX does not check before it allocates it.
-        let headerSize = self.image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
+        let headerSize = self.image.headerSize
         let blocks = self.overlayOffset + 12
         let first = try self.blockInfo(at: blocks)
         guard
@@ -705,7 +722,7 @@ struct PackMach {
 
         /// The segment `command` holds, in the image's layout; nil for any other command, or one too short.
         init?(_ command: MachO.LoadCommand, in image: MachO) {
-            let name = String(decoding: command.data.dropFirst(8).prefix(16).prefix { $0 != 0 }, as: UTF8.self)
+            let name = command.segmentName
             if image.is64, command.cmd == UInt32(LC_SEGMENT_64), let segment = command.payload(as: segment_command_64.self) {
                 (self.vmaddr, self.vmsize) = (image.sw(segment.vmaddr), image.sw(segment.vmsize))
                 (self.fileoff, self.filesize) = (Int(clamping: image.sw(segment.fileoff)), Int(clamping: image.sw(segment.filesize)))
@@ -749,7 +766,7 @@ struct PackMach {
 
     /// A pass over the blocks: the Adler-32 of their packed bytes as the packer summed them, of each block as unpacked,
     /// in order, how many bytes they made so far, and whether one was unfiltered.
-    private struct Pass {
+    fileprivate struct Pass {
         /// Whether a filtered block is kept as it decoded, before it is unfiltered, for the keys to be tried over it.
         let keeping: Bool
         var cAdler: UInt32 = 1
@@ -774,14 +791,14 @@ struct PackMach {
 
     /// A block as the pass met it: where its `b_info` lies in the packed image, what it says, and where the block is
     /// written in the unpacked image.
-    private struct Block {
+    fileprivate struct Block {
         let offset: Int
         let info: BlockInfo
         let at: Int
     }
 
     /// A `b_info`, the header before each block: its sizes, compression method and filter.
-    private struct BlockInfo {
+    fileprivate struct BlockInfo {
         let uncompressed: Int
         let compressed: Int
         let method: UInt8
@@ -1143,35 +1160,19 @@ extension PackMach {
          by its own checksum, whose marker is whatever a packer modified to defeat `upx -d` wrote. Nil without either.
          */
         init?(_ buffer: Data, fileSize: Int, format: UInt8) throws {
-            let offset: Int
             if let range = buffer.firstRange(of: Data(Self.magic)) {
-                offset = range.lowerBound
-            } else {
-                // A header with a checksum, version 10 on, for the image's format, with the overlay offset after it.
-                guard let start = buffer.indices.first(where: { start in
-                    start + 36 <= buffer.endIndex && 10 ... 13 ~= buffer[start + 4] && buffer[start + 5] == format && (try? Self.decode(buffer[start...], fileSize: fileSize)) != nil
-                }) else {
-                    return nil
-                }
-                offset = start
+                self = try PackHeader(decoding: buffer[range.lowerBound...], at: range.lowerBound - buffer.startIndex, fileSize: fileSize)
+                return
             }
-            let fields = try Self.decode(buffer[offset...], fileSize: fileSize)
-            self.offset = offset - buffer.startIndex
-            self.size = fields.size
-            self.version = fields.version
-            self.format = fields.format
-            self.magic = Array(buffer[offset ..< offset + 4])
-            self.uAdler = fields.uAdler
-            self.cAdler = fields.cAdler
-            self.method = fields.method
-            self.level = fields.level
-            self.uncompressed = fields.uncompressed
-            self.compressed = fields.compressed
-            self.uFileSize = fields.uFileSize
-            self.filter = fields.filter
-            self.cto = fields.cto
-            self.nMru = fields.nMru
-            self.checksum = fields.checksum
+            // A header with a checksum, version 10 on, for the image's format, with the overlay offset after it: the
+            // first that holds, decoded the once.
+            for start in buffer.indices where start + 36 <= buffer.endIndex && 10 ... 13 ~= buffer[start + 4] && buffer[start + 5] == format {
+                if let header = try? PackHeader(decoding: buffer[start...], at: start - buffer.startIndex, fileSize: fileSize) {
+                    self = header
+                    return
+                }
+            }
+            return nil
         }
 
         /// Whether UPX has a format numbered `format` (`Packer::isValidFormat`): 1 to 46 and 129 to 142, less the holes.
@@ -1179,9 +1180,11 @@ extension PackMach {
             (1 ... 46 ~= format || 129 ... 142 ~= format) && ![6, 11, 13, 17, 38, 41, 130].contains(format)
         }
 
-        /// The header at the start of `p`, checked as `getPackHeader` checks it; throws, in UPX's words, for one that
-        /// does not hold.
-        private static func decode(_ p: Data, fileSize: Int) throws -> (size: Int, version: UInt8, format: UInt8, uAdler: UInt32, cAdler: UInt32, method: UInt8, level: UInt8, uncompressed: UInt32, compressed: UInt32, uFileSize: UInt32, filter: UInt8, cto: UInt8, nMru: UInt8, checksum: UInt8) {
+        /**
+         The header at the start of `p`, which lies at `offset` in the buffer it was found in, checked as
+         `getPackHeader` checks it; throws, in UPX's words, for one that does not hold.
+         */
+        private init(decoding p: Data, at offset: Int, fileSize: Int) throws {
             let at = { (index: Int) in p[p.startIndex + index] }
             guard p.count >= 20 else {
                 throw UnpackError.cantUnpack("header corrupted 1")
@@ -1238,7 +1241,22 @@ extension PackMach {
             // The fields after the sizes, for the log: a shorter header, of a version before 10, lacks some.
             let byte = { (index: Int) in index < size && index < p.count ? at(index) : 0 }
             let uFileSize = size >= 28 && p.count >= 28 ? word(24, bigEndian: bigEndian) : 0
-            return (size, version, format, uAdler, cAdler, method, at(7), uncompressed, compressed, uFileSize, byte(28), byte(29), byte(30), byte(size - 1))
+            self.offset = offset
+            self.size = size
+            self.version = version
+            self.format = format
+            self.magic = Array(p.prefix(4))
+            self.uAdler = uAdler
+            self.cAdler = cAdler
+            self.method = method
+            self.level = at(7)
+            self.uncompressed = uncompressed
+            self.compressed = compressed
+            self.uFileSize = uFileSize
+            self.filter = byte(28)
+            self.cto = byte(29)
+            self.nMru = byte(30)
+            self.checksum = byte(size - 1)
         }
     }
 }

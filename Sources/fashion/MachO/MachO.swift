@@ -65,6 +65,8 @@ struct MachO {
     let length: Int
     let is64: Bool
     let swap: Bool
+    /// The header's size, `mach_header_64`'s or `mach_header`'s, where the load commands start.
+    let headerSize: Int
     let cpuType: cpu_type_t
     let cpuSubtype: cpu_subtype_t
 
@@ -122,6 +124,7 @@ struct MachO {
         self.length = length
         self.is64 = layout.is64
         self.swap = layout.swap
+        self.headerSize = layout.headerSize
         self.cpuType = swapped(header.cputype)
         self.cpuSubtype = swapped(header.cpusubtype)
         self.filetype = swapped(header.filetype)
@@ -148,8 +151,7 @@ struct MachO {
             return nil
         }
         // The limit is for a table the slice holds: one past the slice is a table it does not hold, whatever its size.
-        let headerSize = image.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
-        guard image.sizeofcmds <= Self.maxLoadCommandsSize || headerSize + image.sizeofcmds > image.length else {
+        guard image.sizeofcmds <= Self.maxLoadCommandsSize || image.headerSize + image.sizeofcmds > image.length else {
             throw ParserError.loadCommandsTooLarge(size: image.sizeofcmds, limit: Self.maxLoadCommandsSize)
         }
         guard image.tableIsValid else {
@@ -187,8 +189,7 @@ struct MachO {
                 nil
             }
             if let range, range.size > UInt64(image.length) || range.offset > UInt64(image.length) - range.size {
-                let name = String(decoding: command.data.dropFirst(8).prefix(16).prefix { $0 != 0 }, as: UTF8.self)
-                throw ParserError.invalidSegmentRange(name: name, offset: range.offset, size: range.size, fileSize: image.length)
+                throw ParserError.invalidSegmentRange(name: command.segmentName, offset: range.offset, size: range.size, fileSize: image.length)
             }
         }
 
@@ -315,9 +316,8 @@ struct MachO {
      reference bytes not modeled here.
      */
     func logicalEnd() -> Int {
-        let headerSize = self.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
         let count = UInt64(self.length)
-        var end = min(headerSize + self.sizeofcmds, self.length)
+        var end = min(self.headerSize + self.sizeofcmds, self.length)
 
         for command in self.loadCommands {
             guard let ranges = self.fileRanges(of: command) else {

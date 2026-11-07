@@ -276,11 +276,12 @@ enum MachOEditor {
                     keep(kept, data)
                     logger.info("\(subject, privacy: .public): decompressed, kept as it is: \(why, privacy: .public)")
                 }
-                let (data, message, notes, decompressed) = try packMach.unpack()
-                if let message {
+                let output = try packMach.unpack()
+                let data = output.data
+                if let message = output.caveat {
                     caveat(message)
                 }
-                if let decompressed {
+                if let decompressed = output.decompressed {
                     hold(decompressed, "the blocks under no XOR key, as decoded")
                 }
                 if let unsigned, !edits.contains(.unsigned) {
@@ -291,7 +292,7 @@ enum MachOEditor {
                 }
                 edits.insert(.unpacked)
                 states.append(State(edits: edits, pieces: [.bytes(data)]))
-                for note in notes {
+                for note in output.notes {
                     logger.info("\(subject, privacy: .public): unpacked, \(note, privacy: .public)")
                 }
 
@@ -306,7 +307,7 @@ enum MachOEditor {
                 } catch {
                     let reason = error is UnpackError ? "file header corrupted" : "the unpacked image does not parse, \(File.message(for: error))"
                     hold(data, reason)
-                    throw UnpackError.unverified(reason, decompressed: data)
+                    throw UnpackError.unverified(reason)
                 }
                 align = unpacked.universalAlignment
                 // Its own cut, as needed for its own signature to come out.
@@ -459,8 +460,7 @@ extension MachO {
             throw EditError.signatureNotAtEnd
         }
         // A signature laid over the header and the load commands, which are rewritten below, is no image to give back.
-        let headerSize = self.is64 ? MemoryLayout<mach_header_64>.size : MemoryLayout<mach_header>.size
-        guard signature.offset >= headerSize + self.sizeofcmds else {
+        guard signature.offset >= self.headerSize + self.sizeofcmds else {
             throw EditError.signatureInsideHeaders
         }
 
