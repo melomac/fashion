@@ -115,6 +115,7 @@ struct MachO {
 
         // mach_header and mach_header_64 share their leading fields, so the 32-bit struct reads them all.
         let header = head.withUnsafeBytes { $0.loadUnaligned(as: mach_header.self) }
+        /// `value` in the host's byte order, swapped where the image's is the other.
         func swapped<T: FixedWidthInteger>(_ value: T) -> T {
             layout.swap ? value.byteSwapped : value
         }
@@ -370,7 +371,7 @@ struct MachO {
      short for its structure or that might reference bytes not modeled here.
      */
     func fileRanges(of command: LoadCommand) -> [FileRange]? {
-        // `count` entries of `stride` bytes at `offset`: a 32-bit count times a structure size fits in 64 bits.
+        /// `count` entries of `stride` bytes at `offset`: a 32-bit count times a structure size fits in 64 bits.
         func range(_ name: String, _ offset: some FixedWidthInteger, _ count: some FixedWidthInteger, stride: Int = 1) -> FileRange {
             FileRange(name: name, offset: UInt64(self.sw(offset)), size: UInt64(self.sw(count)) * UInt64(stride))
         }

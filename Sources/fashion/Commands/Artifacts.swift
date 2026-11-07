@@ -273,6 +273,7 @@ struct ArtifactWriter {
             self.condition.unlock()
         }
 
+        /// Give `path` up, and wake whoever waits for it.
         func release(_ path: String) {
             self.condition.lock()
             self.paths.remove(path)
@@ -280,12 +281,14 @@ struct ArtifactWriter {
             self.condition.unlock()
         }
 
+        /// Note `temporary` as being written, for `abandon` to remove if the run dies.
         func begin(_ temporary: String) {
             self.condition.lock()
             self.temporaries.insert(temporary)
             self.condition.unlock()
         }
 
+        /// `temporary` is placed or gone: nothing to remove.
         func end(_ temporary: String) {
             self.condition.lock()
             self.temporaries.remove(temporary)
@@ -330,6 +333,8 @@ struct ArtifactWriter {
         guard info.st_mode & S_IFMT == S_IFREG else {
             throw ArtifactError.notRegularFileInTheWay
         }
+
+        // What is there decides first, read and not written: the same bytes stay, different ones are reported.
         let before = try Self.identity(of: File(path: path))
         let after = try Self.identity(of: file)
         if before.size == after.size, before.digest == after.digest {
@@ -338,6 +343,8 @@ struct ArtifactWriter {
         guard overwrite else {
             return .differs(before: before, after: after)
         }
+
+        // The other file gives the name up, kept beside as the conflict backup, and the artifact takes it.
         let backup = try Self.conflictBackup(path)
         _ = try Self.place(file, at: path, exclusively: false)
         return .replaced(before: before, after: after, backup: backup)

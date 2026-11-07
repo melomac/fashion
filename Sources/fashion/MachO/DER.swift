@@ -52,6 +52,7 @@ enum DER {
         /// `maxDepth`; nil for anything else, or none left, `fault` saying which.
         mutating func next() -> Element? {
             let start = self.offset
+            /// Nothing read, `why` kept for the caller.
             func refused(_ why: String) -> Element? {
                 self.fault = why
                 return nil
@@ -178,6 +179,7 @@ enum DER {
             return nil
         }
         let digits = content.prefix(14).map { Int($0 - 0x30) }
+        /// The number the `count` digits from `start` spell.
         func field(_ start: Int, _ count: Int) -> Int {
             digits[start ..< start + count].reduce(0) { $0 * 10 + $1 }
         }

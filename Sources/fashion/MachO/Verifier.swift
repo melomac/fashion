@@ -132,6 +132,7 @@ struct MachOVerifier {
             Self.protection(self.initprot)
         }
 
+        /// `prot` as `vmmap` spells it, `rwx`, a dash for each right it lacks.
         static func protection(_ prot: Int32) -> String {
             [(VM_PROT_READ, "r"), (VM_PROT_WRITE, "w"), (VM_PROT_EXECUTE, "x")].map { prot & $0.0 != 0 ? $0.1 : "-" }.joined()
         }
@@ -220,6 +221,7 @@ struct MachOVerifier {
         return (0 ..< held).map { index in
             let at = header + index * stride
             let data = command.data.bytes(in: at ..< at + stride)
+            /// The bytes of the entry at `range`, as a line shows a name.
             func name(_ range: Range<Int>) -> String {
                 Self.shown(data.bytes(in: range))
             }
@@ -269,7 +271,7 @@ struct MachOVerifier {
 
     /// The major version of the SDK the image was built against, as its version command records it; nil without one.
     private var sdkMajor: UInt32? {
-        ((try? self.image.version()) ?? nil).map { $0.sdk >> 16 }
+        (try? self.image.version()).map { $0.sdk >> 16 }
     }
 
     /// Whether no loader maps the image as a file (see `anomalies()`).
@@ -681,7 +683,10 @@ struct MachOVerifier {
         var found: [String] = []
         // The lines of a few sections, or pairs of them, named one by one, the rest counted: a crafted table holds
         // hundreds of thousands of sections, each tripping every rule.
-        var (named, more, moreLines) = (0, 0, 0)
+        var named = 0
+        var more = 0
+        var moreLines = 0
+        /// `lines` for one section, taken while few sections were named, counted after that.
         func add(_ lines: [String]) {
             guard !lines.isEmpty else {
                 return
@@ -1062,7 +1067,7 @@ struct MachOVerifier {
             found.append(packed.packer)
             found += Self.sizeClaim(packed)
         case .success(nil):
-            if image.findCommand(UInt32(LC_CODE_SIGNATURE)) != nil, let pieces = (try? MachOEditor.unsigned(image, end: end)) ?? nil, let unsigned = (try? MachO(File(editing: self.file, pieces: pieces))) ?? nil {
+            if image.findCommand(UInt32(LC_CODE_SIGNATURE)) != nil, let pieces = try? MachOEditor.unsigned(image, end: end), let unsigned = try? MachO(File(editing: self.file, pieces: pieces)) {
                 switch Result(catching: { try PackMach(unsigned) }) {
                 case let .success(packed?):
                     found.append("\(packed.packer), signed after packing")
@@ -1085,7 +1090,7 @@ struct MachOVerifier {
      line, or none.
      */
     private static func sizeClaim(_ packed: PackMach) -> [String] {
-        guard let sizes = (try? packed.claimedSizes()) ?? nil, sizes.pInfo != sizes.header else {
+        guard let sizes = try? packed.claimedSizes(), sizes.pInfo != sizes.header else {
             return []
         }
         return ["UPX's p_info claims \(sizes.pInfo) bytes for the original where its pack header, under its checksum, says \(sizes.header)"]

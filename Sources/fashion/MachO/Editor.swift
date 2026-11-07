@@ -186,6 +186,7 @@ enum MachOEditor {
             held.forEach { caveat(nil, $0) }
             throw error
         }
+
         switch opened {
         case let .thin(image):
             var said: [String] = []
@@ -285,17 +286,18 @@ enum MachOEditor {
 
         // With unpack alone, a signature that cannot come out, or leaves no image behind, is no sign of UPX: the image
         // is looked at as it is.
-        let unsigned = try unsign ? self.unsigned(image, end: end) : (try? self.unsigned(image, end: end)) ?? nil
+        let unsigned = try unsign ? self.unsigned(image, end: end) : try? self.unsigned(image, end: end)
         if unsign, let unsigned {
             edits.insert(.unsigned)
             states.append(State(edits: edits, pieces: unsigned))
             logger.info("\(subject, privacy: .public): unsigned, \(Self.removal(of: unsigned, from: end), privacy: .public)")
         }
+
         var align = image.universalAlignment
         if unpack {
             // A signature added after packing hides the 16-byte __LINKEDIT UPX leaves, so upx -d gives up on it: the
             // image is looked at without it.
-            let probed = unsigned.flatMap { (try? MachO(File(editing: file, pieces: $0))) ?? nil } ?? image
+            let probed = unsigned.flatMap { try? MachO(File(editing: file, pieces: $0)) } ?? image
             if let packMach = try PackMach(probed) {
                 // What decompressed of an image that fails a check, or decoded under no key where a key was applied,
                 // kept as it is for --keep: named for the edits before it, the signature that came out for UPX to be
@@ -431,6 +433,7 @@ enum MachOEditor {
 
     /// `universal(_:is64:)` with a table of 32-bit or `wide` entries; nil for a 32-bit table that cannot place a slice.
     private static func universal(_ slices: [Slice], wide: Bool) -> [File.Piece]? {
+        /// `value` appended to `data` big-endian, as the table is written.
         func append(_ value: some FixedWidthInteger, to data: inout Data) {
             withUnsafeBytes(of: value.bigEndian) { data.append(contentsOf: $0) }
         }
@@ -541,6 +544,7 @@ extension MachO {
 
         // The header and load commands, where a command's data keeps the table's indices, its offsets in the image.
         var head = try self.dataAt(0, count: headerSize + self.sizeofcmds)
+        /// `value` written into the headers at `offset`, in the image's byte order.
         func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
             head.withUnsafeMutableBytes { $0.storeBytes(of: self.sw(value), toByteOffset: offset, as: T.self) }
         }

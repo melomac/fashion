@@ -720,6 +720,7 @@ extension Reporter {
             self.reporter = reporter
         }
 
+        /// A warning about the file, or its slice `arch`: yellow, a notice in the log, uncounted.
         func warn(_ message: String, arch: String? = nil) {
             self.lines.append(self.reporter.warn(path: Reporter.subject(self.path, arch: arch), message: message))
         }
@@ -734,18 +735,23 @@ extension Reporter {
             self.warn("\(File.message(for: error)), \(arch == nil ? "" : "the file ")\(fate)", arch: arch)
         }
 
+        /// A warning about another path, a file in place of one of the file's artifacts.
         func warn(_ message: String, at path: String) {
             self.lines.append(self.reporter.warn(path: path, message: message))
         }
 
+        /// What an algorithm left out of the file, or its slice `arch`, by its definition: yellow, info in the log,
+        /// uncounted.
         func inform(_ message: String, arch: String? = nil) {
             self.lines.append(self.reporter.inform(path: Reporter.subject(self.path, arch: arch), message: message))
         }
 
+        /// A failure of the file, or of its slice `arch`: an error in the log, counted, red for malformed bytes.
         func refuse(_ error: Error, arch: String? = nil) {
             self.lines.append(self.reporter.report(path: Reporter.subject(self.path, arch: arch), error: error))
         }
 
+        /// A line for standard output, in its place among what was said.
         func show(_ line: Line) {
             self.lines.append(line)
         }

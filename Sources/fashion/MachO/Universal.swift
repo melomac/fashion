@@ -284,6 +284,7 @@ enum Universal {
         let extra = !is64 && tableSize + entrySize <= file.size
         let read = tableSize + (extra ? entrySize : 0)
         let table = read <= head.count ? head : try file.read(at: 0, count: read)
+
         return try table.withUnsafeBytes { ptr in
             var archs: [Architecture] = []
             var hiddenRefused: HiddenRefusal?

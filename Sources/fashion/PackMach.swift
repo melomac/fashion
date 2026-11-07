@@ -320,18 +320,27 @@ struct PackMach {
         let count = (1 << format.pageShift) + 208 + 4
 
         // A window to read the pack header back from, and where it lies for the warning when no segment name said.
-        typealias Window = (start: Int, count: Int, found: String?)
+
+        /// Where the pack header may lie: `count` bytes of the image from `start`, and where that is in the segments'
+        /// terms, `found`, for a header found without its marker to be said so, nil where the names led there.
+        struct Window {
+            let start: Int
+            let count: Int
+            let found: String?
+        }
         var windows: [Window] = []
 
+        /// The window of `count` bytes before `offLINK`, cut at the image's start.
         func before(_ offLINK: Int, found: String?) -> Window {
             let start = offLINK - count
-            return start < 0 ? (0, count + start, found) : (start, count, found)
+            return start < 0 ? Window(start: 0, count: count + start, found: found) : Window(start: start, count: count, found: found)
         }
 
+        /// The window of `count` bytes from `offLINK`, cut at the image's end; nil for fewer than 12.
         func after(_ offLINK: Int, found: String?) -> Window? {
             // UPX gives up here ("bad offLINK"); a __LINKEDIT this short is a linker's, in an image it never packed.
             let count = min(count, image.length - offLINK)
-            return count >= 12 ? (offLINK, count, found) : nil
+            return count >= 12 ? Window(start: offLINK, count: count, found: found) : nil
         }
 
         // The window the segment names lead to, as canUnpack reads it.
@@ -411,6 +420,7 @@ struct PackMach {
             }
             found = FoundHeader(header: packHeader, offset: window.start + i + packHeader.offset, overlayOffset: overlayOffset, location: window.found)
         }
+
         guard let found else {
             // No pack header where the scan looks, before the 16-byte __LINKEDIT only UPX writes: a packed image
             // whose zero padding after the header was written into, which moves the last non-zero byte the scan
@@ -478,6 +488,8 @@ struct PackMach {
         if plain.cAdler != self.cAdler {
             sums.append("the packed bytes sum to \(plain.cAdler.hex), the pack header says \(self.cAdler.hex)")
         }
+        /// The word on the image: the packer's (`caveat(xor:)`), and the sums neither UPX nor its stub reads that do
+        /// not hold, `unverified` among them; nil when there is none.
         func said(_ xor: UInt8, _ unverified: String?) -> String? {
             let all = sums + (unverified.map { [$0] } ?? [])
             let text = [self.caveat(xor: xor), all.isEmpty ? nil : "checksums neither UPX nor its stub reads: " + all.joined(separator: ", ")].compactMap(\.self).joined(separator: "; ")
@@ -1090,9 +1102,12 @@ struct PackMach {
         else {
             return
         }
+        /// The little-endian word at `at`.
         func le32(_ at: Int) -> UInt32 {
             b.loadUnaligned(fromByteOffset: at, as: UInt32.self).littleEndian
         }
+
+        /// The big-endian word at `at`.
         func be32(_ at: Int) -> UInt32 {
             b.loadUnaligned(fromByteOffset: at, as: UInt32.self).bigEndian
         }
@@ -1239,6 +1254,7 @@ extension PackMach {
             guard p.count >= 20 else {
                 throw UnpackError.cantUnpack("header corrupted 1")
             }
+            /// The 32-bit word `index` bytes in, in the header's byte order.
             func word(_ index: Int, bigEndian: Bool) -> UInt32 {
                 let value = p.dropFirst(index).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
                 return bigEndian ? value.bigEndian : value.littleEndian

@@ -695,6 +695,7 @@ struct EmbeddedCodeDirectory {
             return nil
         }
 
+        /// Whether the C string at `offset` ends inside the blob, a NUL before its end.
         func endsInside(_ offset: UInt32) -> Bool {
             Int(offset) < length && blob.bytes(in: Int(offset) ..< length).contains(0)
         }
