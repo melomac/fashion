@@ -71,6 +71,19 @@ enum MachOEditor {
     }
 
     /**
+     One slice of a universal file as the edits leave it, for `universal(_:is64:)` to lay out: its architecture, as
+     the table read it, its bytes, pieces of the file or in memory, and the alignment `lipo` gives it, as a power of
+     two; with the states it went through and its `exact` cut alone, for the `Edit`.
+     */
+    struct Slice {
+        let arch: Universal.Architecture
+        let pieces: [File.Piece]
+        let align: Int
+        var states: [State] = []
+        var cut: State?
+    }
+
+    /**
      How far the `exact` cut goes: nowhere (`never`), or everywhere, each image cut where its load commands end it
      (`always`), as hash mode has it without and with --exact; or where a stage needs it alone (`asNeeded`), as `thinr`,
      `unsign` and `unpack` have it without --exact: a file cut short of its last page padded to be read at all, an
@@ -178,18 +191,18 @@ enum MachOEditor {
         case let .fat(table):
             // Each slice is named as Universal.named names it, the second of one architecture apart, as the artifacts
             // of them are.
-            let slices = try Universal.named(table.archs).map { arch, name -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State], cut: State?) in
+            let slices = try Universal.named(table.archs).map { arch, name -> Slice in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                         // An archive, which lipo aligns to 2^3 whatever its architecture.
-                        return (arch, whole, 3, [], nil)
+                        return Slice(arch: arch, pieces: whole, align: 3)
                     }
                     let edit = try self.edit(image, of: file, subject: "\(file.path) (\(name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(name, $0) }, keep: keep.map { held in { held(name, $0, $1) } })
                     guard let last = edit.states.last else {
-                        return (arch, whole, image.universalAlignment, [], edit.cut)
+                        return Slice(arch: arch, pieces: whole, align: image.universalAlignment, cut: edit.cut)
                     }
-                    return (arch, last.pieces, edit.align, edit.states, nil)
+                    return Slice(arch: arch, pieces: last.pieces, align: edit.align, states: edit.states)
                 } catch {
                     throw SliceError(arch: name, error: error)
                 }
@@ -197,7 +210,7 @@ enum MachOEditor {
             guard slices.contains(where: { !$0.states.isEmpty }) else {
                 return Edit(file: file, states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
             }
-            return Edit(file: File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: table.is64)), states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
+            return Edit(file: File(editing: file, pieces: self.universal(slices, is64: table.is64)), states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
         case .notMachO:
             return nil
         }
@@ -381,12 +394,12 @@ enum MachOEditor {
      count of one. The table is 32-bit unless the file was, or a slice lies or sizes past 4 GiB, which `lipo` writes a
      64-bit table for too.
      */
-    static func universal(_ slices: [(arch: Universal.Architecture, pieces: [File.Piece], align: Int)], is64: Bool) -> [File.Piece] {
+    static func universal(_ slices: [Slice], is64: Bool) -> [File.Piece] {
         self.universal(slices, wide: is64) ?? self.universal(slices, wide: true)!
     }
 
     /// `universal(_:is64:)` with a table of 32-bit or `wide` entries; nil for a 32-bit table that cannot place a slice.
-    private static func universal(_ slices: [(arch: Universal.Architecture, pieces: [File.Piece], align: Int)], wide: Bool) -> [File.Piece]? {
+    private static func universal(_ slices: [Slice], wide: Bool) -> [File.Piece]? {
         func append(_ value: some FixedWidthInteger, to data: inout Data) {
             withUnsafeBytes(of: value.bigEndian) { data.append(contentsOf: $0) }
         }

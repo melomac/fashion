@@ -316,17 +316,17 @@ final class UnsignerTests: XCTestCase {
             return (UInt32(bigEndian: table.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }), table.count)
         }
         let arch = Universal.Architecture(cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_ALL, offset: 0x1000, length: 0x1_0000_0000, align: 12, hidden: false)
-        let large = MachOEditor.universal([(arch: arch, pieces: [File.Piece.range(0 ..< 0x1_0000_0000)], align: 12)], is64: false)
+        let large = MachOEditor.universal([MachOEditor.Slice(arch: arch, pieces: [.range(0 ..< 0x1_0000_0000)], align: 12)], is64: false)
         XCTAssertEqual(try table(large).magic, FAT_MAGIC_64)
         XCTAssertEqual(try table(large).count, 8 + 32)
         XCTAssertEqual(large.reduce(0) { $0 + $1.count }, 0x1000 + 0x1_0000_0000)
-        let small = MachOEditor.universal([(arch: arch, pieces: [File.Piece.range(0 ..< 0x1000)], align: 12)], is64: false)
+        let small = MachOEditor.universal([MachOEditor.Slice(arch: arch, pieces: [.range(0 ..< 0x1000)], align: 12)], is64: false)
         XCTAssertEqual(try table(small).magic, FAT_MAGIC)
         XCTAssertEqual(try table(small).count, 8 + 20)
 
         // A hidden slice is counted in a 64-bit table, where no reader looks past the count.
         let hidden = Universal.Architecture(cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64_ALL, offset: 0x1_0000_4000, length: 0x1000, align: 14, hidden: true)
-        let both = MachOEditor.universal([(arch: arch, pieces: [File.Piece.range(0 ..< 0x1_0000_0000)], align: 12), (arch: hidden, pieces: [File.Piece.range(0 ..< 0x1000)], align: 14)], is64: false)
+        let both = MachOEditor.universal([MachOEditor.Slice(arch: arch, pieces: [.range(0 ..< 0x1_0000_0000)], align: 12), MachOEditor.Slice(arch: hidden, pieces: [.range(0 ..< 0x1000)], align: 14)], is64: false)
         guard case let .bytes(wide)? = both.first else {
             return XCTFail("no table")
         }
