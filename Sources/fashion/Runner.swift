@@ -1106,7 +1106,7 @@ struct Digester {
         case .symhash: "no symhash as it is"
         default: "hashed as it is"
         }
-        func edit(unsign: Bool, unpack: Bool) -> (file: File, states: [[MachOEditor.State]], source: File, archs: [Universal.Architecture]?)? {
+        func edit(unsign: Bool, unpack: Bool) -> MachOEditor.Edit? {
             do {
                 return try MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: unsign, unpack: unpack, caveat: warned)
             } catch where unpack && Self.isUnpackError(error) {
@@ -1126,17 +1126,29 @@ struct Digester {
         }
         let edited = self.unsign || self.unpack || self.exact ? edit(unsign: self.unsign, unpack: self.unpack) : nil
         let file = edited?.file ?? read
-        // Whether the file is universal, by the editor's word where it refused the file, or by its table; a thin
-        // Mach-O that does not parse, which no edit was asked of, is refused here the same way.
-        func isUniversal() throws -> Bool {
+        // The exact cut alone, which is no edit, for the file as it is: where the editor read the file and changed
+        // nothing of it, or did not read it. A file it changed was cut as it went, and is not cut a second time, which
+        // the lenient end rule would refuse on an image cut back to its segments' bytes.
+        let cutAlone = self.exact && !refused && (edited?.isUnchanged ?? true)
+        // Whether the file is universal, and its table where it was read, which --slices and --symhash take the
+        // slices from: as the editor read it, where an edit was asked of the file, nothing done included; by the
+        // editor's word where it refused the file, whose slices are then read again as the table places them; else
+        // read here, a thin Mach-O that does not parse, which no edit was asked of, refused the same way.
+        func universal() throws -> (fat: Bool, archs: [Universal.Architecture]?) {
+            if let edited {
+                return (edited.archs != nil, edited.archs)
+            }
             if refused {
-                return refusedSlice
+                return (refusedSlice, nil)
             }
-            if let fat = try self.isUniversal(file, warned: warned, fate: fate) {
-                return fat
+            guard let universal = try self.universal(of: read, warned: warned, fate: fate) else {
+                refused = true
+                return (false, nil)
             }
-            refused = true
-            return false
+            guard case let .fat(archs) = universal else {
+                return (false, nil)
+            }
+            return (true, archs)
         }
         // What TLSH leaves out of a digest, or why it made none, or that an image has no symbol table, named after
         // the architecture or state it is about. --quiet shortens standard output alone: every line for standard
@@ -1148,24 +1160,22 @@ struct Digester {
         case let .file(hashes):
             // The file as it is, then as the edits left it, one artifact named for them as unsign and unpack name
             // theirs, or none.
-            // The editor cut every image already when it ran: the whole is not cut a second time, which the lenient
-            // end rule would refuse on an image cut back to its segments' bytes.
-            return try self.artifactDigests(ArtifactWriter.whole(file, exact: self.exact && edited == nil && !refused, states: edited?.states), of: path, reporter: reporter, note: note, whole: {
+            return try self.artifactDigests(ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states), of: path, reporter: reporter, note: note, whole: {
                 try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
             }, digests: Self.byteDigests(hashes, caveat: caveat))
         case let .slices(hashes):
             // The file as it is, then as the edits left it whole, then each slice's states; a thin file's whole is its
             // last state, printed once.
-            let fat = try isUniversal()
-            let slices = try !fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: edited?.archs)
-            return try self.artifactDigests(fat ? ArtifactWriter.whole(file, exact: self.exact && edited == nil && !refused, states: edited?.states) + slices : slices, of: path, reporter: reporter, note: note, whole: {
+            let (fat, archs) = try universal()
+            let slices = try !fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: archs)
+            return try self.artifactDigests(fat ? ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states) + slices : slices, of: path, reporter: reporter, note: note, whole: {
                 try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
             }, digests: Self.byteDigests(hashes, caveat: caveat))
         case let .symhash(hashes, separator, sortSymbols):
             // The same states, their symbols; a thin file's own come first, as it is, and a universal file's slices
             // as the table places them are states of their own.
-            let fat = try isUniversal()
-            return try self.artifactDigests(!fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: edited?.archs), of: path, reporter: reporter, note: note, whole: {
+            let (fat, archs) = try universal()
+            return try self.artifactDigests(!fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: archs), of: path, reporter: reporter, note: note, whole: {
                 // A thin file's own symbols, unless the editor refused it, which was said: a file that does not parse
                 // as it is, cut short of its last page say, is said to have none where the edits padded it and went on.
                 guard !fat, !refused else {
@@ -1279,13 +1289,14 @@ struct Digester {
     }
 
     /**
-     Whether `file` is universal, each of its architectures read as a thin Mach-O, as Security's `Universal` places a
-     `MachO` at its offset: a malformed slice is said to `warned` after its name (`Universal.named`), --exact or not,
-     and hashed as the table places it, as `lipo -thin` takes it, since hash mode hashes every file. A thin Mach-O
-     that does not parse is said the same way, with `fate`, and is nil: neither universal nor an image to read. A
-     file that cannot be read throws. Only the headers are read.
+     `file` as `Universal` opens it, each architecture of a universal file read as a thin Mach-O, as Security's
+     `Universal` places a `MachO` at its offset: a malformed slice is said to `warned` after its name
+     (`Universal.named`), --exact or not, and hashed as the table places it, as `lipo -thin` takes it, since hash mode
+     hashes every file. A thin Mach-O that does not parse is said the same way, with `fate`, and is nil: neither
+     universal nor an image to read. A file that cannot be read throws. Only the headers are read, and once: the table
+     goes on to `ArtifactWriter.slices` as it was read here.
      */
-    private func isUniversal(_ file: File, warned: (_ arch: String?, _ message: String) -> Void, fate: String) throws -> Bool? {
+    private func universal(of file: File, warned: (_ arch: String?, _ message: String) -> Void, fate: String) throws -> Universal? {
         let universal: Universal
         do {
             universal = try Universal.open(file)
@@ -1295,17 +1306,16 @@ struct Digester {
             warned(nil, "\(File.message(for: error)), \(fate)")
             return nil
         }
-        guard case let .fat(archs) = universal else {
-            return false
-        }
-        for (arch, name) in Universal.named(archs) {
-            do {
-                _ = try MachO(file, offset: arch.offset, length: arch.length)
-            } catch {
-                warned(name, "\(File.message(for: error)), hashed as the table places it")
+        if case let .fat(archs) = universal {
+            for (arch, name) in Universal.named(archs) {
+                do {
+                    _ = try MachO(file, offset: arch.offset, length: arch.length)
+                } catch {
+                    warned(name, "\(File.message(for: error)), hashed as the table places it")
+                }
             }
         }
-        return true
+        return universal
     }
 
     /**

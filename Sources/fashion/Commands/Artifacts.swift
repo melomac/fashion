@@ -128,8 +128,8 @@ struct ArtifactWriter {
             }, keep: self.keep ? { arch, edits, data in
                 kept.append(Artifact(name: (arch.map { [$0] } ?? []) + edits.words, bytes: File(editing: read, pieces: [.bytes(data)])))
             } : nil) : nil
-            let opened = edited?.source ?? read
-            artifacts = try self.split ? Self.slices(of: opened, exact: self.exact, states: edited?.states, archs: edited?.archs) : Self.whole(edited?.file ?? opened, exact: self.exact, states: edited?.states)
+            let source = edited?.source ?? read
+            artifacts = try self.split ? Self.slices(of: source, exact: self.exact, states: edited?.states, archs: edited?.archs) : Self.whole(edited?.file ?? source, exact: self.exact, states: edited?.states)
         } catch {
             // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
             return caveats + self.written(kept, for: path, reporter: reporter) + [reporter.report(path: Digester.subject(path, of: error), message: File.message(for: error), tint: Digester.tint(for: error))]

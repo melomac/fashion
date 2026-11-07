@@ -87,9 +87,33 @@ enum MachOEditor {
     }
 
     /**
-     The file as the edits leave it, the states each image went through, one per edit, in the order of a
-     universal file's architectures, an image the edits leave alone with none, and the file the states are pieces of,
-     `file` or its padding (`padded`); nil when they change nothing. With
+     What the edits made of a file: `file`, the file as they leave it, which hash mode digests whole and `unsign` and
+     `unpack` write; `states`, the way each image went, one chain per image in the order of a universal file's
+     architectures, a thin file's alone, empty for an image the edits leave alone, each piece a range of `source` or
+     bytes in memory; `source`, the file the states are pieces of, the file as read or padded to be read (`padded`);
+     and `archs`, a universal file's table as it was read for the edit, which the states follow, so that what is
+     named, digested or written after them follows the same read and reads the table no second time, nil for a thin
+     file.
+     */
+    struct Edit {
+        let file: File
+        let states: [[State]]
+        let source: File
+        let archs: [Universal.Architecture]?
+
+        /// Whether the edits left every image as it is: `file` is `source`, and the `exact` cut alone, which is no
+        /// edit, is still to come where it is asked.
+        var isUnchanged: Bool {
+            self.states.allSatisfy(\.isEmpty)
+        }
+    }
+
+    /**
+     What the edits make of `file` (`Edit`): the file as they leave it, the states each image went through, one per
+     edit, in the order of a universal file's architectures, an image the edits leave alone with none, and the file
+     the states are pieces of, `file` or its padding (`padded`); every image with none when they change nothing, the
+     table read all the same, so that what comes after the edit reads it no second time; nil for a file that is not
+     Mach-O. With
      `unsign`, each image comes out without its code signature, as `MachO.removingSignature(end:)` leaves it; with
      `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing, since it
      hides what UPX left, then with `unsign` the unpacked image's own signature comes out; a universal file with its
@@ -109,7 +133,7 @@ enum MachOEditor {
      file's architectures as its table was read for the edit, which the states follow, for the artifacts to be named
      without a second read of the table; nil for a thin file.
      */
-    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> (file: File, states: [[State]], source: File, archs: [Universal.Architecture]?)? {
+    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit? {
         let read = file
         var held: [String] = []
         let file = try exact == .never ? file : self.padded(file, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
@@ -135,9 +159,9 @@ enum MachOEditor {
                 if file !== read {
                     _ = try Universal.open(read)
                 }
-                return nil
+                return Edit(file: file, states: [[]], source: file, archs: nil)
             }
-            return (File(editing: file, pieces: edit.states.last!.pieces), [edit.states], file, nil)
+            return Edit(file: File(editing: file, pieces: edit.states.last!.pieces), states: [edit.states], source: file, archs: nil)
         case let .fat(archs):
             // Each slice is named as Universal.named names it, the second of one architecture apart, as the artifacts
             // of them are.
@@ -157,10 +181,10 @@ enum MachOEditor {
                 }
             }
             guard slices.contains(where: { !$0.states.isEmpty }) else {
-                return nil
+                return Edit(file: file, states: slices.map(\.states), source: file, archs: archs)
             }
             let magic = try file.read(at: 0, count: MemoryLayout<UInt32>.size).withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
-            return (File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: magic == FAT_MAGIC_64)), slices.map(\.states), file, archs)
+            return Edit(file: File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: magic == FAT_MAGIC_64)), states: slices.map(\.states), source: file, archs: archs)
         case .notMachO:
             return nil
         }

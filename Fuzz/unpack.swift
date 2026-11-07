@@ -14,7 +14,7 @@ public func fuzzUnpack(_ start: UnsafeRawPointer, _ count: Int) -> CInt {
 
     for exact in [MachOEditor.Exact.never, .asNeeded, .always] {
         for unsign in [true, false] {
-            guard let edit = try? MachOEditor.edit(file, exact: exact, unsign: unsign, unpack: true) else {
+            guard let edit = try? MachOEditor.edit(file, exact: exact, unsign: unsign, unpack: true), !edit.isUnchanged else {
                 continue
             }
             try? edit.file.stream(0 ..< edit.file.size) { _ in }
