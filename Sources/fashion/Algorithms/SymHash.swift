@@ -16,11 +16,11 @@ enum SymHash {
                 guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                     return []
                 }
-                return try self.hash(image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(name, $0) })
+                return try self.digests(of: image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(name, $0) })
                     .map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm, label: name) }
             }
         case let .thin(image):
-            try self.hash(image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(nil, $0) })
+            try self.digests(of: image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(nil, $0) })
                 .map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
         case .notMachO:
             []
@@ -35,7 +35,7 @@ enum SymHash {
         guard let image = try MachO(file) else {
             return []
         }
-        return try self.hash(image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
+        return try self.digests(of: image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
     }
 
     // MARK: - Symbol Table
@@ -225,10 +225,10 @@ enum SymHash {
     // MARK: - Private
 
     /**
-     The symhash of one image by each algorithm; none when it carries no symbol table, as a UPX stub carries none,
-     which `caveat` is told, "no external symbol table", as `verify` names it.
+     The symhash of one image by each algorithm, `image` as it was read already; none when it carries no symbol table,
+     as a UPX stub carries none, which `caveat` is told, "no external symbol table", as `verify` names it.
      */
-    private static func hash(_ image: MachO, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (String) -> Void) throws -> [(hash: ByteHash, digest: String)] {
+    static func digests(of image: MachO, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (String) -> Void) throws -> [(hash: ByteHash, digest: String)] {
         guard
             let command = image.findCommand(UInt32(LC_SYMTAB)),
             let symtab = try self.parseSymtab(command: command, swap: image.swap)

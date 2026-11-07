@@ -1139,13 +1139,13 @@ struct Digester {
         // nothing of it, or did not read it. A file it changed was cut as it went, and is not cut a second time, which
         // the lenient end rule would refuse on an image cut back to its segments' bytes.
         let cutAlone = self.exact && !refused && (edited?.isUnchanged ?? true)
-        // Whether the file is universal, and its table where it was read, which --slices and --symhash take the
-        // slices from: as the editor read it, where an edit was asked of the file, nothing done included; by the
-        // editor's word where it refused the file, whose slices are then read again as the table places them; else
-        // read here, a thin Mach-O that does not parse, which no edit was asked of, refused the same way.
-        func universal() throws -> (fat: Bool, archs: [Universal.Architecture]?) {
+        // Whether the file is universal, and the file as it was read, which --slices and --symhash take the slices
+        // from: as the editor read it, where an edit was asked of the file, nothing done included; by the editor's
+        // word where it refused the file, whose slices are then read again as the table places them; else read here,
+        // a thin Mach-O that does not parse, which no edit was asked of, refused the same way.
+        func universal() throws -> (fat: Bool, opened: Universal?) {
             if let edited {
-                return (edited.archs != nil, edited.archs)
+                return (edited.archs != nil, edited.opened)
             }
             if refused {
                 return (refusedSlice, nil)
@@ -1154,10 +1154,10 @@ struct Digester {
                 refused = true
                 return (false, nil)
             }
-            guard case let .fat(archs) = universal else {
-                return (false, nil)
+            if case .fat = universal {
+                return (true, universal)
             }
-            return (true, archs)
+            return (false, universal)
         }
         // What TLSH leaves out of a digest, or why it made none, or that an image has no symbol table, named after
         // the architecture or state it is about. --quiet shortens standard output alone: every line for standard
@@ -1169,29 +1169,35 @@ struct Digester {
         case let .file(hashes):
             // The file as it is, then as the edits left it, one artifact named for them as unsign and unpack name
             // theirs, or none.
-            return try self.artifactDigests(ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states), of: path, reporter: reporter, note: note, whole: {
+            return try self.artifactDigests(ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states, opened: edited?.opened), of: path, reporter: reporter, note: note, whole: {
                 try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
             }, digests: Self.byteDigests(hashes, caveat: caveat))
         case let .slices(hashes):
             // The file as it is, then as the edits left it whole, then each slice's states; a thin file's whole is its
             // last state, printed once.
-            let (fat, archs) = try universal()
-            let slices = try !fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: archs)
-            return try self.artifactDigests(fat ? ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states) + slices : slices, of: path, reporter: reporter, note: note, whole: {
+            let (fat, opened) = try universal()
+            let slices = try !fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, opened: opened, states: edited?.states, cuts: edited?.cuts)
+            return try self.artifactDigests(fat ? ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states, opened: edited?.opened) + slices : slices, of: path, reporter: reporter, note: note, whole: {
                 try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
             }, digests: Self.byteDigests(hashes, caveat: caveat))
         case let .symhash(hashes, separator, sortSymbols):
             // The same states, their symbols; a thin file's own come first, as it is, and a universal file's slices
             // as the table places them are states of their own.
-            let (fat, archs) = try universal()
-            return try self.artifactDigests(!fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, exact: self.exact && !refused, states: edited?.states, archs: archs), of: path, reporter: reporter, note: note, whole: {
+            let (fat, opened) = try universal()
+            return try self.artifactDigests(!fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, opened: opened, states: edited?.states, cuts: edited?.cuts), of: path, reporter: reporter, note: note, whole: {
                 // A thin file's own symbols, unless the editor refused it, which was said: a file that does not parse
                 // as it is, cut short of its last page say, is said to have none where the edits padded it and went on.
-                guard !fat, !refused else {
+                guard !fat, !refused, let opened else {
                     return []
                 }
                 do {
-                    return try SymHash.compute(read, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: caveat)
+                    // The file as it is, read the once where nothing padded it; padded, it is read again, to say why
+                    // it does not parse as it is.
+                    let padded = edited.map { $0.source !== read } ?? false
+                    guard case let .thin(image) = try padded ? Universal.open(read) : opened else {
+                        return []
+                    }
+                    return try SymHash.digests(of: image, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(nil, $0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
                 } catch {
                     let subject = Reporter.subject(path, of: error)
                     note(reporter.warn(path: subject, message: "\(File.message(for: error)), no symhash as it is"))

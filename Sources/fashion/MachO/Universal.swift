@@ -175,13 +175,18 @@ enum Universal {
      Throws when a Mach-O is malformed or a fat architecture range cannot address bytes within the file.
      */
     static func fileEnd(_ file: File) throws -> Int {
-        switch try self.open(file) {
+        try self.fileEnd(of: self.open(file), size: file.size)
+    }
+
+    /// The same of a file `size` bytes long as `opened` lays it out, read already.
+    static func fileEnd(of opened: Universal, size: Int) -> Int {
+        switch opened {
         case let .thin(image):
             image.logicalEnd()
         case let .fat(archs):
-            archs.map { $0.offset + $0.length }.max() ?? file.size
+            archs.map { $0.offset + $0.length }.max() ?? size
         case .notMachO:
-            file.size
+            size
         }
     }
 

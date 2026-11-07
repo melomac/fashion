@@ -90,19 +90,30 @@ enum MachOEditor {
      What the edits made of a file: `file`, the file as they leave it, which hash mode digests whole and `unsign` and
      `unpack` write; `states`, the way each image went, one chain per image in the order of a universal file's
      architectures, a thin file's alone, empty for an image the edits leave alone, each piece a range of `source` or
-     bytes in memory; `source`, the file the states are pieces of, the file as read or padded to be read (`padded`);
-     and `archs`, a universal file's table as it was read for the edit, which the states follow, so that what is
-     named, digested or written after them follows the same read and reads the table no second time, nil for a thin
-     file.
+     bytes in memory; `cuts`, the `exact` cut alone of each image the edits leave alone, in the same order, which is
+     no edit and so no state of its own: the artifact `thinr --exact` lists and hash mode digests for the image, nil
+     where the image ends where it is, or something was done to it, its chain then cut as it went; `source`, the file
+     the states are pieces of, the file as read or padded to be read (`padded`); and `opened`, `source` as `Universal`
+     opened it for the edit, which the states follow, so that what is named, digested or written after them follows
+     the same read and reads the headers no second time.
      */
     struct Edit {
         let file: File
         let states: [[State]]
+        let cuts: [State?]
         let source: File
-        let archs: [Universal.Architecture]?
+        let opened: Universal
+
+        /// A universal file's table as it was read for the edit, `opened`'s; nil for a thin file.
+        var archs: [Universal.Architecture]? {
+            if case let .fat(archs) = self.opened {
+                return archs
+            }
+            return nil
+        }
 
         /// Whether the edits left every image as it is: `file` is `source`, and the `exact` cut alone, which is no
-        /// edit, is still to come where it is asked.
+        /// edit, is in `cuts` where it is asked.
         var isUnchanged: Bool {
             self.states.allSatisfy(\.isEmpty)
         }
@@ -110,10 +121,10 @@ enum MachOEditor {
 
     /**
      What the edits make of `file` (`Edit`): the file as they leave it, the states each image went through, one per
-     edit, in the order of a universal file's architectures, an image the edits leave alone with none, and the file
-     the states are pieces of, `file` or its padding (`padded`); every image with none when they change nothing, the
-     table read all the same, so that what comes after the edit reads it no second time; nil for a file that is not
-     Mach-O. With
+     edit, in the order of a universal file's architectures, an image the edits leave alone with none and its `exact`
+     cut alone beside, and the file the states are pieces of, `file` or its padding (`padded`), as it was opened;
+     every image with none when they change nothing, the headers read all the same, so that what comes after the
+     edit reads them no second time; nil for a file that is not Mach-O. With
      `unsign`, each image comes out without its code signature, as `MachO.removingSignature(end:)` leaves it; with
      `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing, since it
      hides what UPX left, then with `unsign` the unpacked image's own signature comes out; a universal file with its
@@ -129,17 +140,18 @@ enum MachOEditor {
      and architecture: the bytes a cut dropped, the signature removed, and how UPX packed what is unpacked, with where
      its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand. `keep`, when given,
      gets what decompressed of an image that fails a check after, a sum or its headers, with the edits done before it
-     and `decompressed` for it, and the architecture: the refusal is thrown all the same. `archs` are a universal
-     file's architectures as its table was read for the edit, which the states follow, for the artifacts to be named
-     without a second read of the table; nil for a thin file.
+     and `decompressed` for it, and the architecture: the refusal is thrown all the same.
      */
     static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit? {
         let read = file
         var held: [String] = []
-        let file = try exact == .never ? file : self.padded(file, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
-        let opened: Universal
+        let (file, opened): (File, Universal)
         do {
-            opened = try Universal.open(file)
+            if exact == .never {
+                (file, opened) = (read, try Universal.open(read))
+            } else {
+                (file, opened) = try self.padded(read, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
+            }
         } catch {
             // The padding is said before the error the padded file ends in, which names the padded size.
             held.forEach { caveat(nil, $0) }
@@ -153,38 +165,40 @@ enum MachOEditor {
             defer {
                 (padding + said).forEach { caveat(nil, $0) }
             }
-            guard let edit = try self.edit(image, of: file, subject: file.path, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { said.append($0) }, keep: keep.map { held in { held(nil, $0, $1) } }) else {
+            let edit = try self.edit(image, of: file, subject: file.path, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { said.append($0) }, keep: keep.map { held in { held(nil, $0, $1) } })
+            guard let last = edit.states.last else {
                 // Padded as needed for nothing: the file as it is, which the parser refuses, says why.
                 padding = []
                 if file !== read {
                     _ = try Universal.open(read)
                 }
-                return Edit(file: file, states: [[]], source: file, archs: nil)
+                return Edit(file: file, states: [[]], cuts: [edit.cut], source: file, opened: opened)
             }
-            return Edit(file: File(editing: file, pieces: edit.states.last!.pieces), states: [edit.states], source: file, archs: nil)
+            return Edit(file: File(editing: file, pieces: last.pieces), states: [edit.states], cuts: [nil], source: file, opened: opened)
         case let .fat(archs):
             // Each slice is named as Universal.named names it, the second of one architecture apart, as the artifacts
             // of them are.
-            let slices = try Universal.named(archs).map { arch, name -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State]) in
+            let slices = try Universal.named(archs).map { arch, name -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State], cut: State?) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                         // An archive, which lipo aligns to 2^3 whatever its architecture.
-                        return (arch, whole, 3, [])
+                        return (arch, whole, 3, [], nil)
                     }
-                    guard let edit = try self.edit(image, of: file, subject: "\(file.path) (\(name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(name, $0) }, keep: keep.map { held in { held(name, $0, $1) } }) else {
-                        return (arch, whole, image.universalAlignment, [])
+                    let edit = try self.edit(image, of: file, subject: "\(file.path) (\(name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(name, $0) }, keep: keep.map { held in { held(name, $0, $1) } })
+                    guard let last = edit.states.last else {
+                        return (arch, whole, image.universalAlignment, [], edit.cut)
                     }
-                    return (arch, edit.states.last!.pieces, edit.align, edit.states)
+                    return (arch, last.pieces, edit.align, edit.states, nil)
                 } catch {
                     throw SliceError(arch: name, error: error)
                 }
             }
             guard slices.contains(where: { !$0.states.isEmpty }) else {
-                return Edit(file: file, states: slices.map(\.states), source: file, archs: archs)
+                return Edit(file: file, states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
             }
             let magic = try file.read(at: 0, count: MemoryLayout<UInt32>.size).withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
-            return Edit(file: File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: magic == FAT_MAGIC_64)), states: slices.map(\.states), source: file, archs: archs)
+            return Edit(file: File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: magic == FAT_MAGIC_64)), states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
         case .notMachO:
             return nil
         }
@@ -193,33 +207,35 @@ enum MachOEditor {
     // MARK: - Private
 
     /**
-     `file` as its headers lay it out, for `exact`: a thin Mach-O cut short of an empty segment that lies past its end,
-     as a file UPX 3.91 packed, padded with a page of zeros, and lost that page, is padded with zeros up to the segment,
-     a page at most, since nothing the image references is missing, and `caveat` hears of it. Any other file as it is:
-     a segment with bytes past the end is a malformed Mach-O, which the parser refuses.
+     `file` as its headers lay it out, for `exact`, and as `Universal` opened it: a thin Mach-O cut short of an empty
+     segment that lies past its end, as a file UPX 3.91 packed, padded with a page of zeros, and lost that page, is
+     padded with zeros up to the segment, a page at most, since nothing the image references is missing, and `caveat`
+     hears of it, the padded file then opened in its place. Any other file as it is, opened the once: a segment with
+     bytes past the end is a malformed Mach-O, which the parser refuses.
      */
-    static func padded(_ file: File, caveat: (String) -> Void) throws -> File {
+    static func padded(_ file: File, caveat: (String) -> Void) throws -> (file: File, opened: Universal) {
         do {
-            _ = try Universal.open(file)
-            return file
+            return (file, try Universal.open(file))
         } catch let ParserError.invalidSegmentRange(name, offset, size, fileSize) where size == 0 && fileSize == file.size && offset > UInt64(fileSize) && offset - UInt64(fileSize) <= 0x4000 {
             let missing = Int(offset) - fileSize
             caveat("cut short of its last page, \(missing.hex) bytes before \(name) at \(offset.hex): padded with zeros")
-            return File(editing: file, pieces: [.range(0 ..< fileSize), .bytes(Data(count: missing))])
+            let padded = File(editing: file, pieces: [.range(0 ..< fileSize), .bytes(Data(count: missing))])
+            return (padded, try Universal.open(padded))
         }
     }
 
     /**
      The states `image` of `file` goes through as the edits are done, the last as they leave it, the first the image
      `padded` where `file` was cut short of its last page, cut where it ends as the padding is the cut's doing, and the
-     alignment `lipo` gives the image they make; nil when they change nothing, an image the `exact` cut alone would
-     shorten included, which is left as it is, and the padded image as needed. `caveat` hears `PackMach`'s word on the
+     alignment `lipo` gives the image they make; none when they change nothing, an image the `exact` cut alone would
+     shorten included, which is left as it is, its cut kept beside as `cut` where the flag asks for it, and the padded
+     image as needed. `caveat` hears `PackMach`'s word on the
      image: that a modified UPX packed it, and how. Each edit is noted in the unified log after `subject`, the image's
      path and architecture. An unpacked image lives in memory, the states after it sharing its bytes. `keep` gets
      what decompressed of an image that fails a check after, with the edits before it and `decompressed`, before the
      refusal is thrown.
      */
-    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> (states: [State], align: Int)? {
+    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> (states: [State], align: Int, cut: State?) {
         var states: [State] = []
         var edits: Edits = padded ? [.exact] : []
         let end = padded ? image.logicalEnd() : self.cut(image, exact: exact)
@@ -309,9 +325,11 @@ enum MachOEditor {
             }
         }
         guard !edits.isDisjoint(with: [.unsigned, .unpacked]) || (padded && exact == .always) else {
-            return nil
+            // The cut alone is no edit, nor the padding as needed: no state, the cut kept beside where the flag asks
+            // for it, for what lists the image as --exact cuts it.
+            return ([], align, exact == .always ? states.first : nil)
         }
-        return (states, align)
+        return (states, align, nil)
     }
 
     /**
