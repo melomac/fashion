@@ -421,7 +421,8 @@ final class AdhocCDHashTests: XCTestCase {
 
         for (name, slots) in cases {
             let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: slots))))
-            let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+            let hashed = try slice.codeDirectoryHashes(exact: false)
+            let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
             XCTAssertNil(skipReason, name)
             XCTAssertEqual(hashes.map(\.adhoc), [true, true], name)
             // Unlike an unsigned slice's, its ad-hoc cdhashes stand for a signature that does not hold.
@@ -494,7 +495,8 @@ final class AdhocCDHashTests: XCTestCase {
         let code: [Int32] = [MH_EXECUTE, MH_PRELOAD, MH_DYLIB, MH_DYLINKER, MH_BUNDLE, MH_KEXT_BUNDLE]
         for filetype in code + [MH_OBJECT, MH_FVMLIB, MH_CORE, MH_DYLIB_STUB, MH_DSYM, MH_FILESET, MH_GPU_EXECUTE, MH_GPU_DYLIB, 0x1d] {
             let slice = try XCTUnwrap(MachO(self.makeMachO(filetype: UInt32(filetype))))
-            let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+            let hashed = try slice.codeDirectoryHashes(exact: false)
+            let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
             XCTAssertEqual(hashes.count, code.contains(filetype) ? 2 : 0, slice.filetypeName)
             XCTAssertEqual(skipReason == nil, code.contains(filetype), slice.filetypeName)
         }
@@ -508,7 +510,8 @@ final class AdhocCDHashTests: XCTestCase {
         let signature = self.superblob(slots: [(0, self.codeDirectory(hashType: 2))])
         for (filetype, isCode) in [(MH_EXECUTE, true), (MH_DYLIB, true), (MH_OBJECT, false), (MH_DSYM, false), (MH_FILESET, false)] {
             let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: signature, filetype: UInt32(filetype))))
-            let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+            let hashed = try slice.codeDirectoryHashes(exact: false)
+            let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
             XCTAssertEqual(hashes.map(\.adhoc), isCode ? [false] : [], slice.filetypeName)
             XCTAssertEqual(skipReason == nil, isCode, slice.filetypeName)
         }
@@ -540,7 +543,8 @@ final class AdhocCDHashTests: XCTestCase {
     func testSignatureWithoutCodeDirectoryIsAdhocUpToTheSignature() throws {
         let data = self.makeSignedEmptySuperblob()
         let slice = try XCTUnwrap(MachO(data))
-        let (hashes, skipReason) = try slice.codeDirectoryHashes(exact: false)
+        let hashed = try slice.codeDirectoryHashes(exact: false)
+        let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
         XCTAssertNil(skipReason)
         XCTAssertEqual(hashes.map(\.adhoc), [true, true])
 

@@ -108,7 +108,7 @@ enum XARParser {
      compressed table streams from the file; inflated, it streams through zlib, so memory holds no more than the declared
      uncompressed size, itself bounded. `caveat` hears what TLSH leaves out of the table.
      */
-    static func hashToc(_ file: File, algorithms: [ByteHash], decompress: Bool, caveat: (String) -> Void = { _ in }) throws -> [(hash: ByteHash, digest: String)] {
+    static func hashToc(_ file: File, algorithms: [ByteHash], decompress: Bool, caveat: (String) -> Void = { _ in }) throws -> [ByteHash.Digest] {
         let head = try file.read(at: 0, count: min(file.size, 28))
         guard head.prefix(4) == Data("xar!".utf8) else {
             return []

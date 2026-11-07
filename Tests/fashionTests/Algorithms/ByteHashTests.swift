@@ -134,8 +134,8 @@ final class ByteHashTests: XCTestCase {
 
         let digests = try ByteHash.digests(self.hashes, file)
         XCTAssertEqual(digests.map(\.hash), self.hashes)
-        for (hash, digest) in digests {
-            XCTAssertEqual(digest, try hash.digest(data), "Mismatch for \(hash)")
+        for digest in digests {
+            XCTAssertEqual(digest.digest, try digest.hash.digest(data), "Mismatch for \(digest.hash)")
         }
         // The same from bytes in memory, and from one hash, which reads the file on its own.
         XCTAssertEqual(try ByteHash.digests(self.hashes, data).map(\.digest), digests.map(\.digest))
@@ -147,8 +147,8 @@ final class ByteHashTests: XCTestCase {
 
         let digests = try ByteHash.digests([.md5, .sha256, .git, .ssdeep], file, range: 2 ..< 7)
         XCTAssertEqual(digests.map(\.hash), [.md5, .sha256, .git, .ssdeep])
-        for (hash, digest) in digests {
-            XCTAssertEqual(digest, try hash.digest(Data("hello".utf8)), "Mismatch for \(hash)")
+        for digest in digests {
+            XCTAssertEqual(digest.digest, try digest.hash.digest(Data("hello".utf8)), "Mismatch for \(digest.hash)")
         }
     }
 
@@ -169,7 +169,7 @@ final class ByteHashTests: XCTestCase {
      */
     func testFanOutStopsEachHasherAtItsLength() throws {
         let data = Data((0 ..< 3000).map { UInt8($0 % 251) })
-        var fanOut = try FanOutHasher([(.md5, data.count), (.tlsh, 1000), (.sha256, data.count)])
+        var fanOut = try FanOutHasher([FanOutHasher.Feed(hash: .md5, length: data.count), FanOutHasher.Feed(hash: .tlsh, length: 1000), FanOutHasher.Feed(hash: .sha256, length: data.count)])
         XCTAssertEqual(fanOut.length, 3000)
         data.prefix(700).withUnsafeBytes { fanOut.update($0) }
         XCTAssertEqual(fanOut.length, 2300)

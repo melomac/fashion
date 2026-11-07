@@ -855,10 +855,10 @@ final class RunnerConcurrencyTests: XCTestCase {
 
         let taken = OSAllocatedUnfairLock(initialState: [[Int]](repeating: [], count: hashers))
         let hashing = self.start(hashers) { number in
-            while let (index, path) = handoff.take() {
-                XCTAssertEqual(path, "/\(index)")
+            while let item = handoff.take() {
+                XCTAssertEqual(item.path, "/\(item.index)")
                 usleep(1000)
-                taken.withLock { $0[number].append(index) }
+                taken.withLock { $0[number].append(item.index) }
             }
         }
         self.finish(walking)
@@ -880,9 +880,9 @@ final class RunnerConcurrencyTests: XCTestCase {
         let handoff = Handoff(capacity: 64)
         let taken = OSAllocatedUnfairLock(initialState: [[Int]](repeating: [], count: hashers))
         let hashing = self.start(hashers) { number in
-            while let (index, path) = handoff.take() {
-                XCTAssertEqual(path, "/\(index)")
-                taken.withLock { $0[number].append(index) }
+            while let item = handoff.take() {
+                XCTAssertEqual(item.path, "/\(item.index)")
+                taken.withLock { $0[number].append(item.index) }
             }
         }
         // At the hashers' QoS, like the walking thread of a run: a hasher waiting on a lower thread is a priority

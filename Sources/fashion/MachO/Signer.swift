@@ -123,7 +123,7 @@ struct Signer {
      holds and not who signed, so it passes `evaluatingChain` false: the signature and its bindings are checked, the
      chain and the timestamp, trustd's work, are not, and the signer comes back with no chain.
      */
-    init(cms: Data, over directory: Data, binding: [(hashType: HashType, cdhash: Data)] = [], best: HashType? = nil, enforcingExpiration: Bool = false, evaluatingChain: Bool = true) throws(Failure) {
+    init(cms: Data, over directory: Data, binding: [Binding] = [], best: HashType? = nil, enforcingExpiration: Bool = false, evaluatingChain: Bool = true) throws(Failure) {
         // Read to its end first, every length within the bytes: Security's decoder checks a length against its
         // parent's only when the parent's is definite (sec_asn1d_check_and_subtract_length), and under an indefinite
         // one allocates what the length says and fills it, 680 MiB for a 4 KiB blob whose OID's length byte the
@@ -242,11 +242,12 @@ struct Signer {
      reads it, so the content is handed back to it as detached for the signer's digest. Nil without a token that
      holds.
      */
-    static func timestamp(in cms: Data, anchors: [SecCertificate]? = nil) -> (date: Date, chain: [SecCertificate])? {
+    static func timestamp(in cms: Data, anchors: [SecCertificate]? = nil) -> Timestamp? {
         // The token read to its end as the signer's blob is, before the decoder takes a length at its word.
-        guard let (signature, token) = signatureAndToken(in: cms), DER.fault(in: token) == nil else {
+        guard let stamped = signatureAndToken(in: cms), DER.fault(in: stamped.token) == nil else {
             return nil
         }
+        let (signature, token) = (stamped.signature, stamped.token)
         var created: CMSDecoder?
         var content: CFData?
         var status = CMSSignerStatus.unsigned
@@ -272,7 +273,7 @@ struct Signer {
         guard SecTrustEvaluateWithError(trust, nil) else {
             return nil
         }
-        return (imprinted.date, SecTrustCopyCertificateChain(trust) as? [SecCertificate] ?? [])
+        return Timestamp(date: imprinted.date, chain: SecTrustCopyCertificateChain(trust) as? [SecCertificate] ?? [])
     }
 
     /**
@@ -307,9 +308,9 @@ struct Signer {
      v2 attribute, a SEQUENCE per directory of its digest algorithm and its full cdhash. Nil for an attribute that
      is not there.
      */
-    static func hashAgility(in cms: Data) -> (cdhashes: [Data]?, v2: [HashType: Data]?) {
+    static func hashAgility(in cms: Data) -> HashAgility {
         guard let fields = signerInfo(in: cms), let signed = fields.first(where: { $0.tag == 0xa0 }), let attributes = DER.elements(of: signed.content) else {
-            return (nil, nil)
+            return HashAgility(cdhashes: nil, v2: nil)
         }
         var cdhashes: [Data]?
         var v2: [HashType: Data]?
@@ -330,7 +331,7 @@ struct Signer {
                 v2 = named
             }
         }
-        return (cdhashes, v2)
+        return HashAgility(cdhashes: cdhashes, v2: v2)
     }
 
     /// The first signer's signature in `cms`, what a timestamp token is taken over; nil for anything else.
@@ -342,7 +343,7 @@ struct Signer {
      The first signer's signature in `cms`, and the timestamp token among its unsigned attributes, the value of the
      `id-aa-timeStampToken` one, a ContentInfo of its own. Nil without the token.
      */
-    static func signatureAndToken(in cms: Data) -> (signature: Data, token: Data)? {
+    static func signatureAndToken(in cms: Data) -> SignatureAndToken? {
         guard
             let fields = signerInfo(in: cms),
             let unsigned = fields.last, unsigned.tag == 0xa1,
@@ -359,7 +360,7 @@ struct Signer {
             else {
                 continue
             }
-            return (Data(signature.content), Data(token.raw))
+            return SignatureAndToken(signature: Data(signature.content), token: Data(token.raw))
         }
         return nil
     }
@@ -368,7 +369,7 @@ struct Signer {
      What a token's `TSTInfo` certifies: its date, and the imprint of what it was taken over, with the digest it was
      taken with. Version, policy, the imprint, a serial number and the time, in that order; nil for any other form.
      */
-    private static func tstInfo(_ der: Data) -> (date: Date, digest: HashType, imprint: Data)? {
+    private static func tstInfo(_ der: Data) -> TSTInfo? {
         var reader = DER.Reader(der)
         guard
             let info = reader.next(), info.tag == 0x30,
@@ -381,7 +382,40 @@ struct Signer {
         else {
             return nil
         }
-        return (date, digest, Data(imprint[1].content))
+        return TSTInfo(date: date, digest: digest, imprint: Data(imprint[1].content))
+    }
+
+    /// A code directory the signature binds, as `init` checks it against the signer's attributes: its hash type, and
+    /// its full cdhash.
+    struct Binding {
+        let hashType: HashType
+        let cdhash: Data
+    }
+
+    /// A secure timestamp that holds: the date it certifies, and the authority's chain to its anchor.
+    struct Timestamp {
+        let date: Date
+        let chain: [SecCertificate]
+    }
+
+    /// The code directories a signer's attributes bind, as codesign records them: the cdhashes plist's, each a cdhash
+    /// cut to 20 bytes, and the v2 attribute's, a full cdhash per digest; nil for an attribute that is not there.
+    struct HashAgility {
+        let cdhashes: [Data]?
+        let v2: [HashType: Data]?
+    }
+
+    /// A signer's signature, and the timestamp token taken over it.
+    struct SignatureAndToken {
+        let signature: Data
+        let token: Data
+    }
+
+    /// What a token's `TSTInfo` certifies: its date, and the imprint of what it was taken over, with its digest.
+    private struct TSTInfo {
+        let date: Date
+        let digest: HashType
+        let imprint: Data
     }
 
     /// The leaf's subject summary, its common name for the certificates Apple issues.

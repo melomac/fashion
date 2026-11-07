@@ -14,24 +14,24 @@ enum OutputFormatter {
      */
     static func formatLine(digest: String, score: Int? = nil, path: String, algorithm: Algorithm) -> String {
         let paddedDigest = self.padDigest(digest, algorithm: algorithm)
-        let (escaped, prefix) = self.escapePath(path)
+        let path = self.escapePath(path)
         guard let score else {
-            return "\(prefix)\(paddedDigest)  \(escaped)"
+            return "\(path.prefix)\(paddedDigest)  \(path.escaped)"
         }
         let scoreStr = switch algorithm {
         case .ssdeep: String(format: "%\(self.ssdeepScoreWidth)ld", score)
         case .tlsh: String(format: "%\(self.tlshScoreWidth)ld", score)
         default: ""
         }
-        return "\(prefix)\(paddedDigest) \(scoreStr)  \(escaped)"
+        return "\(path.prefix)\(paddedDigest) \(scoreStr)  \(path.escaped)"
     }
 
     /**
      Escape a path for safe display as a complete field.
      */
     static func formatPath(_ path: String) -> String {
-        let (escaped, prefix) = self.escapePath(path)
-        return "\(prefix)\(escaped)"
+        let path = self.escapePath(path)
+        return "\(path.prefix)\(path.escaped)"
     }
 
     /**
@@ -61,15 +61,21 @@ enum OutputFormatter {
      Mirrors GNU coreutils `sha256sum`: when a path contains a backslash or a line break, escape those
      characters and prefix the line with a single backslash so consumers can detect and reverse it.
      */
-    private static func escapePath(_ path: String) -> (escaped: String, prefix: String) {
+    private static func escapePath(_ path: String) -> EscapedPath {
         // A byte test: "\r\n" is a single Character, which String.contains finds neither "\r" nor "\n" in.
         guard path.utf8.contains(where: { $0 == UInt8(ascii: "\\") || $0 == UInt8(ascii: "\n") || $0 == UInt8(ascii: "\r") }) else {
-            return (path, "")
+            return EscapedPath(escaped: path, prefix: "")
         }
         let escaped = path
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\n", with: "\\n")
             .replacingOccurrences(of: "\r", with: "\\r")
-        return (escaped, "\\")
+        return EscapedPath(escaped: escaped, prefix: "\\")
+    }
+
+    /// A path as a line shows it, and the prefix the line gets when it was escaped: a backslash, as `sha256sum`.
+    private struct EscapedPath {
+        let escaped: String
+        let prefix: String
     }
 }

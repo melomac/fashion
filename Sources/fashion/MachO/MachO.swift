@@ -137,7 +137,8 @@ struct MachO {
         // and they stay under the limit.
         let end = layout.headerSize + self.sizeofcmds
         let table = try self.sizeofcmds <= Self.maxLoadCommandsSize && end <= length ? (end <= head.count ? head.prefix(end) : file.read(at: offset, count: end)) : head
-        (self.loadCommands, self.tableIsValid, self.loadCommandsTail) = Self.parseLoadCommands(data: table, headerSize: layout.headerSize, ncmds: self.ncmds, sizeofcmds: self.sizeofcmds, swap: layout.swap)
+        let parsed = Self.parseLoadCommands(data: table, headerSize: layout.headerSize, ncmds: self.ncmds, sizeofcmds: self.sizeofcmds, swap: layout.swap)
+        (self.loadCommands, self.tableIsValid, self.loadCommandsTail) = (parsed.commands, parsed.valid, parsed.tail)
     }
 
     /**
@@ -180,11 +181,11 @@ struct MachO {
         // file is really ours": LOAD_BADMACHO, and the file never loads. It walks `ncmds` commands, as dyld does: a
         // segment hidden past them is read by no loader, and verify names it. Security's MachO does not look.
         for command in image.loadCommands.prefix(image.ncmds) {
-            let range: (offset: UInt64, size: UInt64)? = switch command.cmd {
+            let range: Extent? = switch command.cmd {
             case UInt32(LC_SEGMENT):
-                command.payload(as: segment_command.self).map { (UInt64(image.sw($0.fileoff)), UInt64(image.sw($0.filesize))) }
+                command.payload(as: segment_command.self).map { Extent(offset: UInt64(image.sw($0.fileoff)), size: UInt64(image.sw($0.filesize))) }
             case UInt32(LC_SEGMENT_64):
-                command.payload(as: segment_command_64.self).map { (image.sw($0.fileoff), image.sw($0.filesize)) }
+                command.payload(as: segment_command_64.self).map { Extent(offset: image.sw($0.fileoff), size: image.sw($0.filesize)) }
             default:
                 nil
             }
@@ -249,20 +250,34 @@ struct MachO {
      and throws when the command it reads is too short for its structure. `minOS` and `sdk` are encoded like the load
      commands: X.Y.Z as `0xXXXXYYZZ`.
      */
-    func version() throws -> (platform: Int32, minOS: UInt32, sdk: UInt32)? {
+    func version() throws -> Version? {
         if let command = self.findCommand(UInt32(LC_BUILD_VERSION)) {
             let build = try command.load(build_version_command.self)
-            return (Int32(bitPattern: self.sw(build.platform)), self.sw(build.minos), self.sw(build.sdk))
+            return Version(platform: Int32(bitPattern: self.sw(build.platform)), minOS: self.sw(build.minos), sdk: self.sw(build.sdk))
         }
 
         let platforms = [LC_VERSION_MIN_MACOSX: PLATFORM_MACOS, LC_VERSION_MIN_IPHONEOS: PLATFORM_IOS, LC_VERSION_MIN_TVOS: PLATFORM_TVOS, LC_VERSION_MIN_WATCHOS: PLATFORM_WATCHOS]
         for command in self.loadCommands {
             if let platform = platforms[Int32(bitPattern: command.cmd)] {
                 let versionMin = try command.load(version_min_command.self)
-                return (platform, self.sw(versionMin.version), self.sw(versionMin.sdk))
+                return Version(platform: platform, minOS: self.sw(versionMin.version), sdk: self.sw(versionMin.sdk))
             }
         }
         return nil
+    }
+
+    /// The platform, minimum OS version and SDK a slice declares (`version()`), the versions encoded as the load
+    /// commands encode them, X.Y.Z as `0xXXXXYYZZ`.
+    struct Version {
+        let platform: Int32
+        let minOS: UInt32
+        let sdk: UInt32
+    }
+
+    /// A range of the image, by offset and size, as a load command places a blob: the embedded signature's.
+    struct Span {
+        let offset: Int
+        let size: Int
     }
 
     // MARK: - Code Signature
@@ -271,13 +286,13 @@ struct MachO {
      Where `LC_CODE_SIGNATURE` places the embedded signature, like `MachOBase::findCodeSignature`: its offset and size,
      or nil when unsigned. Throws when the command is too short to hold them.
      */
-    func findCodeSignature() throws -> (offset: Int, size: Int)? {
+    func findCodeSignature() throws -> Span? {
         guard let command = self.findCommand(UInt32(LC_CODE_SIGNATURE)) else {
             return nil
         }
 
         let linkedit = try command.load(linkedit_data_command.self)
-        return (Int(self.sw(linkedit.dataoff)), Int(self.sw(linkedit.datasize)))
+        return Span(offset: Int(self.sw(linkedit.dataoff)), size: Int(self.sw(linkedit.datasize)))
     }
 
     // MARK: - Logical Extent
@@ -294,13 +309,13 @@ struct MachO {
     func logicalEnd() -> Int {
         for command in self.loadCommands {
             let isLinkedit = command.isSegment(named: "__LINKEDIT")
-            let range: (offset: UInt64, size: UInt64)? = switch command.cmd {
+            let range: Extent? = switch command.cmd {
             case UInt32(LC_SEGMENT) where isLinkedit:
-                command.payload(as: segment_command.self).map { (UInt64(self.sw($0.fileoff)), UInt64(self.sw($0.filesize))) }
+                command.payload(as: segment_command.self).map { Extent(offset: UInt64(self.sw($0.fileoff)), size: UInt64(self.sw($0.filesize))) }
             case UInt32(LC_SEGMENT_64) where isLinkedit:
-                command.payload(as: segment_command_64.self).map { (self.sw($0.fileoff), self.sw($0.filesize)) }
+                command.payload(as: segment_command_64.self).map { Extent(offset: self.sw($0.fileoff), size: self.sw($0.filesize)) }
             case UInt32(LC_SYMTAB):
-                command.payload(as: symtab_command.self).map { (UInt64(self.sw($0.stroff)), UInt64(self.sw($0.strsize))) }
+                command.payload(as: symtab_command.self).map { Extent(offset: UInt64(self.sw($0.stroff)), size: UInt64(self.sw($0.strsize))) }
             default:
                 nil
             }
@@ -470,18 +485,45 @@ struct MachO {
     /**
      Header geometry implied by the leading magic number; nil for anything that is not a thin Mach-O.
      */
-    private static func layout(of data: Data) -> (is64: Bool, swap: Bool, headerSize: Int)? {
+    private static func layout(of data: Data) -> Layout? {
         guard data.count >= MemoryLayout<UInt32>.size else {
             return nil
         }
 
         switch data.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
-        case MH_MAGIC_64: return (true, false, MemoryLayout<mach_header_64>.size)
-        case MH_CIGAM_64: return (true, true, MemoryLayout<mach_header_64>.size)
-        case MH_MAGIC: return (false, false, MemoryLayout<mach_header>.size)
-        case MH_CIGAM: return (false, true, MemoryLayout<mach_header>.size)
+        case MH_MAGIC_64: return Layout(is64: true, swap: false, headerSize: MemoryLayout<mach_header_64>.size)
+        case MH_CIGAM_64: return Layout(is64: true, swap: true, headerSize: MemoryLayout<mach_header_64>.size)
+        case MH_MAGIC: return Layout(is64: false, swap: false, headerSize: MemoryLayout<mach_header>.size)
+        case MH_CIGAM: return Layout(is64: false, swap: true, headerSize: MemoryLayout<mach_header>.size)
         default: return nil
         }
+    }
+
+    /// Header geometry implied by the leading magic number: the width, the byte order, and the header's size.
+    private struct Layout {
+        let is64: Bool
+        let swap: Bool
+        let headerSize: Int
+    }
+
+    /// A range of the image a load command declares, unchecked: a segment's bytes, or a table's.
+    private struct Extent {
+        let offset: UInt64
+        let size: UInt64
+    }
+
+    /// The load-command table as `parseLoadCommands` walked it: the commands, whether the table holds them as the
+    /// loaders require, and the bytes past the last that no command covers.
+    private struct LoadCommandTable {
+        let commands: [LoadCommand]
+        let valid: Bool
+        let tail: Int
+    }
+
+    /// A load command's head, as `parseLoadCommands` reads it before the command: its kind and its size.
+    private struct CommandHeader {
+        let cmd: UInt32
+        let size: Int
     }
 
     /**
@@ -508,20 +550,21 @@ struct MachO {
      The table is walked once to count its commands and judge it, then read into an array of that size: a crafted
      table of millions of commands costs their array and nothing more.
      */
-    private static func parseLoadCommands(data: Data, headerSize: Int, ncmds: Int, sizeofcmds: Int, swap: Bool) -> (commands: [LoadCommand], valid: Bool, tail: Int) {
+    private static func parseLoadCommands(data: Data, headerSize: Int, ncmds: Int, sizeofcmds: Int, swap: Bool) -> LoadCommandTable {
         let end = headerSize + sizeofcmds
         guard
             sizeofcmds >= MemoryLayout<load_command>.size,
             end <= data.count
         else {
-            return ([], false, 0)
+            return LoadCommandTable(commands: [], valid: false, tail: 0)
         }
 
-        func header(at offset: Int) -> (cmd: UInt32, size: Int) {
+        /// The command head at `offset`, in the image's byte order.
+        func header(at offset: Int) -> CommandHeader {
             data.withUnsafeBytes { ptr in
                 let cmd = ptr.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
                 let size = ptr.loadUnaligned(fromByteOffset: offset + 4, as: UInt32.self)
-                return (swap ? cmd.byteSwapped : cmd, Int(swap ? size.byteSwapped : size))
+                return CommandHeader(cmd: swap ? cmd.byteSwapped : cmd, size: Int(swap ? size.byteSwapped : size))
             }
         }
 
@@ -556,11 +599,11 @@ struct MachO {
         commands.reserveCapacity(count)
         offset = headerSize
         for _ in 0 ..< count {
-            let (cmd, size) = header(at: offset)
-            commands.append(LoadCommand(cmd: cmd, data: data.bytes(in: offset ..< offset + size)))
-            offset += size
+            let header = header(at: offset)
+            commands.append(LoadCommand(cmd: header.cmd, data: data.bytes(in: offset ..< offset + header.size)))
+            offset += header.size
         }
-        return (commands, valid, valid ? tail : 0)
+        return LoadCommandTable(commands: commands, valid: valid, tail: valid ? tail : 0)
     }
 
     /// `<mach-o/loader.h>` filetypes, numbered from `MH_OBJECT` (1).

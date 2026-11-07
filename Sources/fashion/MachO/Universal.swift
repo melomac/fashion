@@ -76,7 +76,7 @@ enum Universal {
     struct Table: RandomAccessCollection {
         let archs: [Architecture]
         let is64: Bool
-        let hiddenRefused: (name: String, error: ParserError)?
+        let hiddenRefused: HiddenRefusal?
 
         var startIndex: Int {
             self.archs.startIndex
@@ -91,17 +91,29 @@ enum Universal {
         }
     }
 
+    /// The arm64 entry past a 32-bit table's count that does not lie in the file: its name, and what is wrong with it.
+    struct HiddenRefusal {
+        let name: String
+        let error: ParserError
+    }
+
+    /// An architecture with the name it goes by in what is said, hashed or written of it (`named(_:)`).
+    struct Named {
+        let arch: Architecture
+        let name: String
+    }
+
     /**
      Each architecture of a universal file with the name it goes by in what is said, hashed or written of it: its
      `name`, and for two slices of one architecture, which the kernel refuses, the second numbered, `x86_64_2`, so
      that a digest, a diagnostic or an artifact of either tells which one. The order is the table's.
      */
-    static func named(_ archs: [Architecture]) -> [(arch: Architecture, name: String)] {
+    static func named(_ archs: [Architecture]) -> [Named] {
         var counts: [String: Int] = [:]
         return archs.map { arch in
             let count = counts[arch.name, default: 0] + 1
             counts[arch.name] = count
-            return (arch, count == 1 ? arch.name : "\(arch.name)_\(count)")
+            return Named(arch: arch, name: count == 1 ? arch.name : "\(arch.name)_\(count)")
         }
     }
 
@@ -274,7 +286,7 @@ enum Universal {
         let table = read <= head.count ? head : try file.read(at: 0, count: read)
         return try table.withUnsafeBytes { ptr in
             var archs: [Architecture] = []
-            var hiddenRefused: (name: String, error: ParserError)?
+            var hiddenRefused: HiddenRefusal?
 
             for architectureIndex in 0 ..< Int(nfatArch) + (extra ? 1 : 0) {
                 let hidden = architectureIndex == Int(nfatArch)
@@ -311,7 +323,7 @@ enum Universal {
                     let error = ParserError.invalidFatArchitectureRange(offset: sliceOffset, size: sliceSize, fileSize: file.size)
                     if hidden {
                         let cpuSubtype = cpu_subtype_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 4, as: cpu_subtype_t.self))
-                        hiddenRefused = (self.archName(cpuType: cpuType, cpuSubtype: cpuSubtype), error)
+                        hiddenRefused = HiddenRefusal(name: self.archName(cpuType: cpuType, cpuSubtype: cpuSubtype), error: error)
                         break
                     }
                     throw error

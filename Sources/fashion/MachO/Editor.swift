@@ -170,12 +170,16 @@ enum MachOEditor {
     static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit {
         let read = file
         var held: [String] = []
-        let (file, opened): (File, Universal)
+        let file: File
+        let opened: Universal
         do {
             if exact == .never {
-                (file, opened) = (read, try Universal.open(read))
+                file = read
+                opened = try Universal.open(read)
             } else {
-                (file, opened) = try self.padded(read, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
+                let padded = try self.padded(read, caveat: { exact == .always ? caveat(nil, $0) : held.append($0) })
+                file = padded.file
+                opened = padded.opened
             }
         } catch {
             // The padding is said before the error the padded file ends in, which names the padded size.
@@ -203,7 +207,8 @@ enum MachOEditor {
         case let .fat(table):
             // Each slice is named as Universal.named names it, the second of one architecture apart, as the artifacts
             // of them are.
-            let slices = try Universal.named(table.archs).map { arch, name -> Slice in
+            let slices = try Universal.named(table.archs).map { named -> Slice in
+                let (arch, name) = (named.arch, named.name)
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
@@ -237,15 +242,21 @@ enum MachOEditor {
      hears of it, the padded file then opened in its place. Any other file as it is, opened the once: a segment with
      bytes past the end is a malformed Mach-O, which the parser refuses.
      */
-    static func padded(_ file: File, caveat: (String) -> Void) throws -> (file: File, opened: Universal) {
+    static func padded(_ file: File, caveat: (String) -> Void) throws -> Padded {
         do {
-            return (file, try Universal.open(file))
+            return try Padded(file: file, opened: Universal.open(file))
         } catch let ParserError.invalidSegmentRange(name, offset, size, fileSize) where size == 0 && fileSize == file.size && offset > UInt64(fileSize) && offset - UInt64(fileSize) <= 0x4000 {
             let missing = Int(offset) - fileSize
             caveat("cut short of its last page, \(missing.hex) bytes before \(name) at \(offset.hex): padded with zeros")
             let padded = File(editing: file, pieces: [.range(0 ..< fileSize), .bytes(Data(count: missing))])
-            return (padded, try Universal.open(padded))
+            return try Padded(file: padded, opened: Universal.open(padded))
         }
+    }
+
+    /// A file as `padded` leaves it, the file or its padding, and as `Universal` opened it.
+    struct Padded {
+        let file: File
+        let opened: Universal
     }
 
     /**
@@ -259,7 +270,7 @@ enum MachOEditor {
      what decompressed of an image that fails a check after, with the edits before it and `decompressed`, before the
      refusal is thrown.
      */
-    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> (states: [State], align: Int, cut: State?) {
+    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> Edited {
         var states: [State] = []
         var edits: Edits = padded ? [.exact] : []
         let end = padded ? image.logicalEnd() : self.cut(image, exact: exact)
@@ -352,9 +363,17 @@ enum MachOEditor {
         guard !edits.isDisjoint(with: [.unsigned, .unpacked]) || (padded && exact == .always) else {
             // The cut alone is no edit, nor the padding as needed: no state, the cut kept beside where the flag asks
             // for it, for what lists the image as --exact cuts it.
-            return ([], align, exact == .always ? states.first : nil)
+            return Edited(states: [], align: align, cut: exact == .always ? states.first : nil)
         }
-        return (states, align, nil)
+        return Edited(states: states, align: align, cut: nil)
+    }
+
+    /// One image as the private `edit` leaves it: its states, the alignment `lipo` gives what they make, and the
+    /// `exact` cut alone where the edits changed nothing and the flag asks for it.
+    private struct Edited {
+        let states: [State]
+        let align: Int
+        let cut: State?
     }
 
     /**
@@ -467,6 +486,13 @@ extension MachOEditor.Edit {
 // MARK: -
 
 extension MachO {
+    /// The image without its signature, as `removingSignature(end:)` leaves it: its headers rewritten, and where it
+    /// ends, the bytes between them the image's own.
+    struct Unsigned {
+        let head: Data
+        let end: Int
+    }
+
     /**
      The image as `codesign --remove-signature` leaves it, the image ending at `end`, but restored as the linker left
      it: its header and load commands rewritten, and where it now ends. Nil when it is not signed.
@@ -490,13 +516,13 @@ extension MachO {
      string table's range without swapping it. Security also refuses an image without `__LINKEDIT`, or of a filetype it
      never signs, though what to write is as clear there.
      */
-    func removingSignature(end: Int) throws -> (head: Data, end: Int)? {
+    func removingSignature(end: Int) throws -> Unsigned? {
         let read = self.loadCommands.prefix(self.ncmds)
         guard let command = read.last(where: { $0.cmd == UInt32(LC_CODE_SIGNATURE) }) else {
             return nil
         }
         let data = try command.load(linkedit_data_command.self)
-        let signature = (offset: Int(self.sw(data.dataoff)), size: Int(self.sw(data.datasize)))
+        let signature = Span(offset: Int(self.sw(data.dataoff)), size: Int(self.sw(data.datasize)))
         guard end - 7 ... end ~= signature.offset + signature.size else {
             throw EditError.signatureNotAtEnd
         }
@@ -543,7 +569,7 @@ extension MachO {
         head.append(Data(count: command.data.count))
 
         // An image that now ends inside its load commands keeps that much of them.
-        return (head.prefix(newEnd), newEnd)
+        return Unsigned(head: head.prefix(newEnd), end: newEnd)
     }
 
     /**

@@ -2076,7 +2076,7 @@ final class VerifierTests: XCTestCase {
 
     /// `program` with its signature replaced by a superblob holding `directory` in slot 0, `requirements` in slot 2
     /// and `cms` wrapped in slot 0x10000, in the room `signature` has.
-    private static func embedding(_ directory: Data, _ requirements: Data, _ cms: Data, in program: Data, at signature: (offset: Int, size: Int)) -> Data {
+    private static func embedding(_ directory: Data, _ requirements: Data, _ cms: Data, in program: Data, at signature: MachO.Span) -> Data {
         var wrapped = Data()
         [0xfade_0b01, UInt32(8 + cms.count)].forEach { wrapped.appendUInt32BE($0) }
         wrapped += cms

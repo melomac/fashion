@@ -192,8 +192,8 @@ struct ArtifactWriter {
         case let .fat(table):
             // Each slice is named as Universal.named names it, the second of one architecture apart, `_x86_64_2`. The
             // fat table alone decides a slice's bytes, as for lipo -thin.
-            return Universal.named(table.archs).enumerated().flatMap { index, slice -> [Artifact] in
-                let (arch, name) = slice
+            return Universal.named(table.archs).enumerated().flatMap { index, named -> [Artifact] in
+                let (arch, name) = (named.arch, named.name)
                 let chain = edit.states[index].isEmpty ? edit.cuts[index].map { [$0] } ?? [] : edit.states[index]
                 let whole = Artifact(name: [name], bytes: File(editing: file, pieces: [.range(arch.offset ..< arch.offset + arch.length)]))
                 return [whole] + chain.map { Artifact(name: [name] + $0.edits.words, bytes: File(editing: file, pieces: $0.pieces)) }

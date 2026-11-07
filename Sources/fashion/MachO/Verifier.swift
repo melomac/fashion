@@ -49,7 +49,7 @@ import MachO
    linkeditAnomalies    reads the padding   tables inside __LINKEDIT, overlapping, bytes no table references
    paddingAnomalies     reads the padding   bytes no section covers, bytes between segments
    signatureAnomalies   reads the pages     pages against slots, code limit, special slots, the signer, entitlements
-     -> (found: [String], refused: Error?)  what Security refuses of the superblob, red after the lines
+     -> Anomalies: found, and refused       what Security refuses of the superblob, red after the lines
  ```
  */
 struct MachOVerifier {
@@ -81,9 +81,9 @@ struct MachOVerifier {
      `refused` is what Security refuses of the signature, which the lines before it stand beside: a superblob it
      cannot read, reported red as hash mode reports it.
      */
-    func anomalies() -> (found: [String], refused: Error?) {
+    func anomalies() -> Anomalies {
         guard !self.isUnmapped else {
-            return ([], nil)
+            return Anomalies(found: [], refused: nil)
         }
         var found = self.tableAnomalies()
         found += self.segmentAnomalies()
@@ -96,9 +96,15 @@ struct MachOVerifier {
         do {
             found += try self.signatureAnomalies()
         } catch {
-            return (found, error)
+            return Anomalies(found: found, refused: error)
         }
-        return (found, nil)
+        return Anomalies(found: found, refused: nil)
+    }
+
+    /// What is odd about an image, a line each, and what Security refuses of its signature, if anything.
+    struct Anomalies {
+        let found: [String]
+        let refused: Error?
     }
 
     // MARK: - Layout
@@ -823,11 +829,26 @@ struct MachOVerifier {
     }
 
     private enum ThreadEntry {
-        /// The pc, how many thread states the command holds, the first one's flavor and count, and the flavor and
-        /// count of a state the kernel refuses for a translated process, if one is held.
-        case address(UInt64, states: Int, first: (flavor: UInt32, count: UInt32), translated: (flavor: UInt32, count: UInt32)?)
+        /// The pc, how many thread states the command holds, the first one, and a state the kernel refuses for a
+        /// translated process, if one is held.
+        case address(UInt64, states: Int, first: ThreadState, translated: ThreadState?)
         case flavor(UInt32, UInt32)
         case short
+    }
+
+    /// A thread state as `LC_UNIXTHREAD` holds it: its flavor and its count of words.
+    private struct ThreadState {
+        let flavor: UInt32
+        let count: UInt32
+    }
+
+    /// A thread state the kernel's `thread_entrypoint` takes: its flavor and count, the index of the pc among the
+    /// registers, and whether the kernel on Apple silicon takes it for a translated process too.
+    private struct ThreadStateKind {
+        let flavor: UInt32
+        let count: UInt32
+        let index: Int
+        let translated: Bool
     }
 
     /// The thread states the kernel's `thread_entrypoint` takes for `cpuType`, each a flavor, a count of words, the
@@ -835,12 +856,12 @@ struct MachOVerifier {
     /// process too (its `load_unixthread` refuses every `x86_64` state but the thread state, and reads no entry
     /// from it, which Rosetta's runtime finds); the first the one dyld's `entryAddrFromThreadCmd` reads; nil for
     /// an architecture neither knows.
-    private static func threadStates(for cpuType: cpu_type_t) -> [(flavor: UInt32, count: UInt32, index: Int, translated: Bool)]? {
+    private static func threadStates(for cpuType: cpu_type_t) -> [ThreadStateKind]? {
         switch cpuType {
-        case CPU_TYPE_I386: [(1, 16, 10, true)] // x86_THREAD_STATE32, eip
-        case CPU_TYPE_X86_64: [(4, 42, 16, true), (23, 50, 16, false)] // x86_THREAD_STATE64 and x86_THREAD_FULL_STATE64, rip
-        case CPU_TYPE_ARM: [(1, 17, 15, true)] // ARM_THREAD_STATE, pc
-        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: [(6, 68, 32, true)] // ARM_THREAD_STATE64, pc
+        case CPU_TYPE_I386: [ThreadStateKind(flavor: 1, count: 16, index: 10, translated: true)] // x86_THREAD_STATE32, eip
+        case CPU_TYPE_X86_64: [ThreadStateKind(flavor: 4, count: 42, index: 16, translated: true), ThreadStateKind(flavor: 23, count: 50, index: 16, translated: false)] // x86_THREAD_STATE64 and x86_THREAD_FULL_STATE64, rip
+        case CPU_TYPE_ARM: [ThreadStateKind(flavor: 1, count: 17, index: 15, translated: true)] // ARM_THREAD_STATE, pc
+        case CPU_TYPE_ARM64, CPU_TYPE_ARM64_32: [ThreadStateKind(flavor: 6, count: 68, index: 32, translated: true)] // ARM_THREAD_STATE64, pc
         default: nil
         }
     }
@@ -862,25 +883,24 @@ struct MachOVerifier {
         let wide = image.is64 || image.cpuType == CPU_TYPE_ARM64_32
         let data = command.data
         var address: UInt64?
-        var first: (flavor: UInt32, count: UInt32)?
-        var translated: (flavor: UInt32, count: UInt32)?
+        var first: ThreadState?
+        var translated: ThreadState?
         var held = 0
         var at = 8
         while at < data.count {
             guard data.count >= at + 8 else {
                 return .short
             }
-            let (flavor, count) = data.withUnsafeBytes { raw in
-                (image.sw(raw.loadUnaligned(fromByteOffset: at, as: UInt32.self)), image.sw(raw.loadUnaligned(fromByteOffset: at + 4, as: UInt32.self)))
-            }
+            let flavor = image.sw(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: UInt32.self) })
+            let count = image.sw(data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at + 4, as: UInt32.self) })
             guard let state = states.first(where: { $0.flavor == flavor && $0.count == count }) else {
                 return .flavor(flavor, count)
             }
             if first == nil {
-                first = (flavor, count)
+                first = ThreadState(flavor: flavor, count: count)
             }
             if !state.translated, translated == nil {
-                translated = (flavor, count)
+                translated = ThreadState(flavor: flavor, count: count)
             }
             let registers = at + 8
             let pc = registers + state.index * (wide ? 8 : 4)
@@ -1132,16 +1152,54 @@ struct MachOVerifier {
         if linkedit.fileend > cursor {
             gaps.append(Int(cursor) ..< Int(linkedit.fileend))
         }
-        if let (count, first) = self.nonZero(in: gaps) {
-            found.append("\(count.hex) bytes of __LINKEDIT that no table references are not zero, the first at \(first.hex)")
+        if let nonZero = self.nonZero(in: gaps) {
+            found.append("\(nonZero.count.hex) bytes of __LINKEDIT that no table references are not zero, the first at \(nonZero.first.hex)")
         }
         return found
     }
 
     /// How many bytes of `ranges` of the image are not zero, and where the first is: `File.nonZero(in:)` of the image.
-    private func nonZero(in ranges: [Range<Int>]) -> (count: Int, first: Int)? {
+    private func nonZero(in ranges: [Range<Int>]) -> File.NonZero? {
         let offset = self.image.offset
-        return self.file.nonZero(in: ranges.map { $0.lowerBound + offset ..< $0.upperBound + offset }).map { ($0.count, $0.first - offset) }
+        return self.file.nonZero(in: ranges.map { $0.lowerBound + offset ..< $0.upperBound + offset }).map { File.NonZero(count: $0.count, first: $0.first - offset) }
+    }
+
+    /// A blob the special slots seal: its slot, what it is called, and the blob the signature holds, if it does.
+    private struct Sealed {
+        let slot: UInt32
+        let what: String
+        let blob: Data?
+    }
+
+    /// The slices of one architecture, by its name, as the kernel compares entries: how many there are.
+    private struct Counted {
+        let name: String
+        var count: Int
+    }
+
+    /// A segment's bytes no section covers: its name, and the gaps, each a range of the image.
+    private struct Uncovered {
+        let name: String
+        let gaps: [Range<Int>]
+    }
+
+    /// The bytes between one segment's content and the next's: their names, and the gap, a range of the image.
+    private struct Between {
+        let before: String
+        let after: String
+        let gap: Range<Int>
+    }
+
+    /// The segment reaching furthest into the file so far, by name, and where it ends.
+    private struct Furthest {
+        let name: String
+        let end: UInt64
+    }
+
+    /// A piece of the gaps read once: where it ends, and what of it is not zero.
+    private struct ReadPiece {
+        let end: Int
+        let nonZero: File.NonZero?
     }
 
     // MARK: - Padding
@@ -1159,7 +1217,7 @@ struct MachOVerifier {
         let image = self.image
         var found: [String] = []
         let headerEnd = UInt64(image.headerSize + image.sizeofcmds)
-        var uncovered: [(name: String, gaps: [Range<Int>])] = []
+        var uncovered: [Uncovered] = []
         for segment in self.segments where segment.filesize > 0 && segment.name != "__LINKEDIT" && !segment.sections.isEmpty {
             var gaps: [Range<Int>] = []
             var cursor = segment.fileoff == 0 ? min(headerEnd, segment.fileend) : segment.fileoff
@@ -1175,22 +1233,23 @@ struct MachOVerifier {
             if segment.fileend > cursor {
                 gaps.append(Int(cursor) ..< Int(segment.fileend))
             }
-            uncovered.append((segment.name, gaps))
+            uncovered.append(Uncovered(name: segment.name, gaps: gaps))
         }
-        var between: [(before: String, after: String, gap: Range<Int>)] = []
-        var furthest: (name: String, end: UInt64)?
+        var between: [Between] = []
+        var furthest: Furthest?
         for segment in self.segments.filter({ $0.filesize > 0 }).sorted(by: { $0.fileoff < $1.fileoff }) {
             if let furthest, segment.fileoff > furthest.end {
-                between.append((furthest.name, segment.name, Int(furthest.end) ..< Int(segment.fileoff)))
+                between.append(Between(before: furthest.name, after: segment.name, gap: Int(furthest.end) ..< Int(segment.fileoff)))
             }
             if furthest == nil || segment.fileend > furthest!.end {
-                furthest = (segment.name, segment.fileend)
+                furthest = Furthest(name: segment.name, end: segment.fileend)
             }
         }
 
         // Every gap is a run of pieces cut at every gap's bounds, each piece read once, by where it starts.
-        let read = Dictionary(uniqueKeysWithValues: Self.pieces(of: uncovered.flatMap(\.gaps) + between.map(\.gap)).map { ($0.lowerBound, (end: $0.upperBound, nonZero: self.nonZero(in: [$0]))) })
-        func nonZero(in gaps: [Range<Int>]) -> (count: Int, first: Int)? {
+        let read = Dictionary(uniqueKeysWithValues: Self.pieces(of: uncovered.flatMap(\.gaps) + between.map(\.gap)).map { ($0.lowerBound, ReadPiece(end: $0.upperBound, nonZero: self.nonZero(in: [$0]))) })
+        /// What of `gaps` is not zero, by the pieces read: how many bytes, and the first.
+        func nonZero(in gaps: [Range<Int>]) -> File.NonZero? {
             var count = 0
             var first = Int.max
             for gap in gaps {
@@ -1203,16 +1262,16 @@ struct MachOVerifier {
                     at = piece.end
                 }
             }
-            return count > 0 ? (count, first) : nil
+            return count > 0 ? File.NonZero(count: count, first: first) : nil
         }
-        for (name, gaps) in uncovered {
-            if let (count, first) = nonZero(in: gaps) {
-                found.append("\(count.hex) bytes of \(name) that no section covers are not zero, the first at \(first.hex)")
+        for segment in uncovered {
+            if let nonZero = nonZero(in: segment.gaps) {
+                found.append("\(nonZero.count.hex) bytes of \(segment.name) that no section covers are not zero, the first at \(nonZero.first.hex)")
             }
         }
-        for (before, after, gap) in between {
-            if let (count, first) = nonZero(in: [gap]) {
-                found.append("\(count.hex) bytes between \(before) and \(after) are not zero, the first at \(first.hex)")
+        for pair in between {
+            if let nonZero = nonZero(in: [pair.gap]) {
+                found.append("\(nonZero.count.hex) bytes between \(pair.before) and \(pair.after) are not zero, the first at \(nonZero.first.hex)")
             }
         }
         return found
@@ -1324,25 +1383,25 @@ struct MachOVerifier {
 
         found += Self.kernelIndexAnomalies(of: superblob)
 
-        let sealed: [(slot: UInt32, what: String, blob: Data?)] = [
-            (MachO.csslotRequirements, "the requirements blob", MachO.component(MachO.csslotRequirements, of: superblob)),
-            (MachO.csslotEntitlements, "the entitlements blob", MachO.component(MachO.csslotEntitlements, of: superblob)),
-            (MachO.csslotDEREntitlements, "the DER entitlements blob", MachO.component(MachO.csslotDEREntitlements, of: superblob)),
+        let sealed = [
+            Sealed(slot: MachO.csslotRequirements, what: "the requirements blob", blob: MachO.component(MachO.csslotRequirements, of: superblob)),
+            Sealed(slot: MachO.csslotEntitlements, what: "the entitlements blob", blob: MachO.component(MachO.csslotEntitlements, of: superblob)),
+            Sealed(slot: MachO.csslotDEREntitlements, what: "the DER entitlements blob", blob: MachO.component(MachO.csslotDEREntitlements, of: superblob)),
         ]
         for directory in directories {
             let type = "the \(directory.hashType.name) code directory"
-            for (slot, what, blob) in sealed {
-                let hash = directory.specialSlot(Int(slot))
+            for seal in sealed {
+                let hash = directory.specialSlot(Int(seal.slot))
                 let zero = hash?.allSatisfy { $0 == 0 } ?? true
-                if let blob {
+                if let blob = seal.blob {
                     // A slot the signer left empty seals nothing, which the kernel refuses of entitlements.
                     if zero {
-                        found.append("\(what) is not sealed by \(type)")
+                        found.append("\(seal.what) is not sealed by \(type)")
                     } else if directory.hashType.digest(blob).prefix(directory.hashType.slotSize) != hash {
-                        found.append("\(what) does not hash to its slot in \(type)")
+                        found.append("\(seal.what) does not hash to its slot in \(type)")
                     }
                 } else if !zero {
-                    found.append("\(type) seals \(what), which the signature does not hold")
+                    found.append("\(type) seals \(seal.what), which the signature does not hold")
                 }
             }
         }
@@ -1526,7 +1585,7 @@ struct MachOVerifier {
         let type = "the \(primary.hashType.name) code directory"
         let signer: Signer
         do {
-            signer = try Signer(cms: cms, over: primary.data, binding: directories.map { ($0.hashType, $0.hashType.digest($0.data)) }, best: best.hashType, enforcingExpiration: best.flags & Self.csEnforceExpiration != 0)
+            signer = try Signer(cms: cms, over: primary.data, binding: directories.map { Signer.Binding(hashType: $0.hashType, cdhash: $0.hashType.digest($0.data)) }, best: best.hashType, enforcingExpiration: best.flags & Self.csEnforceExpiration != 0)
         } catch {
             let line = switch error {
             case let .malformed(fault): "a CMS signature that is not DER to its end, \(fault), which Security's decoder would allocate for as it streams"
@@ -1616,12 +1675,12 @@ struct MachOVerifier {
             found.append("slice \(arch.name) is hidden past the table's \(String(counted, pluralizing: "entry", plural: "entries")): \(dyld ? "dyld and codesign find it, the kernel does not" : "codesign finds it, dyld and the kernel do not")")
         }
         // The kernel compares the entries' cputype and cpusubtype as they are, capability bits included.
-        var slices: [String: (name: String, count: Int)] = [:]
+        var slices: [String: Counted] = [:]
         for arch in archs {
-            slices["\(arch.cpuType),\(arch.cpuSubtype)", default: (arch.name, 0)].count += 1
+            slices["\(arch.cpuType),\(arch.cpuSubtype)", default: Counted(name: arch.name, count: 0)].count += 1
         }
-        for (name, count) in slices.values.sorted(by: { $0.name < $1.name }) where count > 1 {
-            found.append("\(count) slices of \(name), which the kernel refuses")
+        for counted in slices.values.sorted(by: { $0.name < $1.name }) where counted.count > 1 {
+            found.append("\(counted.count) slices of \(counted.name), which the kernel refuses")
         }
         let placed = archs.sorted { $0.offset < $1.offset }
         for (before, after) in zip(placed, placed.dropFirst()) where after.offset < before.offset + before.length {
@@ -1632,8 +1691,8 @@ struct MachOVerifier {
         }
         var cursor = MemoryLayout<fat_header>.size + archs.count * (is64 ? MemoryLayout<fat_arch_64>.size : MemoryLayout<fat_arch>.size)
         for arch in placed {
-            if arch.offset > cursor, let (count, first) = file.nonZero(in: [cursor ..< arch.offset]) {
-                found.append("\(count.hex) bytes of padding before slice \(arch.name) are not zero, the first at \(first.hex)")
+            if arch.offset > cursor, let nonZero = file.nonZero(in: [cursor ..< arch.offset]) {
+                found.append("\(nonZero.count.hex) bytes of padding before slice \(arch.name) are not zero, the first at \(nonZero.first.hex)")
             }
             cursor = max(cursor, arch.offset + arch.length)
         }
@@ -1696,7 +1755,7 @@ extension File {
      How many bytes of `ranges` of the file are not zero, and where the first is; nil when they all are, or cannot be
      read.
      */
-    func nonZero(in ranges: [Range<Int>]) -> (count: Int, first: Int)? {
+    func nonZero(in ranges: [Range<Int>]) -> NonZero? {
         var count = 0
         var first: Int?
         for range in ranges where !range.isEmpty {
@@ -1713,6 +1772,12 @@ extension File {
                 return nil
             }
         }
-        return first.map { (count, $0) }
+        return first.map { NonZero(count: count, first: $0) }
+    }
+
+    /// What of some ranges is not zero: how many bytes, and where the first is.
+    struct NonZero {
+        let count: Int
+        let first: Int
     }
 }

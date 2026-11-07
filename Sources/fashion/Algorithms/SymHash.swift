@@ -11,13 +11,13 @@ enum SymHash {
     static func compute(_ file: File, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> [DigestResult] {
         switch try Universal.open(file) {
         case let .fat(table):
-            try Universal.named(table.archs).flatMap { arch, name -> [DigestResult] in
+            try Universal.named(table.archs).flatMap { named -> [DigestResult] in
                 // A universal static library carries `ar` archives, which have no symbol table to hash.
-                guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
+                guard let image = try MachO(file, offset: named.arch.offset, length: named.arch.length) else {
                     return []
                 }
-                return try self.digests(of: image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(name, $0) })
-                    .map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm, label: name) }
+                return try self.digests(of: image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(named.name, $0) })
+                    .map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm, label: named.name) }
             }
         case let .thin(image):
             try self.digests(of: image, algorithms: algorithms, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(nil, $0) })
@@ -31,7 +31,7 @@ enum SymHash {
      The symhash of `file` as one thin image, a state of a slice as `ArtifactWriter.slices` cuts it, by each of
      `algorithms`; none for what is not a thin Mach-O, an archive among a universal file's slices say.
      */
-    static func digests(of file: File, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (String) -> Void) throws -> [(hash: ByteHash, digest: String)] {
+    static func digests(of file: File, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (String) -> Void) throws -> [ByteHash.Digest] {
         guard let image = try MachO(file) else {
             return []
         }
@@ -228,7 +228,7 @@ enum SymHash {
      The symhash of one image by each algorithm, `image` as it was read already; none when it carries no symbol table,
      as a UPX stub carries none, which `caveat` is told, "no external symbol table", as `verify` names it.
      */
-    static func digests(of image: MachO, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (String) -> Void) throws -> [(hash: ByteHash, digest: String)] {
+    static func digests(of image: MachO, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (String) -> Void) throws -> [ByteHash.Digest] {
         guard
             let command = image.findCommand(UInt32(LC_SYMTAB)),
             let symtab = try self.parseSymtab(command: command, swap: image.swap)

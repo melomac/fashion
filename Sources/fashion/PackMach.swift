@@ -173,11 +173,33 @@ struct PackMach {
      one value in both, the pack header's under its checksum, the `p_info`'s under nothing, where its stub never
      reads it. Nil when the image ends before the `p_info`; throws for a read that fails.
      */
-    func claimedSizes() throws -> (pInfo: Int, header: Int)? {
+    func claimedSizes() throws -> ClaimedSizes? {
         guard self.overlayOffset + 12 <= self.image.length else {
             return nil
         }
-        return try (Int(self.image.word(self.read(at: self.overlayOffset, count: 12), at: 4)), Int(self.header.uFileSize))
+        return try ClaimedSizes(pInfo: Int(self.image.word(self.read(at: self.overlayOffset, count: 12), at: 4)), header: Int(self.header.uFileSize))
+    }
+
+    /// The original's size as the `p_info` claims it, and as the pack header says it.
+    struct ClaimedSizes {
+        let pInfo: Int
+        let header: Int
+    }
+
+    /// The segment lying last in the file, UPX's `__LINKEDIT` whatever a modified UPX named it, and where the one
+    /// before it ends.
+    private struct LastSegment {
+        let segment: Segment
+        let before: Int
+    }
+
+    /// The pack header as the scan found it: the header, where it lies in the image, the overlay offset after it,
+    /// and where the scan looked when the segments' names did not lead it, nil where they did.
+    private struct FoundHeader {
+        let header: PackHeader
+        let offset: Int
+        let overlayOffset: Int
+        let location: String?
     }
 
     /// A packer class UPX unpacks Mach-O with: its CPU, filetype, format id and page.
@@ -247,7 +269,7 @@ struct PackMach {
         var text: Segment?
         // The segment lying last in the file, and where the one before it ends: UPX's __LINKEDIT, whatever a modified
         // UPX named it.
-        var last: (segment: Segment, before: Int)?
+        var last: LastSegment?
         for command in image.loadCommands.prefix(ncmds) {
             guard let segment = Segment(command, in: image) else {
                 continue
@@ -276,7 +298,7 @@ struct PackMach {
                 break
             }
             if last.map({ segment.fileoff >= $0.segment.fileoff }) ?? true {
-                last = (segment, posNext)
+                last = LastSegment(segment: segment, before: posNext)
             }
             posNext = segment.fileoff + segment.filesize
         }
@@ -343,7 +365,7 @@ struct PackMach {
             windows += candidates.filter { candidate in !windows.contains { $0.start == candidate.start && $0.count == candidate.count } }
         }
 
-        var found: (header: PackHeader, offset: Int, overlayOffset: Int, where: String?)?
+        var found: FoundHeader?
         for window in windows where found == nil && window.count > small {
             let data = try image.dataAt(window.start, count: window.count)
             // The pack header ends where the zeros that pad __TEXT to its page begin.
@@ -387,7 +409,7 @@ struct PackMach {
                     continue
                 }
             }
-            found = (packHeader, window.start + i + packHeader.offset, overlayOffset, window.found)
+            found = FoundHeader(header: packHeader, offset: window.start + i + packHeader.offset, overlayOffset: overlayOffset, location: window.found)
         }
         guard let found else {
             // No pack header where the scan looks, before the 16-byte __LINKEDIT only UPX writes: a packed image
@@ -410,7 +432,7 @@ struct PackMach {
         if packHeader.magic != PackHeader.magic {
             signs.append("its marker \(Self.quoted(packHeader.magic)) in place of \"UPX!\"")
         }
-        if let renamed = found.where {
+        if let renamed = found.location {
             signs.append("a segment renamed, its pack header found \(renamed)")
         }
         let modified = !signs.isEmpty
@@ -557,7 +579,7 @@ struct PackMach {
         var notes: [String] = []
         var decompressed: Data?
         fileprivate var pass: Pass
-        fileprivate let pInfo: (progid: UInt32, fileSize: Int, blocksize: Int)
+        fileprivate let pInfo: PInfo
 
         fileprivate var blocks: [Block] {
             self.pass.blocks
@@ -700,7 +722,7 @@ struct PackMach {
         // whose p_filesize claims more than its segments reach would otherwise come out that long, zeros after the
         // last one, and cost that much to hash.
         output.count = pass.extent
-        return Unpacked(data: output, pass: pass, pInfo: (progid, fileSize, blocksize))
+        return Unpacked(data: output, pass: pass, pInfo: PInfo(progid: progid, fileSize: fileSize, blocksize: blocksize))
     }
 
     // MARK: - Private
@@ -778,15 +800,37 @@ struct PackMach {
         var extent = 0
         /// Each block's Adler-32 and length, in order, which the image's sum combines, kept when `keeping` for the
         /// keys to replace the filtered ones' by.
-        var sums: [(adler: UInt32, count: Int)] = []
+        var sums: [BlockSum] = []
         /// The filtered blocks as decoded, when `keeping`: which block, where it lies in the image, and its filter.
-        var kept: [(index: Int, at: Int, filter: UInt8, cto: UInt8, decoded: Data)] = []
+        var kept: [KeptBlock] = []
         /// The compression methods and filters of the blocks seen, for the log, the first blocks themselves, and how
         /// many there were.
         var methods: Set<UInt8> = []
         var filters: Set<UInt8> = []
         var blocks: [Block] = []
         var blockCount = 0
+    }
+
+    /// UPX's `p_info`, the 12 bytes before the blocks: the program id, the original's size and the block size.
+    fileprivate struct PInfo {
+        let progid: UInt32
+        let fileSize: Int
+        let blocksize: Int
+    }
+
+    /// A block's Adler-32 as unpacked, and its length, which the image's sum combines.
+    fileprivate struct BlockSum {
+        var adler: UInt32
+        let count: Int
+    }
+
+    /// A filtered block as decoded: which block, where it lies in the image, its filter, and its bytes.
+    fileprivate struct KeptBlock {
+        let index: Int
+        let at: Int
+        let filter: UInt8
+        let cto: UInt8
+        let decoded: Data
     }
 
     /// A block as the pass met it: where its `b_info` lies in the packed image, what it says, and where the block is
@@ -908,7 +952,7 @@ struct PackMach {
                         pass.filtered = true
                         pass.filters.insert(info.filter)
                         if pass.keeping {
-                            pass.kept.append((pass.sums.count, offset, info.filter, info.cto, Data(destination)))
+                            pass.kept.append(KeptBlock(index: pass.sums.count, at: offset, filter: info.filter, cto: info.cto, decoded: Data(destination)))
                         }
                         try Self.unfilter(destination, id: info.filter, cto: info.cto)
                     }
@@ -918,7 +962,7 @@ struct PackMach {
             }
             let sum = output.withUnsafeBytes { UInt32(adler32(1, $0.baseAddress!.advanced(by: offset).assumingMemoryBound(to: Bytef.self), uInt(info.uncompressed))) }
             if pass.keeping {
-                pass.sums.append((sum, info.uncompressed))
+                pass.sums.append(BlockSum(adler: sum, count: info.uncompressed))
             } else {
                 pass.adler = adler32_combine(pass.adler, uLong(sum), info.uncompressed)
             }
@@ -958,9 +1002,9 @@ struct PackMach {
                 continue
             }
             var data = try self.read(at: rc.fileoff, count: rc.filesize)
-            if rc.name == "__DATA", let (offset, pointer) = try self.modInitFunc(in: rc) {
-                let original = try self.read(at: Int(clamping: pointer) - 16, count: 4)
-                let at = offset - rc.fileoff
+            if rc.name == "__DATA", let initFunc = try self.modInitFunc(in: rc) {
+                let original = try self.read(at: Int(clamping: initFunc.pointer) - 16, count: 4)
+                let at = initFunc.offset - rc.fileoff
                 guard
                     at >= 0,
                     at + 4 <= data.count
@@ -981,8 +1025,14 @@ struct PackMach {
         }
     }
 
+    /// A pointer-sized `__mod_init_func` section: its offset in the image, and the pointer it holds.
+    private struct ModInitFunc {
+        let offset: Int
+        let pointer: UInt64
+    }
+
     /// The offset of a pointer-sized `__mod_init_func` section in `segment`, and the pointer there (`get_mod_init_func`).
-    private func modInitFunc(in segment: Segment) throws -> (offset: Int, pointer: UInt64)? {
+    private func modInitFunc(in segment: Segment) throws -> ModInitFunc? {
         let sectionSize = self.image.is64 ? MemoryLayout<section_64>.size : MemoryLayout<section>.size
         let pointerSize = self.image.is64 ? 8 : 4
         var at = (self.image.is64 ? MemoryLayout<segment_command_64>.size : MemoryLayout<segment_command>.size)
@@ -992,7 +1042,7 @@ struct PackMach {
             if size == pointerSize, MachO.field(section.prefix(16), is: "__mod_init_func") {
                 let offset = Int(self.image.word(section, at: self.image.is64 ? 48 : 40))
                 let pointer = try self.read(at: offset, count: pointerSize)
-                return (offset, self.image.is64 ? self.image.sw(pointer.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }) : UInt64(self.image.word(pointer, at: 0)))
+                return ModInitFunc(offset: offset, pointer: self.image.is64 ? self.image.sw(pointer.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }) : UInt64(self.image.word(pointer, at: 0)))
             }
             at += sectionSize
         }

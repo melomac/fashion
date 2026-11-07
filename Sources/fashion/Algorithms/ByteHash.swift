@@ -90,9 +90,9 @@ enum ByteHash: String {
      end. A hash that makes no digest (TLSH) is left out, and `caveat` hears why. One hash reads the file as
      `digest(_:range:caveat:)` does.
      */
-    static func digests(_ hashes: [ByteHash], _ file: File, range: Range<Int>? = nil, caveat: (String) -> Void = { _ in }) throws -> [(hash: ByteHash, digest: String)] {
+    static func digests(_ hashes: [ByteHash], _ file: File, range: Range<Int>? = nil, caveat: (String) -> Void = { _ in }) throws -> [Digest] {
         if hashes.count == 1, let hash = hashes.first {
-            return try hash.digest(file, range: range, caveat: caveat).map { [(hash, $0)] } ?? []
+            return try hash.digest(file, range: range, caveat: caveat).map { [Digest(hash: hash, digest: $0)] } ?? []
         }
         let range = range ?? 0 ..< file.size
         return try self.digests(hashes, length: range.count, caveat: caveat) { fanOut in
@@ -105,20 +105,26 @@ enum ByteHash: String {
      the order given, without those TLSH makes none of: for bytes that are never in one place, a symbol table's names
      with their separators say.
      */
-    static func digests(_ hashes: [ByteHash], length: Int, caveat: (String) -> Void = { _ in }, feed: (inout FanOutHasher) throws -> Void) throws -> [(hash: ByteHash, digest: String)] {
-        var fanOut = try FanOutHasher(hashes.map { ($0, min(length, $0.maximumLength)) })
+    static func digests(_ hashes: [ByteHash], length: Int, caveat: (String) -> Void = { _ in }, feed: (inout FanOutHasher) throws -> Void) throws -> [Digest] {
+        var fanOut = try FanOutHasher(hashes.map { FanOutHasher.Feed(hash: $0, length: min(length, $0.maximumLength)) })
         try feed(&fanOut)
         return try zip(hashes, fanOut.finalize()).compactMap { hash, digest in
             hash.note(digest, length: length, caveat: caveat)
-            return digest.map { (hash, $0) }
+            return digest.map { Digest(hash: hash, digest: $0) }
         }
     }
 
     /**
      The digests of several hashes of bytes in memory, each with its hash in the order given, without those TLSH makes none of.
      */
-    static func digests(_ hashes: [ByteHash], _ data: Data, caveat: (String) -> Void = { _ in }) throws -> [(hash: ByteHash, digest: String)] {
-        try hashes.compactMap { hash in try hash.digest(data, caveat: caveat).map { (hash, $0) } }
+    static func digests(_ hashes: [ByteHash], _ data: Data, caveat: (String) -> Void = { _ in }) throws -> [Digest] {
+        try hashes.compactMap { hash in try hash.digest(data, caveat: caveat).map { Digest(hash: hash, digest: $0) } }
+    }
+
+    /// A digest with the hash that made it, as `fashion` prints it.
+    struct Digest: Equatable {
+        let hash: ByteHash
+        let digest: String
     }
 
     /**
@@ -148,13 +154,25 @@ enum ByteHash: String {
  go on to the end of the file.
  */
 struct FanOutHasher {
-    private var hashers: [(hasher: any ByteHasher, remaining: Int)]
+    private var hashers: [Slot]
+
+    /// A hash and how many bytes it is to be fed.
+    struct Feed {
+        let hash: ByteHash
+        let length: Int
+    }
+
+    /// A hasher, and how many bytes it has yet to take.
+    private struct Slot {
+        var hasher: any ByteHasher
+        var remaining: Int
+    }
 
     /**
-     A hasher per hash, for the `length` bytes it will be fed.
+     A hasher per feed, for the `length` bytes it will be fed.
      */
-    init(_ hashes: [(hash: ByteHash, length: Int)]) throws {
-        self.hashers = try hashes.map { try ($0.hash.hasher(length: $0.length), $0.length) }
+    init(_ feeds: [Feed]) throws {
+        self.hashers = try feeds.map { try Slot(hasher: $0.hash.hasher(length: $0.length), remaining: $0.length) }
     }
 
     /**

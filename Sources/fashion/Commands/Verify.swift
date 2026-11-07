@@ -95,9 +95,9 @@ extension Verify {
         do {
             switch try Universal.open(file) {
             case let .thin(image):
-                let (findings, error) = MachOVerifier(image, in: file).anomalies()
-                findings.forEach { found($0, nil) }
-                if let error {
+                let anomalies = MachOVerifier(image, in: file).anomalies()
+                anomalies.found.forEach { found($0, nil) }
+                if let error = anomalies.refused {
                     refused(error, nil)
                 }
             case let .fat(table):
@@ -117,9 +117,9 @@ extension Verify {
                         }
                         let verifier = MachOVerifier(image, in: file)
                         verifier.anomalies(slice: arch).forEach { found($0, nil) }
-                        let (findings, error) = verifier.anomalies()
-                        findings.forEach { found($0, arch.name) }
-                        if let error {
+                        let anomalies = verifier.anomalies()
+                        anomalies.found.forEach { found($0, arch.name) }
+                        if let error = anomalies.refused {
                             refused(error, arch.name)
                         }
                     } catch {

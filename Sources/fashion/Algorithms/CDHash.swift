@@ -107,8 +107,9 @@ enum CDHash {
      One SliceResult per code directory. The hash type is only set when a slice carries several directories.
      */
     private static func results(for slice: MachO, arch: String?, path: String, exact: Bool) throws -> [SliceResult] {
-        let (directories, skipReason) = try slice.codeDirectoryHashes(exact: exact)
-        if let skipReason {
+        let hashed = try slice.codeDirectoryHashes(exact: exact)
+        let directories = hashed.hashes
+        if let skipReason = hashed.skipReason {
             self.logSkip(path: path, arch: arch, reason: skipReason)
         }
         let ambiguous = directories.count > 1
@@ -155,9 +156,9 @@ extension MachO {
      A slice of a universal file is judged on its own, as if extracted: `codesign` instead decides a whole 32-bit
      universal file from its first slice, and treats a 64-bit one (`lipo -fat64`) as a generic file outright.
      */
-    func codeDirectoryHashes(exact: Bool) throws -> (hashes: [CodeDirectoryHash], skipReason: String?) {
+    func codeDirectoryHashes(exact: Bool) throws -> CodeDirectoryHashes {
         guard Self.codeFiletypes.contains(self.filetype) else {
-            return ([], "\(self.filetypeName) is not code to codesign")
+            return CodeDirectoryHashes(hashes: [], skipReason: "\(self.filetypeName) is not code to codesign")
         }
 
         let signature = try self.findCodeSignature()
@@ -170,11 +171,17 @@ extension MachO {
                 CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !verdicts.0.valid || !verdicts.1)
             }
             if !hashes.isEmpty {
-                return (hashes, nil)
+                return CodeDirectoryHashes(hashes: hashes, skipReason: nil)
             }
         }
 
-        return try (self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.length), invalid: signature != nil), nil)
+        return try CodeDirectoryHashes(hashes: self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.length), invalid: signature != nil), skipReason: nil)
+    }
+
+    /// The cdhashes of a slice, and why there are none, when there are none: a file type codesign does not sign.
+    struct CodeDirectoryHashes {
+        let hashes: [CodeDirectoryHash]
+        let skipReason: String?
     }
 
     // MARK: - Embedded signature
@@ -212,8 +219,8 @@ extension MachO {
             +-----------------------------------------------+
      ```
      */
-    func signingData(_ signature: (offset: Int, size: Int)) throws -> Data {
-        let (offset, size) = signature
+    func signingData(_ signature: Span) throws -> Data {
+        let (offset, size) = (signature.offset, signature.size)
         guard offset <= self.length - 8 else {
             throw CDHashError.invalidCodeSignatureRange(offset: UInt32(offset), size: UInt32(size), fileSize: self.length)
         }
@@ -285,7 +292,7 @@ extension MachO {
      ad hoc, the CMS blob must be there under its wrapper's magic and verify over `primary`, binding every directory
      (`verifySignature`). Whose chain the signer's is, trustd's work, is verify's business, not hash mode's.
      */
-    private static func securityTakes(_ directories: [EmbeddedCodeDirectory], primary: EmbeddedCodeDirectory?, in superblob: Data, signature: (offset: Int, size: Int)) -> [Bool] {
+    private static func securityTakes(_ directories: [EmbeddedCodeDirectory], primary: EmbeddedCodeDirectory?, in superblob: Data, signature: Span) -> [Bool] {
         let sealed = [self.csslotRequirements, self.csslotEntitlements, self.csslotDEREntitlements].map { self.component($0, of: superblob) }
         let signed: Bool = {
             guard let best = directories.first, let primary, best.flags & self.csAdhoc == 0 else {
@@ -294,7 +301,7 @@ extension MachO {
             guard let wrapped = self.component(self.csslotSignature, of: superblob), wrapped.count > 8, wrapped.bigEndianUInt32(at: 0) == self.csmagicBlobWrapper else {
                 return false
             }
-            return (try? Signer(cms: Data(wrapped.dropFirst(8)), over: primary.data, binding: directories.map { ($0.hashType, $0.hashType.digest($0.data)) }, best: best.hashType, evaluatingChain: false)) != nil
+            return (try? Signer(cms: Data(wrapped.dropFirst(8)), over: primary.data, binding: directories.map { Signer.Binding(hashType: $0.hashType, cdhash: $0.hashType.digest($0.data)) }, best: best.hashType, evaluatingChain: false)) != nil
         }()
         return directories.map { directory in
             guard signed, directory.codeLimit >= UInt64(signature.offset) else {
@@ -360,7 +367,7 @@ extension MachO {
      slot still to check. A scattered directory, whose slots map to the pages its scatter vector places, is not
      checked, and sets no geometry.
      */
-    func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [(valid: Bool, failedSlot: Int?)] {
+    func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [Verdict] {
         guard let geometry = Self.geometry(of: directories) else {
             return []
         }
@@ -376,7 +383,13 @@ extension MachO {
                 }
             }
         } catch is SlotValidator.Done {}
-        return validators.map { ($0.valid, $0.failedSlot) }
+        return validators.map { Verdict(valid: $0.valid, failedSlot: $0.failedSlot) }
+    }
+
+    /// Whether a code directory's slots hash the code they seal, and the first slot that does not, if any.
+    struct Verdict {
+        let valid: Bool
+        let failedSlot: Int?
     }
 
     /// The directory whose code limit and page size Security cuts every directory's pages by: the one of the lowest
@@ -405,8 +418,8 @@ extension MachO {
             specialSlots: [1: self.infoPlistDigests(), 2: CodeDirectoryBuilder.digests(of: Self.emptyRequirementsBlob)].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
         )
 
-        return try builder.build(code: self).map { hashType, cd in
-            CodeDirectoryHash(hash: hashType.digest(cd).hexString, type: hashType.name, adhoc: true, invalid: invalid)
+        return try builder.build(code: self).map { built in
+            CodeDirectoryHash(hash: built.hashType.digest(built.directory).hexString, type: built.hashType.name, adhoc: true, invalid: invalid)
         }
     }
 
@@ -467,21 +480,28 @@ extension MachO {
      The range is read as the file stores it, without byte-swapping, so a big-endian slice (ppc, ppc64) gets it
      byte-reversed: a 0x1000-byte ppc `__TEXT` is recorded as 0x100000. The ad-hoc identity carries that quirk too.
      */
-    private func execSeg() throws -> (base: UInt64, limit: UInt64) {
+    private func execSeg() throws -> ExecSeg {
         guard
             try (self.version()?.platform ?? 0) != 0,
             let text = try self.findSegment("__TEXT")
         else {
-            return (0, 0)
+            return ExecSeg(base: 0, limit: 0)
         }
 
         // Security reads the 64-bit fields of a 64-bit image's segment command whatever the command's kind: of a
         // 56-byte LC_SEGMENT, the bytes its protections and section count hold, which `findSegment` has required.
         if self.is64 {
-            return text.data.withUnsafeBytes { ($0.loadUnaligned(fromByteOffset: 40, as: UInt64.self), $0.loadUnaligned(fromByteOffset: 48, as: UInt64.self)) }
+            return text.data.withUnsafeBytes { ExecSeg(base: $0.loadUnaligned(fromByteOffset: 40, as: UInt64.self), limit: $0.loadUnaligned(fromByteOffset: 48, as: UInt64.self)) }
         }
 
-        return text.payload(as: segment_command.self).map { (UInt64($0.fileoff), UInt64($0.filesize)) } ?? (0, 0)
+        return text.payload(as: segment_command.self).map { ExecSeg(base: UInt64($0.fileoff), limit: UInt64($0.filesize)) } ?? ExecSeg(base: 0, limit: 0)
+    }
+
+    /// The executable segment as a code directory records it, `__TEXT`'s file offset and size, read as the file
+    /// stores them (`execSeg()`).
+    private struct ExecSeg {
+        let base: UInt64
+        let limit: UInt64
     }
 
     /**
@@ -886,7 +906,7 @@ private struct CodeDirectoryBuilder {
      `Builder::build`: the header the fields call for, the identifier, the special slots, then a hash slot per page of
      code, read from the image once for both types. A directory too large is refused before any code is read.
      */
-    func build(code image: MachO) throws -> [(hashType: HashType, directory: Data)] {
+    func build(code image: MachO) throws -> [Built] {
         let hashTypes = Self.hashTypes
         var directories = try hashTypes.map { try self.directory(hashType: $0) }
         try image.forEachPage(upTo: self.codeLimit, pageSize: 1 << Int(self.pageSizeLog)) { page in
@@ -895,7 +915,13 @@ private struct CodeDirectoryBuilder {
             }
         }
 
-        return Array(zip(hashTypes, directories))
+        return zip(hashTypes, directories).map { Built(hashType: $0, directory: $1) }
+    }
+
+    /// A code directory built, under its hash type.
+    struct Built {
+        let hashType: HashType
+        let directory: Data
     }
 
     /**

@@ -55,9 +55,21 @@ final class File {
     let path: String
     private let fd: FileDescriptor
     /// The device and inode opened, which the path may no longer name by the time a read comes up short.
-    private let identity: (dev_t, ino_t)
+    private let identity: Inode
     /// The file an edit reads from, and its bytes in order; nil for a file as it is on disk.
-    private let edit: (base: File, pieces: [Piece])?
+    private let edit: Editing?
+
+    /// A file's identity on its volume: the device, and the inode.
+    private struct Inode: Equatable {
+        let dev: dev_t
+        let ino: ino_t
+    }
+
+    /// An edit's source, and the pieces that make the edit, in order.
+    private struct Editing {
+        let base: File
+        let pieces: [Piece]
+    }
 
     /**
      Open the regular file at `path`. The walk found one there, but the path may name something else by the time it is
@@ -83,7 +95,7 @@ final class File {
         self.path = path
         self.fd = fd
         self.size = Int(info.st_size)
-        self.identity = (info.st_dev, info.st_ino)
+        self.identity = Inode(dev: info.st_dev, ino: info.st_ino)
         self.edit = nil
     }
 
@@ -96,7 +108,7 @@ final class File {
         self.fd = base.fd
         self.size = pieces.reduce(0) { $0 + $1.count }
         self.identity = base.identity
-        self.edit = (base, pieces)
+        self.edit = Editing(base: base, pieces: pieces)
     }
 
     deinit {
@@ -182,7 +194,7 @@ final class File {
             return base.shortRead()
         }
         var now = stat()
-        guard stat(self.path, &now) == 0, (now.st_dev, now.st_ino) == self.identity else {
+        guard stat(self.path, &now) == 0, Inode(dev: now.st_dev, ino: now.st_ino) == self.identity else {
             return .replaced
         }
         return .sizeChanged(opened: self.size, now: Int(now.st_size))
@@ -193,8 +205,8 @@ final class File {
      read until the buffer is full or the file ends. Returns the count read.
      */
     private func read(at offset: Int, into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
-        if let (base, pieces) = self.edit {
-            return try Self.read(pieces, of: base, at: offset, into: buffer)
+        if let edit = self.edit {
+            return try Self.read(edit.pieces, of: edit.base, at: offset, into: buffer)
         }
         var filled = 0
         while filled < buffer.count {

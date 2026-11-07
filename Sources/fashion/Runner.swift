@@ -448,15 +448,21 @@ final class Output: @unchecked Sendable {
         self.printing = false
     }
 
+    /// What the status line shows of the work in flight: the file hashed for the longest, and the files held back.
+    private struct Status {
+        let path: String
+        let waiting: Int
+    }
+
     /**
      Redraw the status line: the count of hashed files, the lines held back and the file hashed for the longest.
      */
     func showStatus() {
-        let status: (path: String, waiting: Int)? = self.condition.withLock {
+        let status: Status? = self.condition.withLock {
             guard let path = self.hashing.min(by: { $0.key < $1.key })?.value else {
                 return nil
             }
-            return (path, self.held.count)
+            return Status(path: path, waiting: self.held.count)
         }
         guard let status else {
             return
@@ -543,6 +549,12 @@ final class Reporter: @unchecked Sendable {
         self.lock.withLock { self.errors }
     }
 
+    /// The run's counts as it ended: the files worked on, and the failures among them and the walk.
+    private struct Counts {
+        let files: Int
+        let errors: Int
+    }
+
     /**
      A path that could not be enumerated or hashed, logged and counted now.
 
@@ -627,7 +639,7 @@ final class Reporter: @unchecked Sendable {
      Report the counts, elapsed time and peak memory so far to the log and to stderr, like `dd` on `SIGINFO` (⌃T).
      */
     func progress() {
-        let summary = self.summary(self.lock.withLock { (self.files, self.errors) })
+        let summary = self.summary(self.lock.withLock { Counts(files: self.files, errors: self.errors) })
         logger.info("Progress: \(summary, privacy: .public)")
 
         self.lineLock.withLock {
@@ -641,12 +653,12 @@ final class Reporter: @unchecked Sendable {
      */
     func end(_ reason: String) {
         self.console.close()
-        let counts: (files: Int, errors: Int)? = self.lock.withLock {
+        let counts: Counts? = self.lock.withLock {
             guard !self.ended else {
                 return nil
             }
             self.ended = true
-            return (self.files, self.errors)
+            return Counts(files: self.files, errors: self.errors)
         }
         guard let counts else {
             return
@@ -657,7 +669,7 @@ final class Reporter: @unchecked Sendable {
     /**
      Call without holding the lock: the first format loads ICU, which would stall every hash thread's `fileProcessed()`.
      */
-    private func summary(_ counts: (files: Int, errors: Int)) -> String {
+    private func summary(_ counts: Counts) -> String {
         let duration = (self.clock.now - self.start).formatted(.units(allowed: [.hours, .minutes, .seconds, .milliseconds], width: .narrow))
         // Not `.byteCount(style:)`: its formatter adds about 1 ms to every run, and its decimal separator follows the locale.
         let peak = Self.peakFootprint().map { String(format: ", %.1f MB peak memory", Double($0) / 1_000_000) } ?? ""
@@ -764,7 +776,14 @@ final class SignalTrap: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
     private var sources: [DispatchSourceSignal] = []
-    private var inherited: [(signo: Int32, action: sigaction)] = []
+    private var inherited: [Inherited] = []
+
+    /// A signal's disposition as the run found it, to put back once the run is over.
+    private struct Inherited {
+        let signo: Int32
+        var action: sigaction
+    }
+
     private var holdsBrokenPipe = false
 
     init(reporter: Reporter) {
@@ -831,7 +850,7 @@ final class SignalTrap: @unchecked Sendable {
             }
         }
 
-        self.inherited.append((signo, action))
+        self.inherited.append(Inherited(signo: signo, action: action))
         self.sources.append(source)
         source.resume()
 
@@ -869,7 +888,14 @@ final class SignalTrap: @unchecked Sendable {
 final class Handoff: @unchecked Sendable {
     private let condition = NSCondition()
     private let capacity: Int
-    private var queue: [(index: Int, path: String)] = []
+    private var queue: [Item] = []
+
+    /// A path as the walk found it, with its place in the walk, for --sort to print the files in that order.
+    struct Item {
+        let index: Int
+        let path: String
+    }
+
     private var closed = false
 
     init(capacity: Int) {
@@ -887,14 +913,14 @@ final class Handoff: @unchecked Sendable {
         while self.queue.count == self.capacity {
             self.condition.wait()
         }
-        self.queue.append((index, path))
+        self.queue.append(Item(index: index, path: path))
         self.condition.signal()
     }
 
     /**
      Wait for the next path; nil once the walk is over and the queue is empty.
      */
-    func take() -> (index: Int, path: String)? {
+    func take() -> Item? {
         self.condition.lock()
         defer {
             self.condition.unlock()
@@ -940,7 +966,7 @@ extension ScanOptions {
      `trapSignals` logs the end of the run on `SIGINT`, `SIGTERM` and `SIGPIPE`, and progress on `SIGINFO`.
      Signal dispositions are process-wide, so only the command line sets it.
      */
-    func run(trapSignals: Bool, activity: String, work: @escaping @Sendable (_ file: File, _ reporter: Reporter) -> [Line]) -> (printedAny: Bool, errorCount: Int) {
+    func run(trapSignals: Bool, activity: String, work: @escaping @Sendable (_ file: File, _ reporter: Reporter) -> [Line]) -> Outcome {
         let console = Console()
         let reporter = Reporter(console: console)
         let trap = trapSignals ? SignalTrap(reporter: reporter) : nil
@@ -955,11 +981,11 @@ extension ScanOptions {
         for _ in 0 ..< self.resolvedJobs {
             working.enter()
             let thread = Thread {
-                while let (index, path) = handoff.take() {
-                    output.started(index, path: path)
-                    let lines = Self.open(path, reporter: reporter) { work($0, reporter) }
+                while let item = handoff.take() {
+                    output.started(item.index, path: item.path)
+                    let lines = Self.open(item.path, reporter: reporter) { work($0, reporter) }
                     reporter.fileProcessed()
-                    output.finished(index, lines: lines)
+                    output.finished(item.index, lines: lines)
                 }
                 working.leave()
             }
@@ -988,7 +1014,13 @@ extension ScanOptions {
         reporter.end("Done")
         trap?.restore()
 
-        return (output.printedAny, reporter.errorCount)
+        return Outcome(printedAny: output.printedAny, errorCount: reporter.errorCount)
+    }
+
+    /// How a scan ended: whether any line was printed, and how many paths could not be walked, opened or worked on.
+    struct Outcome {
+        let printedAny: Bool
+        let errorCount: Int
     }
 
     /**
@@ -1277,7 +1309,7 @@ struct Digester {
                     return []
                 }
             }, digests: { bytes, label in
-                (try SymHash.digests(of: bytes, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { subject.inform($0, arch: label) }), nil)
+                try StateDigests(digests: SymHash.digests(of: bytes, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { subject.inform($0, arch: label) }), identity: nil)
             })
         case let .xarToc(hashes, decompress):
             return try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { subject.inform($0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
@@ -1328,11 +1360,11 @@ struct Digester {
      artifact shows beside its state and matches by what it holds. A file in place that cannot be read is said the
      same way, and the state stands.
      */
-    private func artifactDigests(_ artifacts: [Artifact], subject: Reporter.Subject, whole: () throws -> [DigestResult], digests: (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?)) throws -> [DigestResult] {
+    private func artifactDigests(_ artifacts: [Artifact], subject: Reporter.Subject, whole: () throws -> [DigestResult], digests: (_ bytes: File, _ label: String) throws -> StateDigests) throws -> [DigestResult] {
         var results = try whole()
         for artifact in artifacts {
             let label = artifact.label
-            let state: (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?)
+            let state: StateDigests
             do {
                 state = try digests(artifact.bytes, label)
             } catch {
@@ -1363,6 +1395,13 @@ struct Digester {
         return results
     }
 
+    /// One state's digests, under the byte hashes or the symhash, with its size and SHA-256 where the read that
+    /// digested it has them, the byte hashes' from their one read; nil for a symhash's, read when a file is in place.
+    private struct StateDigests {
+        let digests: [ByteHash.Digest]
+        let identity: ArtifactWriter.Identity?
+    }
+
     /**
      The regular file under `path`, in place of an artifact, for `artifactDigests` to compare to the state it stands
      for: nil where there is none, or something else, a symbolic link say, which is left alone as `ArtifactWriter`
@@ -1386,12 +1425,12 @@ struct Digester {
      What `artifactDigests` digests a state's bytes by under the byte hashes: `hashes`, and SHA-256 for the comparison
      with a file in place, in the one read; what TLSH leaves out goes to `subject`, after the state's label.
      */
-    private static func byteDigests(_ hashes: [ByteHash], subject: Reporter.Subject) -> (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?) {
+    private static func byteDigests(_ hashes: [ByteHash], subject: Reporter.Subject) -> (_ bytes: File, _ label: String) throws -> StateDigests {
         let hashed = hashes.contains { $0.algorithm == .sha256 } ? hashes : hashes + [ByteHash(.sha256)!] // nil for cdhash alone
         return { bytes, label in
             let all = try ByteHash.digests(hashed, bytes, caveat: { subject.inform($0, arch: label) })
             let digest = all.first { $0.hash.algorithm == .sha256 }?.digest ?? ""
-            return (all.filter { digest in hashes.contains { $0.algorithm == digest.hash.algorithm } }, ArtifactWriter.Identity(size: bytes.size, digest: digest))
+            return StateDigests(digests: all.filter { digest in hashes.contains { $0.algorithm == digest.hash.algorithm } }, identity: ArtifactWriter.Identity(size: bytes.size, digest: digest))
         }
     }
 
