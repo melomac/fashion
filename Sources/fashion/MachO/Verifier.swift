@@ -1040,15 +1040,23 @@ struct MachOVerifier {
 
         // UPX: as it is, or behind a signature added after packing, which hides the 16-byte __LINKEDIT UPX left,
         // with or without bytes appended after signing; a pack header found that does not hold, or none before the
-        // 16-byte __LINKEDIT UPX writes, is named, as unpack refuses it.
+        // 16-byte __LINKEDIT UPX writes, is named, as unpack refuses it, behind the signature too, where unpack looks
+        // for it as well.
         switch Result(catching: { try PackMach(image) }) {
         case let .success(packed?):
             found.append(packed.packer)
             found += Self.sizeClaim(packed)
         case .success(nil):
-            if image.findCommand(UInt32(LC_CODE_SIGNATURE)) != nil, let pieces = (try? MachOEditor.unsigned(image, end: end)) ?? nil, let unsigned = (try? MachO(File(editing: self.file, pieces: pieces))) ?? nil, let packed = try? PackMach(unsigned) {
-                found.append("\(packed.packer), signed after packing")
-                found += Self.sizeClaim(packed)
+            if image.findCommand(UInt32(LC_CODE_SIGNATURE)) != nil, let pieces = (try? MachOEditor.unsigned(image, end: end)) ?? nil, let unsigned = (try? MachO(File(editing: self.file, pieces: pieces))) ?? nil {
+                switch Result(catching: { try PackMach(unsigned) }) {
+                case let .success(packed?):
+                    found.append("\(packed.packer), signed after packing")
+                    found += Self.sizeClaim(packed)
+                case .success(nil):
+                    break
+                case let .failure(error):
+                    found.append("\(File.message(for: error)), signed after packing, which unpack refuses")
+                }
             }
         case let .failure(error):
             found.append("\(File.message(for: error)), which unpack refuses")

@@ -340,7 +340,8 @@ final class VerifierTests: XCTestCase {
 
     /**
      A file UPX packed is named for it, by a modified UPX with its marker, and signed after packing as such, the
-     signature hiding what UPX left from a look at the file as it is, with bytes appended after signing too. A
+     signature hiding what UPX left from a look at the file as it is, with bytes appended after signing too. A pack
+     header that does not hold is named as unpack refuses it, behind a signature added after packing as well. A
      `p_info` whose size for the original is not the pack header's is told apart: UPX writes the one value in both,
      and only the pack header's lies under a checksum.
      */
@@ -372,6 +373,10 @@ final class VerifierTests: XCTestCase {
         let corrupt = directory / "corrupt"
         try broken.write(to: corrupt)
         XCTAssertTrue(self.verify(corrupt.path).lines.contains("\(corrupt.path): Invalid UPX data: header corrupted 3, which unpack refuses"))
+        let corruptSigned = directory / "corrupt-signed"
+        try FileManager.default.copyItem(at: corrupt, to: corruptSigned)
+        _ = try codesign(["-f", "-s", "-", corruptSigned.path])
+        XCTAssertTrue(self.verify(corruptSigned.path).lines.contains("\(corruptSigned.path): Invalid UPX data: header corrupted 3, signed after packing, which unpack refuses"))
         var padded = try Data(contentsOf: packed)
         XCTAssertEqual(padded[header + 40], 0)
         padded[header + 40] = 1
