@@ -43,7 +43,7 @@ extension SliceError: LocalizedError {
  ```
  */
 enum Universal {
-    case fat([Architecture])
+    case fat(Table)
     case thin(MachO)
     case notMachO
 
@@ -64,6 +64,30 @@ enum Universal {
         /// Its name, as `codesign --arch` spells it (see `archName`), like Security's `Architecture::name`.
         var name: String {
             Universal.archName(cpuType: self.cpuType, cpuSubtype: self.cpuSubtype)
+        }
+    }
+
+    /**
+     A universal file's table as it was read: its architectures in the table's order, the hidden one last; whether its
+     entries are `fat_arch_64`; and the arm64 entry past a 32-bit table's count that does not lie in the file, which is
+     no slice here, as hash mode takes the file as the table counts it, with its name and what is wrong with it, for
+     verify to say, as dyld refuses the file for it. The table reads as its architectures.
+     */
+    struct Table: RandomAccessCollection {
+        let archs: [Architecture]
+        let is64: Bool
+        let hiddenRefused: (name: String, error: ParserError)?
+
+        var startIndex: Int {
+            self.archs.startIndex
+        }
+
+        var endIndex: Int {
+            self.archs.endIndex
+        }
+
+        subscript(position: Int) -> Architecture {
+            self.archs[position]
         }
     }
 
@@ -90,10 +114,10 @@ enum Universal {
      since a universal static library carries `ar` archives rather than Mach-O slices. A 32-bit table is read one
      entry past its count, as Security's `Universal` reads it, and that entry is an architecture when it names arm64,
      the only one of a table that counts none. One that names arm64 but does not lie in the file is no slice here,
-     as hash mode takes the file, and `hiddenRefused` is told its name and what is wrong with it: dyld refuses the
-     file for it, which verify says.
+     as hash mode takes the file, and the table says so (`Table.hiddenRefused`): dyld refuses the file for it, which
+     verify says. A table of more entries than `counting` allows, dyld's `kMaxSliceCount`, is no Mach-O.
      */
-    static func open(_ file: File, hiddenRefused: ((_ name: String, _ error: ParserError) -> Void)? = nil) throws -> Universal {
+    static func open(_ file: File, counting counts: ClosedRange<UInt32> = 0 ... Universal.maxSliceCount) throws -> Universal {
         // MachORep::candidate reads a 32-bit mach_header before it considers a file Mach-O code at all, so a magic-only
         // stub (a truncated Java class, say) is an ordinary file, which codesign signs as such.
         guard file.size >= MemoryLayout<mach_header>.size else {
@@ -108,9 +132,9 @@ enum Universal {
 
         switch head.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
         case FAT_MAGIC, FAT_CIGAM:
-            return try self.parseFat(file, head: head, is64: false, hiddenRefused: hiddenRefused)
+            return try self.parseFat(file, head: head, is64: false, counting: counts)
         case FAT_MAGIC_64, FAT_CIGAM_64:
-            return try self.parseFat(file, head: head, is64: true, hiddenRefused: hiddenRefused)
+            return try self.parseFat(file, head: head, is64: true, counting: counts)
         default:
             return .notMachO
         }
@@ -183,8 +207,8 @@ enum Universal {
         switch opened {
         case let .thin(image):
             image.logicalEnd()
-        case let .fat(archs):
-            archs.map { $0.offset + $0.length }.max() ?? size
+        case let .fat(table):
+            table.map { $0.offset + $0.length }.max() ?? size
         case .notMachO:
             size
         }
@@ -210,35 +234,23 @@ enum Universal {
     static let kernelSliceCount = UInt32((16384 - MemoryLayout<fat_header>.size) / MemoryLayout<fat_arch>.size)
 
     /**
-     The architectures of a universal file with more entries than `open` reads, up to `kernelSliceCount`, each
-     checked as `open` checks them; nil for any other file, or a table an entry of which does not lie in the file,
-     as a Java class, 0xCAFEBABE too, has its major version and then anything where the entries would be. What
+     The table of a universal file with more entries than `open` reads, up to `kernelSliceCount`, each checked as
+     `open` checks them, by the same read; nil for any other file, or a table an entry of which does not lie in the
+     file, as a Java class, 0xCAFEBABE too, has its major version and then anything where the entries would be. What
      `verify` names, where hash mode takes the file for no Mach-O.
      */
-    static func oversized(_ file: File) throws -> [Architecture]? {
-        guard file.size >= MemoryLayout<fat_header>.size else {
-            return nil
-        }
-        let head = try file.read(at: 0, count: min(file.size, MachO.headSize))
-        let is64 = switch head.withUnsafeBytes({ $0.loadUnaligned(as: UInt32.self) }) {
-        case FAT_MAGIC, FAT_CIGAM: false
-        case FAT_MAGIC_64, FAT_CIGAM_64: true
-        default: nil as Bool?
-        }
-        guard let is64 else {
-            return nil
-        }
+    static func oversized(_ file: File) throws -> Table? {
         do {
-            guard case let .fat(archs) = try self.parseFat(file, head: head, is64: is64, counting: self.maxSliceCount + 1 ... self.kernelSliceCount) else {
+            guard case let .fat(table) = try self.open(file, counting: self.maxSliceCount + 1 ... self.kernelSliceCount) else {
                 return nil
             }
-            return archs
+            return table
         } catch is ParserError {
             return nil
         }
     }
 
-    private static func parseFat(_ file: File, head: Data, is64: Bool, counting counts: ClosedRange<UInt32> = 0 ... Universal.maxSliceCount, hiddenRefused: ((_ name: String, _ error: ParserError) -> Void)? = nil) throws -> Universal {
+    private static func parseFat(_ file: File, head: Data, is64: Bool, counting counts: ClosedRange<UInt32>) throws -> Universal {
         let nfatArch: UInt32 = head.withUnsafeBytes { ptr in
             UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
         }
@@ -262,6 +274,7 @@ enum Universal {
         let table = read <= head.count ? head : try file.read(at: 0, count: read)
         return try table.withUnsafeBytes { ptr in
             var archs: [Architecture] = []
+            var hiddenRefused: (name: String, error: ParserError)?
 
             for architectureIndex in 0 ..< Int(nfatArch) + (extra ? 1 : 0) {
                 let hidden = architectureIndex == Int(nfatArch)
@@ -298,7 +311,7 @@ enum Universal {
                     let error = ParserError.invalidFatArchitectureRange(offset: sliceOffset, size: sliceSize, fileSize: file.size)
                     if hidden {
                         let cpuSubtype = cpu_subtype_t(bigEndian: ptr.loadUnaligned(fromByteOffset: entry + 4, as: cpu_subtype_t.self))
-                        hiddenRefused?(self.archName(cpuType: cpuType, cpuSubtype: cpuSubtype), error)
+                        hiddenRefused = (self.archName(cpuType: cpuType, cpuSubtype: cpuSubtype), error)
                         break
                     }
                     throw error
@@ -315,7 +328,7 @@ enum Universal {
             }
 
             // A table that counts no entry is a universal file by its hidden slice alone.
-            return archs.isEmpty ? .notMachO : .fat(archs)
+            return archs.isEmpty ? .notMachO : .fat(Table(archs: archs, is64: is64, hiddenRefused: hiddenRefused))
         }
     }
 }

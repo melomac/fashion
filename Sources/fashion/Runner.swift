@@ -1321,8 +1321,8 @@ struct Digester {
             warned(nil, "\(File.message(for: error)), \(fate)")
             return nil
         }
-        if case let .fat(archs) = universal {
-            for (arch, name) in Universal.named(archs) {
+        if case let .fat(table) = universal {
+            for (arch, name) in Universal.named(table.archs) {
                 do {
                     _ = try MachO(file, offset: arch.offset, length: arch.length)
                 } catch {

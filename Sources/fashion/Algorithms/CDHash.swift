@@ -84,8 +84,8 @@ enum CDHash {
      */
     static func hash(_ file: File, path: String, exact: Bool = false) throws -> [SliceResult] {
         switch try Universal.open(file) {
-        case let .fat(archs):
-            try archs.flatMap { arch -> [SliceResult] in
+        case let .fat(table):
+            try table.flatMap { arch -> [SliceResult] in
                 let name = arch.name
                 // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
                 guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {

@@ -32,7 +32,7 @@ import MachO
    |
    Universal.open(file)
    |-- .thin(image) ------> MachOVerifier(image, in: file).anomalies()
-   |-- .fat(archs) -------> MachOVerifier.anomalies(universal: file, archs)       the table: a hidden slice,
+   |-- .fat(table) -------> MachOVerifier.anomalies(universal: file, table)       the table: a hidden slice,
    |     for each arch:                                                           duplicates, overlaps, alignment,
    |       MachO(file, offset, length)?  nil -> MachOVerifier.anomaly(slice:)     padding, bytes past the last
    |       MachOVerifier(image, in: file)      .anomalies(slice: arch)            the entry against the header, the page
@@ -1601,10 +1601,9 @@ struct MachOVerifier {
      padding before a slice that is not zero, which Security calls suspicious (`Universal::Universal`); and bytes past
      the last slice.
      */
-    static func anomalies(universal file: File, _ archs: [Universal.Architecture]) -> [String] {
+    static func anomalies(universal file: File, _ table: Universal.Table) -> [String] {
+        let (archs, is64) = (table.archs, table.is64)
         var found: [String] = []
-        let magic = (try? file.read(at: 0, count: 4))?.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
-        let is64 = magic == FAT_MAGIC_64
         if is64 {
             found.append("a 64-bit universal file, which the kernel does not run and codesign signs as a generic file")
         }
@@ -1668,8 +1667,8 @@ struct MachOVerifier {
      Mach-O, whose slices are neither hashed nor looked at, where the kernel reads as many entries as its page holds
      and runs the best of them.
      */
-    static func anomaly(oversized archs: [Universal.Architecture]) -> String {
-        "a universal file of \(String(archs.count, pluralizing: "slice")), more than the \(Universal.maxSliceCount) read here: the kernel reads as many as fit in its page, 204 or 818, and runs one; the slices are neither hashed nor verified"
+    static func anomaly(oversized table: Universal.Table) -> String {
+        "a universal file of \(String(table.count, pluralizing: "slice")), more than the \(Universal.maxSliceCount) read here: the kernel reads as many as fit in its page, 204 or 818, and runs one; the slices are neither hashed nor verified"
     }
 
     /**

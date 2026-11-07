@@ -104,10 +104,10 @@ enum MachOEditor {
         let source: File
         let opened: Universal
 
-        /// A universal file's table as it was read for the edit, `opened`'s; nil for a thin file.
+        /// A universal file's architectures as its table was read for the edit, `opened`'s; nil for a thin file.
         var archs: [Universal.Architecture]? {
-            if case let .fat(archs) = self.opened {
-                return archs
+            if case let .fat(table) = self.opened {
+                return table.archs
             }
             return nil
         }
@@ -175,10 +175,10 @@ enum MachOEditor {
                 return Edit(file: file, states: [[]], cuts: [edit.cut], source: file, opened: opened)
             }
             return Edit(file: File(editing: file, pieces: last.pieces), states: [edit.states], cuts: [nil], source: file, opened: opened)
-        case let .fat(archs):
+        case let .fat(table):
             // Each slice is named as Universal.named names it, the second of one architecture apart, as the artifacts
             // of them are.
-            let slices = try Universal.named(archs).map { arch, name -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State], cut: State?) in
+            let slices = try Universal.named(table.archs).map { arch, name -> (arch: Universal.Architecture, pieces: [File.Piece], align: Int, states: [State], cut: State?) in
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
                 do {
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
@@ -197,8 +197,7 @@ enum MachOEditor {
             guard slices.contains(where: { !$0.states.isEmpty }) else {
                 return Edit(file: file, states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
             }
-            let magic = try file.read(at: 0, count: MemoryLayout<UInt32>.size).withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
-            return Edit(file: File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: magic == FAT_MAGIC_64)), states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
+            return Edit(file: File(editing: file, pieces: self.universal(slices.map { ($0.arch, $0.pieces, $0.align) }, is64: table.is64)), states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
         case .notMachO:
             return nil
         }

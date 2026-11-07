@@ -26,7 +26,7 @@ final class ThinnerTests: XCTestCase {
         guard case let .fat(slices) = try Universal.open(path: url.path) else {
             throw XCTSkip("/bin/ls is not universal")
         }
-        return (url, data, slices)
+        return (url, data, slices.archs)
     }
 
     private func sha256(_ data: Data) -> String {

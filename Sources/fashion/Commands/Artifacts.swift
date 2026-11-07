@@ -188,10 +188,10 @@ struct ArtifactWriter {
      */
     static func slices(of file: File, opened: Universal? = nil, states: [[MachOEditor.State]]?, cuts: [MachOEditor.State?]?) throws -> [Artifact] {
         switch try opened ?? Universal.open(file) {
-        case let .fat(archs):
+        case let .fat(table):
             // Each slice is named as Universal.named names it, the second of one architecture apart, `_x86_64_2`. The
             // fat table alone decides a slice's bytes, as for lipo -thin.
-            return Universal.named(archs).enumerated().flatMap { index, slice -> [Artifact] in
+            return Universal.named(table.archs).enumerated().flatMap { index, slice -> [Artifact] in
                 let (arch, name) = slice
                 var chain = states?[index] ?? []
                 if chain.isEmpty, let cut = cuts?[index] ?? nil {

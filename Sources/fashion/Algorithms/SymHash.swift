@@ -10,8 +10,8 @@ enum SymHash {
      */
     static func compute(_ file: File, algorithms: [ByteHash], separator: String, sortSymbols: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }) throws -> [DigestResult] {
         switch try Universal.open(file) {
-        case let .fat(archs):
-            try Universal.named(archs).flatMap { arch, name -> [DigestResult] in
+        case let .fat(table):
+            try Universal.named(table.archs).flatMap { arch, name -> [DigestResult] in
                 // A universal static library carries `ar` archives, which have no symbol table to hash.
                 guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                     return []

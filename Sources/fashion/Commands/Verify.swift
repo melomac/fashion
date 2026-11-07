@@ -94,22 +94,21 @@ extension Verify {
      */
     static func verify(_ file: File, found: (_ finding: String, _ arch: String?) -> Void, refused: (_ error: Error, _ arch: String?) -> Void) {
         do {
-            // The slice hidden past the table's count that does not lie in the file: no slice to hash mode, which
-            // takes the file as the table counts it, a refusal here, as dyld refuses the file for it.
-            var hiddenRefused: (name: String, error: ParserError)?
-            switch try Universal.open(file, hiddenRefused: { hiddenRefused = ($0, $1) }) {
+            switch try Universal.open(file) {
             case let .thin(image):
                 let (findings, error) = MachOVerifier(image, in: file).anomalies()
                 findings.forEach { found($0, nil) }
                 if let error {
                     refused(error, nil)
                 }
-            case let .fat(archs):
-                MachOVerifier.anomalies(universal: file, archs).forEach { found($0, nil) }
-                if let hiddenRefused {
-                    refused(hiddenRefused.error, "\(hiddenRefused.name) hidden past the table")
+            case let .fat(table):
+                MachOVerifier.anomalies(universal: file, table).forEach { found($0, nil) }
+                // The slice hidden past the table's count that does not lie in the file: no slice to hash mode, which
+                // takes the file as the table counts it, a refusal here, as dyld refuses the file for it.
+                if let hidden = table.hiddenRefused {
+                    refused(hidden.error, "\(hidden.name) hidden past the table")
                 }
-                for arch in archs {
+                for arch in table {
                     do {
                         guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                             if let odd = try MachOVerifier.anomaly(slice: arch, in: file) {
@@ -129,8 +128,8 @@ extension Verify {
                     }
                 }
             case .notMachO:
-                if let archs = try Universal.oversized(file) {
-                    found(MachOVerifier.anomaly(oversized: archs), nil)
+                if let table = try Universal.oversized(file) {
+                    found(MachOVerifier.anomaly(oversized: table), nil)
                 }
             }
         } catch {
