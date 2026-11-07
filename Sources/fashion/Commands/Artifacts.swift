@@ -119,27 +119,27 @@ struct ArtifactWriter {
      artifacts, which are written. With `quiet`, the file's path stands for its artifacts' lines, once.
      */
     func lines(for read: File, reporter: Reporter) -> [Line] {
-        let path = read.path
-        let lines: [Line]
-        var caveats: [Line] = []
+        let subject = reporter.subject(read.path)
         // What decompressed of an image that fails a check, or decoded under no key where a key was applied, under
         // keep, named for its slice and the edits before it.
         var kept: [Artifact] = []
         do {
-            // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it.
-            let edited = try self.unsign || self.unpack || self.exact ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { arch, message in
-                caveats.append(reporter.warn(path: Reporter.subject(path, arch: arch), message: message))
-            }, keep: self.keep ? { arch, edits, data in
-                kept.append(Artifact(name: (arch.map { [$0] } ?? []) + edits.words, bytes: File(editing: read, pieces: [.bytes(data)])))
-            } : nil) : nil
-            let source = edited?.source ?? read
-            let artifacts = try self.split ? Self.slices(of: source, opened: edited?.opened, states: edited?.states, cuts: edited?.cuts) : Self.whole(edited?.file ?? source, exact: self.exact, states: edited?.states)
-            lines = caveats + self.written(kept + artifacts, for: path, reporter: reporter)
+            // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it;
+            // with no flag at all, the file as read, its slices as the table places them.
+            let edit = try self.unsign || self.unpack || self.exact
+                ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { subject.warn($1, arch: $0) }, keep: self.keep ? { arch, edits, data in
+                    kept.append(Artifact(name: (arch.map { [$0] } ?? []) + edits.words, bytes: File(editing: read, pieces: [.bytes(data)])))
+                } : nil)
+                : MachOEditor.Edit(unedited: read, opened: Universal.open(read))
+            let artifacts = self.split ? Self.slices(of: edit) : Self.whole(of: edit, exact: self.exact)
+            self.written(kept + artifacts, for: subject.path, reporter: reporter).forEach(subject.show)
         } catch {
-            // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error.
-            lines = caveats + self.written(kept, for: path, reporter: reporter) + [reporter.report(path: path, error: error)]
+            // What an earlier image had to say stands, as hash mode keeps its diagnostics before the error, and what
+            // decompressed under keep is written before it.
+            self.written(kept, for: subject.path, reporter: reporter).forEach(subject.show)
+            subject.refuse(error)
         }
-        return self.quiet ? Line.quiet(lines, naming: path) : lines
+        return self.quiet ? Line.quiet(subject.lines, naming: subject.path) : subject.lines
     }
 
     /// The lines for `artifacts` written beside `path`, each named after it with its suffix: its path, or what kept it
@@ -178,34 +178,28 @@ struct ArtifactWriter {
     // MARK: - Private
 
     /**
-     The artifacts a file yields split, each named after the file by its slice and what was done to it, its bytes an
-     edit of `file`: a universal file's slice its architecture, as the fat table places it, then each state `MachOEditor`
-     took it through, `states`, for what was done to it, or the `exact` cut alone, `cuts`, of a slice the editor left
-     alone, or a thin image, which takes the bytes appended to an image off, when it shortens it; a thin file's
-     artifacts are named by what was done to it alone, since one nothing was done to would be the file. The states
-     and the cuts follow `opened`, the file as the editor read it, so the slices are named by that read and not by
-     another, which a file rewritten in the meantime could make differ; without it, the file is read here. Throws for
-     a Mach-O that does not parse.
+     The artifacts a file yields split, as `edit` left it, each named after the file by its slice and what was done to
+     it, its bytes an edit of the file: a universal file's slice its architecture, as the fat table places it, then
+     each state `MachOEditor` took it through, for what was done to it, or the `exact` cut alone of a slice the
+     editor left alone, or a thin image, which takes the bytes appended to an image off, when it shortens it; a thin
+     file's artifacts are named by what was done to it alone, since one nothing was done to would be the file. The
+     states follow the table as the editor read it, so the slices are named by that read and not by another, which a
+     file rewritten in the meantime could make differ.
      */
-    static func slices(of file: File, opened: Universal? = nil, states: [[MachOEditor.State]]?, cuts: [MachOEditor.State?]?) throws -> [Artifact] {
-        switch try opened ?? Universal.open(file) {
+    static func slices(of edit: MachOEditor.Edit) -> [Artifact] {
+        let file = edit.source
+        switch edit.opened {
         case let .fat(table):
             // Each slice is named as Universal.named names it, the second of one architecture apart, `_x86_64_2`. The
             // fat table alone decides a slice's bytes, as for lipo -thin.
             return Universal.named(table.archs).enumerated().flatMap { index, slice -> [Artifact] in
                 let (arch, name) = slice
-                var chain = states?[index] ?? []
-                if chain.isEmpty, let cut = cuts?[index] ?? nil {
-                    chain = [cut]
-                }
+                let chain = edit.states[index].isEmpty ? edit.cuts[index].map { [$0] } ?? [] : edit.states[index]
                 let whole = Artifact(name: [name], bytes: File(editing: file, pieces: [.range(arch.offset ..< arch.offset + arch.length)]))
                 return [whole] + chain.map { Artifact(name: [name] + $0.edits.words, bytes: File(editing: file, pieces: $0.pieces)) }
             }
         case .thin:
-            var chain = states?[0] ?? []
-            if chain.isEmpty, let cut = cuts?[0] ?? nil {
-                chain = [cut]
-            }
+            let chain = edit.states[0].isEmpty ? edit.cuts[0].map { [$0] } ?? [] : edit.states[0]
             return chain.map { Artifact(name: $0.edits.words, bytes: File(editing: file, pieces: $0.pieces)) }
         case .notMachO:
             return []
@@ -213,14 +207,14 @@ struct ArtifactWriter {
     }
 
     /**
-     The artifact a file yields whole: the file as the edits left it, every architecture of a universal file laid out
-     again, cut where it ends with `exact` as hash mode cuts it (`Universal.fileEnd`), by `opened`, the file as the
-     editor read it, or read here without it, named for what was done to any of its images, the last of its `states`;
-     none when nothing was done, since it would be the file. Throws for a Mach-O that does not parse.
+     The artifact a file yields whole, as `edit` left it: every architecture of a universal file laid out again, cut
+     where it ends with `exact` as hash mode cuts it (`Universal.fileEnd`), by the editor's read, named for what was
+     done to any of its images, the last of its states; none when nothing was done, since it would be the file.
      */
-    static func whole(_ file: File, exact: Bool, states: [[MachOEditor.State]]?, opened: Universal? = nil) throws -> [Artifact] {
-        let end = try exact ? Universal.fileEnd(of: opened ?? Universal.open(file), size: file.size) : file.size
-        var done = states?.reduce(into: MachOEditor.Edits()) { $0.formUnion($1.last?.edits ?? []) } ?? []
+    static func whole(of edit: MachOEditor.Edit, exact: Bool) -> [Artifact] {
+        let file = edit.file
+        let end = exact ? Universal.fileEnd(of: edit.opened, size: file.size) : file.size
+        var done = edit.states.reduce(into: MachOEditor.Edits()) { $0.formUnion($1.last?.edits ?? []) }
         if end < file.size {
             done.insert(.exact)
         }

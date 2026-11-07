@@ -2,7 +2,7 @@ import CMachOCompat // the load commands macOS 26 added, on older SDKs
 import Foundation
 import MachO
 
-enum ParserError: Error, Equatable {
+enum ParserError: MalformedInput, Equatable {
     case truncatedMachHeader(expectedSize: Int, fileSize: Int)
     case invalidLoadCommandTable(size: UInt32, fileSize: Int)
     case truncatedLoadCommand(cmd: UInt32, size: Int, expectedSize: Int)

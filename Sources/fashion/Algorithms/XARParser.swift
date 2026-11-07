@@ -44,7 +44,7 @@ enum XARParser {
         let checksumAlgorithm: UInt32
     }
 
-    enum XARError: Error, Equatable, LocalizedError {
+    enum XARError: MalformedInput, Equatable, LocalizedError {
         case invalidMagic
         case headerTooShort
         case tocOutsideFile(offset: UInt64, length: UInt64, fileSize: Int)

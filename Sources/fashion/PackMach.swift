@@ -2,7 +2,7 @@ import Foundation
 import MachO
 import zlib
 
-enum UnpackError: Error, Equatable {
+enum UnpackError: MalformedInput, Equatable {
     /// UPX's `CantUnpackException`: a Mach-O UPX packed whose packed data, or the image unpacked from it, does not hold,
     /// in UPX's words.
     case cantUnpack(String)

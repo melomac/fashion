@@ -6,7 +6,7 @@ import System
 
 private let logger = Logger(subsystem: "fashion", category: "cdhash")
 
-enum CDHashError: Error, Equatable {
+enum CDHashError: MalformedInput, Equatable {
     case invalidCodeSignatureRange(offset: UInt32, size: UInt32, fileSize: Int)
     case truncatedCodeSignatureSuperblob(signatureSize: Int)
     case invalidCodeSignatureMagic(magic: UInt32)

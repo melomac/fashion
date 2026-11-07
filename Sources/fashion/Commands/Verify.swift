@@ -58,15 +58,14 @@ extension Verify {
      and each refusal, which the reporter logs as an error; `quiet` as `Line.quiet(_:naming:)`.
      */
     static func lines(for file: File, quiet: Bool = false, reporter: Reporter) -> [Line] {
-        let path = file.path
-        var lines: [Line] = []
+        let subject = reporter.subject(file.path)
         self.verify(file) { finding, arch in
-            logger.notice("\(Reporter.subject(path, arch: arch), privacy: .public): \(finding, privacy: .public)")
-            lines.append(Line(text: "\(Reporter.subject(OutputFormatter.formatPath(path), arch: arch)): \(finding)"))
+            logger.notice("\(Reporter.subject(subject.path, arch: arch), privacy: .public): \(finding, privacy: .public)")
+            subject.show(Line(text: "\(Reporter.subject(OutputFormatter.formatPath(subject.path), arch: arch)): \(finding)"))
         } refused: { error, arch in
-            lines.append(reporter.report(path: Reporter.subject(path, arch: arch), error: error))
+            subject.refuse(error, arch: arch)
         }
-        return quiet ? Line.quiet(lines, naming: path) : lines
+        return quiet ? Line.quiet(subject.lines, naming: subject.path) : subject.lines
     }
 
     /**

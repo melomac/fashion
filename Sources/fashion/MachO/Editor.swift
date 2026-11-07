@@ -31,6 +31,18 @@ extension EditError: LocalizedError {
  Where Security stops at what it can tell from the signed file, the file is restored as it was before it was signed,
  as far as it can be: the linker's `__LINKEDIT` vmsize, and the layout `lipo` gave a universal file. An image UPX packed
  is unpacked as `upx -d` unpacks it (`PackMach`), the one edit whose bytes all live in memory.
+
+ Each image goes through the edits the flags ask for, every state it reaches an artifact `thinr` lists and hash mode
+ digests, named for the edits done so far (`Edits.words`); the `exact` cut alone is no edit, and so no state: it is
+ kept beside (`Edit.cuts`) for the image's own artifact, since the whole of a universal file is cut after its last
+ slice (`Universal.fileEnd`), not slice by slice, and the re-layout of a universal file follows an edit alone.
+
+ ```
+ as the table places it --exact--> [exact] --unsign--> [exact, unsigned] --unpack--> [exact, unsigned, unpacked]
+                                                                                            |
+                   the unpacked image's own cut and signature, as needed or as asked:       |
+                                [..., unpacked, exactUnpacked] --> [..., unpacked, exactUnpacked, unsignedUnpacked]
+ ```
  */
 enum MachOEditor {
     /**
@@ -137,7 +149,7 @@ enum MachOEditor {
      edit, in the order of a universal file's architectures, an image the edits leave alone with none and its `exact`
      cut alone beside, and the file the states are pieces of, `file` or its padding (`padded`), as it was opened;
      every image with none when they change nothing, the headers read all the same, so that what comes after the
-     edit reads them no second time; nil for a file that is not Mach-O. With
+     edit reads them no second time; a file that is not Mach-O as it is, nothing opened. With
      `unsign`, each image comes out without its code signature, as `MachO.removingSignature(end:)` leaves it; with
      `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing, since it
      hides what UPX left, then with `unsign` the unpacked image's own signature comes out; a universal file with its
@@ -155,7 +167,7 @@ enum MachOEditor {
      gets what decompressed of an image that fails a check after, a sum or its headers, with the edits done before it
      and `decompressed` for it, and the architecture: the refusal is thrown all the same.
      */
-    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit? {
+    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit {
         let read = file
         var held: [String] = []
         let (file, opened): (File, Universal)
@@ -212,7 +224,7 @@ enum MachOEditor {
             }
             return Edit(file: File(editing: file, pieces: self.universal(slices, is64: table.is64)), states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
         case .notMachO:
-            return nil
+            return Edit(unedited: file, opened: opened)
         }
     }
 
@@ -433,6 +445,22 @@ enum MachOEditor {
             }
         }
         return [.bytes(table)] + body
+    }
+}
+
+extension MachOEditor.Edit {
+    /**
+     The file as read, nothing done to it: `file` and `source` the file, every image with no state and no cut, for
+     what lists or digests its slices as the table places them, `thinr` without a flag say, and for a file that is not
+     Mach-O, which has no image.
+     */
+    init(unedited source: File, opened: Universal) {
+        let images = switch opened {
+        case let .fat(table): table.count
+        case .thin: 1
+        case .notMachO: 0
+        }
+        self.init(file: source, states: Array(repeating: [], count: images), cuts: Array(repeating: nil, count: images), source: source, opened: opened)
     }
 }
 

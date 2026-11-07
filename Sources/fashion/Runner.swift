@@ -504,6 +504,10 @@ final class Output: @unchecked Sendable {
 
 // MARK: - Reporter
 
+/// An error a file's own bytes are at fault for: Mach-O, signature, XAR or UPX data that does not parse, or that
+/// goes past a limit only a crafted file reaches. Reported red, where any other failure is yellow (`Reporter.tint`).
+protocol MalformedInput: Error {}
+
 /**
  Thread-safe bookkeeping for one run, callable from the walking and hash threads as well as signal handlers:
  - diagnostics go to both stderr (for the user and scripts) and the unified log (for a persistent, queryable record),
@@ -577,10 +581,7 @@ final class Reporter: @unchecked Sendable {
      a crafted file reaches. Yellow for any other failure: the file could not be read, or changed while it was hashed.
      */
     static func tint(for error: Error) -> Tint {
-        if let slice = error as? SliceError {
-            return self.tint(for: slice.error)
-        }
-        return error is ParserError || error is CDHashError || error is XARParser.XARError || error is UnpackError ? .malformed : .error
+        ((error as? SliceError)?.error ?? error) is MalformedInput ? .malformed : .error
     }
 
     /**
@@ -676,6 +677,71 @@ final class Reporter: @unchecked Sendable {
             }
         }
         return status == 0 ? Int64(info.ri_lifetime_max_phys_footprint) : nil
+    }
+}
+
+extension Reporter {
+    /**
+     One file the scan works on, and what is said about it as the work goes, in the order it comes: each line logged
+     and, for a failure, counted at once, as the reporter has it, and kept for the file's own lines to follow.
+
+     ```
+     warn("…", arch:)        yellow, a notice in the log, uncounted: the file deserves a second look
+     warn(error, fate:)      the same, the error's message and what becomes of the file, after the slice at fault
+     warn("…", at: path)     the same, about another path, a file in place of an artifact
+     inform("…", arch:)      yellow, info in the log, uncounted: what an algorithm left out, by its definition
+     refuse(error, arch:)    red for malformed bytes, yellow otherwise, an error in the log, counted: not worked on
+     show(line)              a line for standard output, in its place among the diagnostics
+     ```
+
+     `arch` names the architecture of the slice a line is about, in a universal file.
+     */
+    final class Subject {
+        /// The file's path, which every line names.
+        let path: String
+        private let reporter: Reporter
+        /// What was said, in order.
+        private(set) var lines: [Line] = []
+
+        init(_ path: String, reporter: Reporter) {
+            self.path = path
+            self.reporter = reporter
+        }
+
+        func warn(_ message: String, arch: String? = nil) {
+            self.lines.append(self.reporter.warn(path: Reporter.subject(self.path, arch: arch), message: message))
+        }
+
+        /**
+         `error`, as `File.message(for:)` has it, and what becomes of the file for it, `fate`, "hashed as it is":
+         after the architecture of the slice at fault in a universal file, where it is the file as a whole that meets
+         the fate, "the file hashed as it is".
+         */
+        func warn(_ error: Error, fate: String) {
+            let arch = (error as? SliceError)?.arch
+            self.warn("\(File.message(for: error)), \(arch == nil ? "" : "the file ")\(fate)", arch: arch)
+        }
+
+        func warn(_ message: String, at path: String) {
+            self.lines.append(self.reporter.warn(path: path, message: message))
+        }
+
+        func inform(_ message: String, arch: String? = nil) {
+            self.lines.append(self.reporter.inform(path: Reporter.subject(self.path, arch: arch), message: message))
+        }
+
+        func refuse(_ error: Error, arch: String? = nil) {
+            self.lines.append(self.reporter.report(path: Reporter.subject(self.path, arch: arch), error: error))
+        }
+
+        func show(_ line: Line) {
+            self.lines.append(line)
+        }
+    }
+
+    /// What is said about the file at `path`, as the work on it goes.
+    func subject(_ path: String) -> Subject {
+        Subject(path, reporter: self)
     }
 }
 
@@ -1022,15 +1088,16 @@ struct Digester {
      is.
      */
     func lines(for file: File, reporter: Reporter) -> [Line] {
-        let path = file.path
-        var diagnostics: [Line] = []
+        let subject = reporter.subject(file.path)
         let results: [DigestResult]
         do {
-            results = try self.digests(file, reporter: reporter) { diagnostics.append($0) }
+            results = try self.digests(file, subject: subject)
         } catch {
-            return diagnostics + [reporter.report(path: path, error: error)]
+            subject.refuse(error)
+            return subject.lines
         }
 
+        let path = file.path
         var lines: [Line] = []
         if self.targets.isEmpty {
             lines = results.map { result in
@@ -1056,7 +1123,7 @@ struct Digester {
                 lines.append(Line(text: OutputFormatter.formatLine(digest: result.digest, score: match.score, path: result.display(path), algorithm: result.algorithm), tint: tint))
             }
         }
-        return diagnostics + lines
+        return subject.lines + lines
     }
 
     /**
@@ -1100,18 +1167,11 @@ struct Digester {
     // MARK: - Digests
 
     /**
-     The digests of one file, `read` as the scan opened it, in the selected mode; `note` hears each of its diagnostics
-     as it comes.
+     The digests of one file, `read` as the scan opened it, in the selected mode. What is said of the file as it
+     goes, the editor's word on an image, a refusal hashed as it is, what a hasher leaves out, goes to `subject`; a
+     failure of the file itself, which cannot be read or changed under the read, is thrown.
      */
-    private func digests(_ read: File, reporter: Reporter, note: @escaping (Line) -> Void) throws -> [DigestResult] {
-        // The one descriptor the scan opened, whose size when it was opened is the size hashed, or the size of its
-        // edit, unpacked or without signatures, which every mode then reads as the file.
-        let path = read.path
-        // A modified UPX packed it, or the file is cut short of its last page, which --exact pads: a second look,
-        // like a signature that does not hold.
-        let warned = { (arch: String?, message: String) in
-            note(reporter.warn(path: Reporter.subject(path, arch: arch), message: message))
-        }
+    private func digests(_ read: File, subject: Reporter.Subject) throws -> [DigestResult] {
         // The edits, with --exact alone the cut and the padding, kept whole for every state to be digested; the file
         // is what every mode then reads, and `source` what the states are pieces of. Hash mode hashes every file: an
         // edit the editor refuses, a Mach-O it cannot parse or a signature it cannot take out, is said once, in a
@@ -1127,15 +1187,19 @@ struct Digester {
         case .symhash: "no symhash as it is"
         default: "hashed as it is"
         }
+
+        /// The edit the flags ask for, `unsign` and `unpack` as given, the cut as --exact has it: nil for a file the
+        /// editor refuses, said with its fate, and for packed data that does not hold under --unpack alone, said as
+        /// hashed packed, with --unsign or --exact the edit made again without the unpacking. A file that cannot be
+        /// read throws.
         func edit(unsign: Bool, unpack: Bool) throws -> MachOEditor.Edit? {
             do {
-                return try MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: unsign, unpack: unpack, caveat: warned)
+                return try MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: unsign, unpack: unpack, caveat: { subject.warn($1, arch: $0) })
             } catch where unpack && Self.isUnpackError(error) {
                 // Packed data that does not hold, or an image unpacked from it that does not, in the file or a slice
                 // of a universal one: the file is hashed packed, every slice of it, the ones that unpacked included;
                 // with --unsign, its signatures out. unpack writes what decompressed under --keep.
-                let subject = Reporter.subject(path, of: error)
-                note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")hashed packed"))
+                subject.warn(error, fate: "hashed packed")
                 return self.unsign || self.exact ? try edit(unsign: self.unsign, unpack: false) : nil
             } catch where Self.isReadError(error) {
                 // The file could not be read, or changed under the read: the file's failure, reported once, where the
@@ -1144,88 +1208,81 @@ struct Digester {
             } catch {
                 refused = true
                 refusedSlice = error is SliceError
-                let subject = Reporter.subject(path, of: error)
-                note(reporter.warn(path: subject, message: "\(File.message(for: error)), \(subject == path ? "" : "the file ")\(fate)"))
+                subject.warn(error, fate: fate)
                 return nil
             }
         }
         let edited = try self.unsign || self.unpack || self.exact ? edit(unsign: self.unsign, unpack: self.unpack) : nil
         let file = edited?.file ?? read
+
         // The exact cut alone, which is no edit, for the file as it is: where the editor read the file and changed
         // nothing of it, or did not read it. A file it changed was cut as it went, and is not cut a second time, which
         // the lenient end rule would refuse on an image cut back to its segments' bytes.
         let cutAlone = self.exact && !refused && (edited?.isUnchanged ?? true)
-        // Whether the file is universal, and the file as it was read, which --slices and --symhash take the slices
-        // from: as the editor read it, where an edit was asked of the file, nothing done included; by the editor's
-        // word where it refused the file, whose slices are then read again as the table places them; else read here,
-        // a thin Mach-O that does not parse, which no edit was asked of, refused the same way.
-        func universal() throws -> (fat: Bool, opened: Universal?) {
+
+        /// The file as it was read, for --slices and --symhash to take the slices from: the edit, where one was asked
+        /// and made or found nothing to make; the file read again as the table places its slices, where the editor
+        /// refused one of them; else the file read here, lenient, a malformed slice said and taken as the table
+        /// places it. Nil for a thin Mach-O refused, which parses no better a second time, said with its fate.
+        func reading() throws -> MachOEditor.Edit? {
             if let edited {
-                return (edited.archs != nil, edited.opened)
+                return edited
             }
             if refused {
-                return (refusedSlice, nil)
+                return refusedSlice ? try MachOEditor.Edit(unedited: read, opened: Universal.open(read)) : nil
             }
-            guard let universal = try self.universal(of: read, warned: warned, fate: fate) else {
+            guard let opened = try self.universal(of: read, subject: subject, fate: fate) else {
                 refused = true
-                return (false, nil)
+                return nil
             }
-            if case .fat = universal {
-                return (true, universal)
-            }
-            return (false, universal)
+            return MachOEditor.Edit(unedited: read, opened: opened)
         }
-        // What TLSH leaves out of a digest, or why it made none, or that an image has no symbol table, named after
-        // the architecture or state it is about. --quiet shortens standard output alone: every line for standard
-        // error stands.
-        let caveat = { (arch: String?, message: String) in
-            note(reporter.inform(path: Reporter.subject(path, arch: arch), message: message))
-        }
+
         switch self.mode {
         case let .file(hashes):
             // The file as it is, then as the edits left it, one artifact named for them as unsign and unpack name
             // theirs, or none.
-            return try self.artifactDigests(ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states, opened: edited?.opened), of: path, reporter: reporter, note: note, whole: {
-                try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
-            }, digests: Self.byteDigests(hashes, caveat: caveat))
+            let artifacts = edited.map { ArtifactWriter.whole(of: $0, exact: cutAlone) } ?? []
+            return try self.artifactDigests(artifacts, subject: subject, whole: {
+                try self.fileDigests(read, hashes: hashes, caveat: { subject.inform($0) })
+            }, digests: Self.byteDigests(hashes, subject: subject))
         case let .slices(hashes):
             // The file as it is, then as the edits left it whole, then each slice's states; a thin file's whole is its
             // last state, printed once.
-            let (fat, opened) = try universal()
-            let slices = try !fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, opened: opened, states: edited?.states, cuts: edited?.cuts)
-            return try self.artifactDigests(fat ? ArtifactWriter.whole(file, exact: cutAlone, states: edited?.states, opened: edited?.opened) + slices : slices, of: path, reporter: reporter, note: note, whole: {
-                try self.fileDigests(read, hashes: hashes, caveat: { caveat(nil, $0) })
-            }, digests: Self.byteDigests(hashes, caveat: caveat))
+            let reading = try reading()
+            let whole = reading.flatMap { $0.archs == nil ? nil : ArtifactWriter.whole(of: $0, exact: cutAlone) } ?? []
+            let slices = reading.map(ArtifactWriter.slices) ?? []
+            return try self.artifactDigests(whole + slices, subject: subject, whole: {
+                try self.fileDigests(read, hashes: hashes, caveat: { subject.inform($0) })
+            }, digests: Self.byteDigests(hashes, subject: subject))
         case let .symhash(hashes, separator, sortSymbols):
             // The same states, their symbols; a thin file's own come first, as it is, and a universal file's slices
             // as the table places them are states of their own.
-            let (fat, opened) = try universal()
-            return try self.artifactDigests(!fat && refused ? [] : ArtifactWriter.slices(of: edited?.source ?? read, opened: opened, states: edited?.states, cuts: edited?.cuts), of: path, reporter: reporter, note: note, whole: {
+            let reading = try reading()
+            return try self.artifactDigests(reading.map(ArtifactWriter.slices) ?? [], subject: subject, whole: {
                 // A thin file's own symbols, unless the editor refused it, which was said: a file that does not parse
                 // as it is, cut short of its last page say, is said to have none where the edits padded it and went on.
-                guard !fat, !refused, let opened else {
+                guard let reading, reading.archs == nil, !refused else {
                     return []
                 }
                 do {
                     // The file as it is, read the once where nothing padded it; padded, it is read again, to say why
                     // it does not parse as it is.
-                    let padded = edited.map { $0.source !== read } ?? false
-                    guard case let .thin(image) = try padded ? Universal.open(read) : opened else {
+                    guard case let .thin(image) = try reading.source === read ? reading.opened : Universal.open(read) else {
                         return []
                     }
-                    return try SymHash.digests(of: image, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(nil, $0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
+                    return try SymHash.digests(of: image, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { subject.inform($0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
                 } catch {
-                    let subject = Reporter.subject(path, of: error)
-                    note(reporter.warn(path: subject, message: "\(File.message(for: error)), no symhash as it is"))
+                    subject.warn(error, fate: "no symhash as it is")
                     return []
                 }
             }, digests: { bytes, label in
-                (try SymHash.digests(of: bytes, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { caveat(label, $0) }), nil)
+                (try SymHash.digests(of: bytes, algorithms: hashes, separator: separator, sortSymbols: sortSymbols, caveat: { subject.inform($0, arch: label) }), nil)
             })
         case let .xarToc(hashes, decompress):
-            return try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { caveat(nil, $0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
+            return try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { subject.inform($0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
         case .cdhash:
-            return try self.cdHashDigests(file, path: path, reporter: reporter, note: note)
+            return try self.cdHashDigests(file, subject: subject)
         }
     }
 
@@ -1234,13 +1291,12 @@ struct Digester {
      synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is labeled INVALID, and warned about
      once, however many of its directories fail.
      */
-    private func cdHashDigests(_ file: File, path: String, reporter: Reporter, note: (Line) -> Void) throws -> [DigestResult] {
-        let results = try CDHash.hash(file, path: path, exact: self.exact)
+    private func cdHashDigests(_ file: File, subject: Reporter.Subject) throws -> [DigestResult] {
+        let results = try CDHash.hash(file, path: subject.path, exact: self.exact)
         var warned: Set<String> = []
         for result in results where result.invalid && warned.insert(result.arch ?? "").inserted {
             // Security rejects the signature, so the slice is hashed as unsigned, or its code changed since signing.
-            let reason = result.adhoc ? "signature rejected, hashed as unsigned" : "invalid signature (code or signature have been modified)"
-            note(reporter.warn(path: Reporter.subject(path, arch: result.arch), message: reason))
+            subject.warn(result.adhoc ? "signature rejected, hashed as unsigned" : "invalid signature (code or signature have been modified)", arch: result.arch)
         }
 
         return results.map { result in
@@ -1272,7 +1328,7 @@ struct Digester {
      artifact shows beside its state and matches by what it holds. A file in place that cannot be read is said the
      same way, and the state stands.
      */
-    private func artifactDigests(_ artifacts: [Artifact], of path: String, reporter: Reporter, note: (Line) -> Void, whole: () throws -> [DigestResult], digests: (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?)) throws -> [DigestResult] {
+    private func artifactDigests(_ artifacts: [Artifact], subject: Reporter.Subject, whole: () throws -> [DigestResult], digests: (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?)) throws -> [DigestResult] {
         var results = try whole()
         for artifact in artifacts {
             let label = artifact.label
@@ -1281,12 +1337,13 @@ struct Digester {
                 state = try digests(artifact.bytes, label)
             } catch {
                 // A slice as the table places it that is no Mach-O for symhash to read, say: said, and left out.
-                note(reporter.warn(path: "\(path) (\(label))", message: "\(File.message(for: error)), left out"))
+                subject.warn("\(File.message(for: error)), left out", arch: label)
                 continue
             }
             results += state.digests.map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm, label: label) }
 
-            let target = path + artifact.suffix
+            // A file in place of the artifact, the same bytes or not.
+            let target = subject.path + artifact.suffix
             do {
                 guard let found = try Self.inPlace(at: target) else {
                     continue
@@ -1297,10 +1354,10 @@ struct Digester {
                     logger.info("\(target, privacy: .public): in place, \(identity.description, privacy: .public)")
                     continue
                 }
-                note(reporter.warn(path: target, message: "exists and differs, \(identity) where the state is \(expected)"))
+                subject.warn("exists and differs, \(identity) where the state is \(expected)", at: target)
                 results += try digests(found, label).digests.map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm, path: target) }
             } catch {
-                note(reporter.warn(path: target, message: File.message(for: error)))
+                subject.warn(File.message(for: error), at: target)
             }
         }
         return results
@@ -1327,12 +1384,12 @@ struct Digester {
 
     /**
      What `artifactDigests` digests a state's bytes by under the byte hashes: `hashes`, and SHA-256 for the comparison
-     with a file in place, in the one read; `caveat` hears what TLSH leaves out, after the state's label.
+     with a file in place, in the one read; what TLSH leaves out goes to `subject`, after the state's label.
      */
-    private static func byteDigests(_ hashes: [ByteHash], caveat: @escaping (_ arch: String?, _ message: String) -> Void) -> (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?) {
+    private static func byteDigests(_ hashes: [ByteHash], subject: Reporter.Subject) -> (_ bytes: File, _ label: String) throws -> (digests: [(hash: ByteHash, digest: String)], identity: ArtifactWriter.Identity?) {
         let hashed = hashes.contains { $0.algorithm == .sha256 } ? hashes : hashes + [ByteHash(.sha256)!] // nil for cdhash alone
         return { bytes, label in
-            let all = try ByteHash.digests(hashed, bytes, caveat: { caveat(label, $0) })
+            let all = try ByteHash.digests(hashed, bytes, caveat: { subject.inform($0, arch: label) })
             let digest = all.first { $0.hash.algorithm == .sha256 }?.digest ?? ""
             return (all.filter { digest in hashes.contains { $0.algorithm == digest.hash.algorithm } }, ArtifactWriter.Identity(size: bytes.size, digest: digest))
         }
@@ -1340,28 +1397,28 @@ struct Digester {
 
     /**
      `file` as `Universal` opens it, each architecture of a universal file read as a thin Mach-O, as Security's
-     `Universal` places a `MachO` at its offset: a malformed slice is said to `warned` after its name
+     `Universal` places a `MachO` at its offset: a malformed slice is said to `subject` after its name
      (`Universal.named`), --exact or not, and hashed as the table places it, as `lipo -thin` takes it, since hash mode
      hashes every file. A thin Mach-O that does not parse is said the same way, with `fate`, and is nil: neither
      universal nor an image to read. A file that cannot be read throws. Only the headers are read, and once: the table
-     goes on to `ArtifactWriter.slices` as it was read here.
+     goes on as it was read here.
      */
-    private func universal(of file: File, warned: (_ arch: String?, _ message: String) -> Void, fate: String) throws -> Universal? {
+    private func universal(of file: File, subject: Reporter.Subject, fate: String) throws -> Universal? {
         let universal: Universal
         do {
             universal = try Universal.open(file)
         } catch where Self.isReadError(error) {
             throw error
         } catch {
-            warned(nil, "\(File.message(for: error)), \(fate)")
+            subject.warn(error, fate: fate)
             return nil
         }
         if case let .fat(table) = universal {
-            for (arch, name) in Universal.named(table.archs) {
+            for slice in Universal.named(table.archs) {
                 do {
-                    _ = try MachO(file, offset: arch.offset, length: arch.length)
+                    _ = try MachO(file, offset: slice.arch.offset, length: slice.arch.length)
                 } catch {
-                    warned(name, "\(File.message(for: error)), hashed as the table places it")
+                    subject.warn("\(File.message(for: error)), hashed as the table places it", arch: slice.name)
                 }
             }
         }
