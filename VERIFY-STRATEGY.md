@@ -114,7 +114,10 @@ left out, with the reason.
 | A dylib or rpath name not NUL-terminated inside its command | dyld "string extends beyond end of load command" | dyld aborted |
 | `LC_LOAD_DYLINKER` naming anything but `/usr/lib/dyld` | kernel `load_dylinker` `DEFAULT_DYLD_PATH` → `LOAD_BADMACHO` on release kernels | killed |
 | `MH_DYLDLINK` without `LC_LOAD_DYLINKER` | kernel `needs_dynlinker && !dlp` | |
-| `LC_ENCRYPTION_INFO(_64)` with `cryptid` ≠ 0; the 32-bit one in a 64-bit image | kernel `set_code_unprotect`; dyld bitness check | killed |
+| `LC_ENCRYPTION_INFO(_64)` with `cryptid` 1, FairPlay's crypter `com.apple.unfree`, or `0x10`, the null crypter `com.apple.null`, which the line names; the 32-bit one in a 64-bit image | kernel `set_code_unprotect`, which asks the FairPlay kext for the crypter by name and dies `LOAD_DECRYPTFAIL` without the keys, which `SC_Info/*.sinf` and `*.supp` wrap for the buying account and the device; dyld bitness check | killed |
+| `cryptid` other than 0, 1 and `0x10` | kernel `set_code_unprotect` → `LOAD_BADMACHO`, before any key is looked for | |
+| `cryptsize` 0 under a nonzero `cryptid` | kernel `set_code_unprotect` logs "ignored" and loads the image as clear | |
+| An encrypted range no one segment's file bytes hold, `LC_SEGMENT` and `LC_SEGMENT_64` alike | kernel `set_code_unprotect` rescans the table for a segment holding `cryptoff` to `cryptoff + cryptsize`, `LOAD_BADMACHO` without one; reached once the crypter has the keys, so a crafted file dies for the keys first | |
 | `LC_DYLD_ENVIRONMENT`, and what it sets | dyld honors `DYLD_INSERT_LIBRARIES` from the image itself; a value longer than 128 bytes is cut to 80 with its length (Apple's BlastDoor services set `DYLD_DLSYM_RESULT` to 24 KB) | dyld tried to load `/tmp/evil.dylib`; signed ad hoc, "valid on disk" |
 | An executable with no `MH_PIE`: arm64 and armv7k | kernel `pie_required` → `LOAD_FAILURE`; x86_64 runs without ASLR | arm64: killed; x86_64: ran |
 | `MH_EXECUTE` without `MH_DYLDLINK`: static | kernel: x86_64 only on release kernels; dyld `isStaticExecutable` relaxes its own checks | ran (x86_64) |

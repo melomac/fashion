@@ -803,7 +803,8 @@ final class VerifierTests: XCTestCase {
     /**
      What the image links, as dyld's `validEmbeddedPaths` and the kernel read it: no `LC_UUID`, a dylinker other than
      `/usr/lib/dyld`, `LC_DYLD_ENVIRONMENT`, a dylib name not terminated inside its command, `LC_ID_DYLIB` in an
-     executable, encryption, an executable not position independent, with a flat namespace and an executable stack,
+     executable, encryption as the kernel takes it, an executable not position independent, with a flat namespace and
+     an executable stack,
      a static one, and one the kernel refuses for want of `MH_PIE` on arm64.
      */
     func testWhatTheImageLinksIsNamed() throws {
@@ -852,9 +853,21 @@ final class VerifierTests: XCTestCase {
         id.append(install)
         XCTAssertEqual(try self.verify(self.appending(id, to: program), "id", in: directory).lines, [": LC_ID_DYLIB /tmp/evil.dylib in an MH_EXECUTE"])
 
-        var encryption = Data()
-        [UInt32(LC_ENCRYPTION_INFO_64), 24, 0x1000, 0x1000, 1, 0].forEach { encryption.appendUInt32($0) }
-        XCTAssertEqual(try self.verify(self.appending(encryption, to: program), "encrypted", in: directory).lines, [": encrypted: cryptid 1 over 0x1000 bytes at 0x1000"])
+        // Encryption as the kernel's set_code_unprotect takes it: cryptid 1 and 0x10 name its crypters, any other it
+        // refuses; a size of 0 it ignores; the range must lie inside one segment's file bytes, which one straddling
+        // __TEXT's end does not.
+        func encryption(cryptoff: UInt32, cryptsize: UInt32, cryptid: UInt32) -> Data {
+            var command = Data()
+            [UInt32(LC_ENCRYPTION_INFO_64), 24, cryptoff, cryptsize, cryptid, 0].forEach { command.appendUInt32($0) }
+            return self.appending(command, to: program)
+        }
+        XCTAssertEqual(try self.verify(encryption(cryptoff: 0x1000, cryptsize: 0x1000, cryptid: 1), "encrypted", in: directory).lines, [": encrypted: cryptid 1 over 0x1000 bytes at 0x1000"])
+        XCTAssertEqual(try self.verify(encryption(cryptoff: 0x1000, cryptsize: 0x1000, cryptid: 0x10), "null", in: directory).lines, [": encrypted: cryptid 0x10, the kernel's null crypter com.apple.null, over 0x1000 bytes at 0x1000"])
+        XCTAssertEqual(try self.verify(encryption(cryptoff: 0x1000, cryptsize: 0x1000, cryptid: 2), "cryptid", in: directory).lines, [": encrypted: cryptid 2 over 0x1000 bytes at 0x1000, which the kernel refuses: 1 names its FairPlay crypter, 0x10 its null one"])
+        XCTAssertEqual(try self.verify(encryption(cryptoff: 0x1000, cryptsize: 0, cryptid: 1), "empty", in: directory).lines, [": encrypted: cryptid 1 over 0x0 bytes at 0x1000, which the kernel ignores"])
+        let text = try XCTUnwrap(XCTUnwrap(MachO(File(data: program))).findSegment("__TEXT")).load(segment_command_64.self)
+        let straddling = UInt32(text.fileoff + text.filesize) - 0x1000
+        XCTAssertEqual(try self.verify(encryption(cryptoff: straddling, cryptsize: 0x2000, cryptid: 1), "straddling", in: directory).lines, [": encrypted: cryptid 1 over 0x2000 bytes at \(straddling.hex), which no one segment's file bytes hold: the kernel refuses it"])
 
         var flags = program
         flags.store(program.load(UInt32.self, at: 24) & ~UInt32(MH_PIE) & ~UInt32(MH_TWOLEVEL) | UInt32(MH_ALLOW_STACK_EXECUTION), at: 24)

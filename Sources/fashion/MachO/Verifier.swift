@@ -940,7 +940,7 @@ struct MachOVerifier {
      on a release kernel; `LC_DYLD_ENVIRONMENT`, which dyld honors; an `LC_UUID`; a dylib's `LC_ID_DYLIB` and no
      other's; at least one dylib linked; an executable dynamically linked, or static, which the kernel runs only as
      x86_64, and position independent, which the kernel requires of arm64; an executable stack; a flat namespace;
-     encryption; and a version command.
+     encryption, as the kernel's `set_code_unprotect` takes it; and a version command.
      */
     private func linkAnomalies() -> [String] {
         let image = self.image
@@ -1009,6 +1009,10 @@ struct MachOVerifier {
             }
         }
 
+        // The kernel's set_code_unprotect: cryptid 0 is an empty command; 1 names its FairPlay crypter, com.apple.unfree,
+        // and 0x10 its null one, com.apple.null, any other is LOAD_BADMACHO; a cryptsize of 0 it logs and ignores; the
+        // range must lie inside one segment's file bytes, LC_SEGMENT or LC_SEGMENT_64 whatever the image, or
+        // LOAD_BADMACHO, a rule it reaches once the crypter has the keys, so a crafted file dies for the keys first.
         for command in self.commands {
             let wide = command.cmd == UInt32(LC_ENCRYPTION_INFO_64)
             guard wide || command.cmd == UInt32(LC_ENCRYPTION_INFO), let info = command.payload(as: encryption_info_command.self) else {
@@ -1017,9 +1021,22 @@ struct MachOVerifier {
             if wide != image.is64 {
                 found.append("\(command.name) in a \(image.is64 ? 64 : 32)-bit image")
             }
-            if image.sw(info.cryptid) != 0 {
-                found.append("encrypted: cryptid \(image.sw(info.cryptid)) over \(image.sw(info.cryptsize).hex) bytes at \(image.sw(info.cryptoff).hex)")
+            let cryptid = image.sw(info.cryptid)
+            let offset = UInt64(image.sw(info.cryptoff))
+            let size = UInt64(image.sw(info.cryptsize))
+            guard cryptid != 0 else {
+                continue
             }
+            let crypter = cryptid == 0x10 ? "cryptid 0x10, the kernel's null crypter com.apple.null," : "cryptid \(cryptid)"
+            var line = "encrypted: \(crypter) over \(size.hex) bytes at \(offset.hex)"
+            if cryptid != 1, cryptid != 0x10 {
+                line += ", which the kernel refuses: 1 names its FairPlay crypter, 0x10 its null one"
+            } else if size == 0 {
+                line += ", which the kernel ignores"
+            } else if !self.segments.contains(where: { $0.fileoff <= offset && offset + size <= $0.fileend }) {
+                line += ", which no one segment's file bytes hold: the kernel refuses it"
+            }
+            found.append(line)
         }
         // A version command too short to read is named by the table rules, not as none.
         if !self.commands.contains(where: { $0.cmd == UInt32(LC_BUILD_VERSION) || Self.versionMinCommands.contains($0.cmd) }) {
