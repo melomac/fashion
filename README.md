@@ -427,24 +427,19 @@ A TLSH distance counts file length: padding, such as appended null bytes, adds t
 ### CDHash
 
 The CodeDirectory hash is how macOS and iOS identify an executable's integrity.
-It's the hash of the directory that holds the hash of every code page: it changes with any byte of code.
+It's the hash of the directory that holds the hash of every code page.
 
-We print the CDHash of Mach-O binaries, one line per code directory, strongest hash type first as the Security framework ranks them: `sha512`, `sha384`, `sha256`, `sha256t`, then `sha1`.
-A binary signed with multiple algorithms gets multiple lines, labeled with the hash type.
-The Security framework reads the signature by the strongest directory; the kernel knows no SHA-512 directory and refuses a signature that carries one (which `verify` reports).
+We print the CDHash of Mach-O binaries, one line per code directory, strongest hash type first: `sha512`, `sha384`, `sha256`, `sha256t`, `sha1`.
+The kernel knows no SHA-512 directory and refuses a signature that carries one, which `verify` reports.
 
-We print the `CandidateCDHashFull` but `--match` accepts the truncated to 40 hex digits `CDHash` Apple's tools usually show.
+We print the `CandidateCDHashFull` but `--match` accepts the truncated to 40 hex digits `CDHash`.
 
-When `syspolicyd` meets unsigned code, it has the Security framework sign it in memory and looks up a notarization ticket for the detached `ADHOC` hash.
-This is not documented: we mirror the Security framework and `syspolicyd` (see [Reverse engineering](#reverse-engineering)), build the same signature, and print its `CandidateCDHashFull`:
-
-* the `ADHOC, sha256` line is, byte for byte, the hash `syspolicyd` looks up;
-* the `ADHOC, sha1` line is its legacy counterpart.
-
-When Security's static validation rejects the signature, which `codesign` reports as "not signed at all", the file gets its `ADHOC` lines too, computed up to where the signature starts.
-
-Each signed slice is checked as Security's static validation checks it, which `codesign --verify` shows: every code page against its code directory, the sealed blobs against their slots, the CMS signature over the directory.
+Each signed slice is checked with Security's static validation, like `codesign --verify`: every code page against its code directory, the sealed blobs against their slots, the CMS signature over the directory.
 A slice that fails is labeled `INVALID`, and named on standard error without changing the exit status: "signature rejected, hashed as unsigned", or "invalid signature (code or signature have been modified)" when a byte of code changed since signing.
+
+When `syspolicyd` meets unsigned code, it has the Security framework sign it in memory.
+`fashion` computes the same digest `syspolicyd` looks up, as a dimmed `ADHOC` line.
+When Security's static validation rejects the signature, `codesign` calls the file "not signed at all", and it gets its `ADHOC` line too, computed up to where the signature starts.
 
 Mach-O files that are not code to `codesign` — object files, dSYMs, core dumps, kernel filesets — have no identity and yield no line, signed or not.
 

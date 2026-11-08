@@ -76,7 +76,7 @@ private let logger = Logger(subsystem: "fashion", category: "runner")
 // MARK: Pipeline Types
 
 /**
- One digest of a file: of the whole file, or of one of its slices, named by `label` (`arm64`, `x86_64, ADHOC, sha256`),
+ One digest of a file: of the whole file, or of one of its slices, named by `label` (`arm64`, `x86_64, ADHOC`),
  or of a file found in place of a slice's artifact, named by its own `path`; by `algorithm`, which tells how it is
  matched and printed.
  */
@@ -1338,14 +1338,9 @@ struct Digester {
         }
 
         return results.map { result in
-            // An unsigned slice is labeled ADHOC; its hash type (sha256 / sha1) is appended to tell the two
-            // synthesized cdhashes apart. A signed slice shows its hash type only when ambiguous. A signature that does
-            // not hold is labeled INVALID, so the line tells what stderr does.
-            let tag: String? = if result.adhoc {
-                result.type.map { "ADHOC, \($0)" } ?? "ADHOC"
-            } else {
-                result.type
-            }
+            // An unsigned slice is labeled ADHOC. A signed slice shows its hash type only when ambiguous. A signature
+            // that does not hold is labeled INVALID, so the line tells what stderr does.
+            let tag = result.adhoc ? "ADHOC" : result.type
             let label = [result.arch, result.invalid ? "INVALID" : nil, tag].compactMap(\.self).joined(separator: ", ")
             return DigestResult(digest: result.hash, algorithm: .cdhash, label: label.isEmpty ? nil : label, tint: result.adhoc ? .adhoc : .none)
         }

@@ -1,5 +1,6 @@
 @testable import fashion
 import Foundation
+import Security
 import XCTest
 
 final class CDHashTests: XCTestCase {
@@ -238,9 +239,9 @@ final class CDHashTests: XCTestCase {
     }
 
     /**
-     Strip a real system binary → unsigned, then each slice's synthesized ad-hoc cdhashes (SHA-256 and
-     SHA-1) must equal `codesign --detached`'s CandidateCDHashFull for the matching algorithm. This also
-     exercises the multi-code-slot synthesis branch, which the synthetic fixtures do not.
+     Strip a real system binary → unsigned, then each slice's synthesized ad-hoc cdhash must equal
+     `codesign --detached`'s CandidateCDHashFull sha256. This also exercises the multi-code-slot synthesis
+     branch, which the synthetic fixtures do not.
      */
     func testAdhocMatchesCodesignDetached() throws {
         let bin = try self.temporaryDirectory() / "ls"
@@ -248,6 +249,122 @@ final class CDHashTests: XCTestCase {
         _ = try codesign(["--remove-signature", bin.path()])
 
         try self.assertAdhocMatchesCodesignDetached(bin)
+    }
+
+    /**
+     The builder makes a directory of any hash type, as `Signer::signMachO` does, though only SHA-256 is printed:
+     each slice of the stripped `ls`, asked for SHA-1, truncated SHA-256 and SHA-384 beside SHA-256, must yield the
+     four ad-hoc cdhashes equal to `codesign --detached --digest-algorithm=sha1,sha256,sha256T,sha384`'s
+     CandidateCDHashFull of each. Those are every digest Security signs with: codesign refuses SHA-1 alone, and
+     `SecCodeSignerAddSignature` refuses SHA-512 (errSecCSUnsupportedDigestAlgorithm), a directory Security only reads.
+     */
+    func testAdhocEveryCodesignDigestMatchesCodesignDetached() throws {
+        let bin = try self.temporaryDirectory() / "ls"
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: bin)
+        _ = try codesign(["--remove-signature", bin.path()])
+
+        let file = try File(path: bin.path())
+        let slices: [(arch: String?, image: MachO)] = switch try Universal.open(file) {
+        case let .fat(table):
+            try table.compactMap { arch -> (arch: String?, image: MachO)? in
+                guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
+                    return nil
+                }
+                return (arch.name, image)
+            }
+        case let .thin(image): [(nil, image)]
+        case .notMachO: []
+        }
+        XCTAssertFalse(slices.isEmpty, "unsigned ls must have slices")
+
+        for (arch, image) in slices {
+            let out = try Self.codesignDetached(bin, arch: arch, algorithms: "sha1,sha256,sha256T,sha384")
+            Self.assertInspectedSlice(out, arch: arch)
+            let hashes = try image.adhocCDHashes(codeLimit: image.length, invalid: false, hashTypes: [.sha1, .sha256, .sha256Truncated, .sha384])
+            XCTAssertEqual(hashes.map(\.type), ["sha1", "sha256", "sha256t", "sha384"], arch ?? "thin")
+            for hash in hashes {
+                let name = hash.type == "sha256t" ? "sha256T" : hash.type // codesign's spelling of the truncated type
+                let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull \(name)"), "codesign printed no CandidateCDHashFull \(name)")
+                XCTAssertEqual(hash.hash, expected, "adhoc \(hash.type) cdhash ≠ codesign --detached (\(arch ?? "thin"))")
+            }
+        }
+    }
+
+    /**
+     Security's signer refuses SHA-512: `SecCodeSignerAddSignature` fails with errSecCSUnsupportedDigestAlgorithm for
+     hash type 5, alone or beside SHA-256, so Security reads such a directory and builds none, and the builder's
+     SHA-512 directory has no oracle. Types 1 to 4 it signs, each alone (SHA-1 too, which codesign refuses alone), the
+     directory's full cdhash read back from `kSecCodeInfoCdHashesFull` equal to the builder's. Each slice of the
+     stripped `ls` is signed thin, as `SecStaticCodeCreateWithPath` picks the running architecture's slice of a
+     universal file.
+     */
+    func testSecCodeSignerSignsEveryTypeButSHA512() throws {
+        let directory = try self.temporaryDirectory()
+        let universal = directory / "ls"
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/ls"), to: universal)
+        _ = try codesign(["--remove-signature", universal.path()])
+        let data = try Data(contentsOf: universal)
+        let slices: [(name: String, data: Data)] = switch try Universal.open(data: data) {
+        case let .fat(archs): archs.map { ($0.name, Data(data[$0.offset ..< $0.offset + $0.length])) }
+        default: [("thin", data)]
+        }
+
+        for slice in slices {
+            let thin = directory / "ls-\(slice.name)"
+            try slice.data.write(to: thin)
+            let image = try XCTUnwrap(MachO(slice.data), slice.name)
+            for type in [HashType.sha1, .sha256, .sha256Truncated, .sha384] {
+                let signed = try Self.secCodeSigner(thin, types: [type])
+                XCTAssertEqual(signed.status, errSecSuccess, "\(slice.name) \(type.name)")
+                let built = try image.adhocCDHashes(codeLimit: image.length, invalid: false, hashTypes: [type])
+                XCTAssertEqual(built.map(\.hash), signed.cdhashes[type].map { [$0] } ?? [], "\(slice.name) \(type.name)")
+            }
+            XCTAssertEqual(try Self.secCodeSigner(thin, types: [.sha512]).status, OSStatus(errSecCSUnsupportedDigestAlgorithm), "\(slice.name) sha512")
+            XCTAssertEqual(try Self.secCodeSigner(thin, types: [.sha256, .sha512]).status, OSStatus(errSecCSUnsupportedDigestAlgorithm), "\(slice.name) sha256 beside sha512")
+        }
+    }
+
+    private typealias SecCodeSignerCreate = @convention(c) (CFDictionary, UInt32, UnsafeMutablePointer<CFTypeRef?>) -> OSStatus
+    private typealias SecCodeSignerAddSignature = @convention(c) (CFTypeRef, SecStaticCode, UInt32) -> OSStatus
+    private typealias SecCodeSetDetachedSignature = @convention(c) (SecStaticCode, CFData, UInt32) -> OSStatus
+
+    /**
+     Sign `url` ad hoc under the identifier `ADHOC` into a detached signature with a code directory of each of `types`,
+     through `SecCodeSigner` as `syspolicyd` signs unsigned code, and read each directory's full cdhash back from
+     `kSecCodeInfoCdHashesFull`. The signer's functions and keys are not in the SDK's headers, so they are reached by
+     name. Returns `SecCodeSignerAddSignature`'s status, and the cdhashes when it signed.
+     */
+    private static func secCodeSigner(_ url: URL, types: [HashType]) throws -> (status: OSStatus, cdhashes: [HashType: String]) {
+        let security = try XCTUnwrap(dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY))
+        func function<T>(_ name: String, as _: T.Type) throws -> T {
+            try unsafeBitCast(XCTUnwrap(dlsym(security, name), "Security exports no \(name)"), to: T.self)
+        }
+        func key(_ name: String) throws -> String {
+            try XCTUnwrap(dlsym(security, name), "Security exports no \(name)").assumingMemoryBound(to: CFString.self).pointee as String
+        }
+
+        var code: SecStaticCode?
+        XCTAssertEqual(SecStaticCodeCreateWithPath(url as CFURL, [], &code), errSecSuccess)
+        let staticCode = try XCTUnwrap(code)
+        let detached = NSMutableData()
+        let parameters: [String: Any] = try [
+            key("kSecCodeSignerIdentity"): NSNull(),
+            key("kSecCodeSignerIdentifier"): "ADHOC",
+            key("kSecCodeSignerDetached"): detached,
+            key("kSecCodeSignerDigestAlgorithm"): types.map { NSNumber(value: $0.rawValue) },
+        ]
+        var signer: CFTypeRef?
+        XCTAssertEqual(try function("SecCodeSignerCreate", as: SecCodeSignerCreate.self)(parameters as NSDictionary, 0, &signer), errSecSuccess)
+        let status = try function("SecCodeSignerAddSignature", as: SecCodeSignerAddSignature.self)(XCTUnwrap(signer), staticCode, 0)
+        guard status == errSecSuccess else {
+            return (status, [:])
+        }
+
+        XCTAssertEqual(try function("SecCodeSetDetachedSignature", as: SecCodeSetDetachedSignature.self)(staticCode, detached as CFData, 0), errSecSuccess)
+        var information: CFDictionary?
+        XCTAssertEqual(SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information), errSecSuccess)
+        let full = try XCTUnwrap((information as? [String: Any])?[key("kSecCodeInfoCdHashesFull")] as? [NSNumber: Data], "no kSecCodeInfoCdHashesFull")
+        return try (status, Dictionary(uniqueKeysWithValues: full.map { try (XCTUnwrap(HashType(rawValue: UInt8($0.key.intValue))), $0.value.hexString) }))
     }
 
     /**
@@ -557,19 +674,20 @@ final class CDHashTests: XCTestCase {
         return data
     }
 
-    /// Sign `file` (its `arch` slice when given) ad hoc into a detached signature, and return codesign's -dvvvv display of it.
-    private static func codesignDetached(_ file: URL, arch: String? = nil) throws -> String {
+    /// Sign `file` (its `arch` slice when given) ad hoc into a detached signature, with codesign's default digest or
+    /// the `algorithms` named as --digest-algorithm takes them, and return codesign's -dvvvv display of it.
+    private static func codesignDetached(_ file: URL, arch: String? = nil, algorithms: String? = nil) throws -> String {
         let sig = file.deletingLastPathComponent() / "\(file.lastPathComponent).sig"
         let archArgs = arch.map { ["--arch", $0] } ?? []
-        // Sign with both algorithms so codesign displays both CandidateCDHashFull sha256 and sha1.
-        _ = try codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC", "--digest-algorithm=sha1,sha256"] + archArgs + [file.path()])
+        let digestArgs = algorithms.map { ["--digest-algorithm=\($0)"] } ?? []
+        _ = try codesign(["--detached", sig.path(), "-f", "-s", "-", "-i", "ADHOC"] + digestArgs + archArgs + [file.path()])
         return try codesign(["-dvvvv", "--detached", sig.path()] + archArgs + [file.path()])
     }
 
     /**
-     Each slice of the unsigned `bin` must yield synthesized ad-hoc cdhashes (SHA-256 and SHA-1) equal to
-     `codesign --detached`'s CandidateCDHashFull for the matching algorithm. Returns codesign's display of the
-     last slice checked, for the caller to read other fields from.
+     Each slice of the unsigned `bin` must yield its synthesized ad-hoc cdhash, equal to `codesign --detached`'s
+     CandidateCDHashFull sha256. Returns codesign's display of the last slice checked, for the caller to read other
+     fields from.
      */
     @discardableResult
     private func assertAdhocMatchesCodesignDetached(_ bin: URL) throws -> String {
@@ -580,12 +698,12 @@ final class CDHashTests: XCTestCase {
         for (arch, sliceResults) in Dictionary(grouping: results, by: \.arch) {
             out = try Self.codesignDetached(bin, arch: arch)
             Self.assertInspectedSlice(out, arch: arch)
-            for result in sliceResults {
-                XCTAssertTrue(result.adhoc, "unsigned slice \(arch ?? "thin") must be ADHOC")
-                let alg = try XCTUnwrap(result.type, "an ad-hoc result must carry its hash type (sha256 / sha1)")
-                let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull \(alg)"), "codesign printed no CandidateCDHashFull \(alg)")
-                XCTAssertEqual(result.hash, expected, "adhoc \(alg) cdhash ≠ codesign --detached (\(arch ?? "thin"))")
-            }
+            XCTAssertEqual(sliceResults.count, 1, "unsigned slice \(arch ?? "thin") yields one ad-hoc cdhash")
+            let result = try XCTUnwrap(sliceResults.first)
+            XCTAssertTrue(result.adhoc, "unsigned slice \(arch ?? "thin") must be ADHOC")
+            XCTAssertNil(result.type, "one directory needs no hash type")
+            let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull sha256"), "codesign printed no CandidateCDHashFull sha256")
+            XCTAssertEqual(result.hash, expected, "adhoc cdhash ≠ codesign --detached (\(arch ?? "thin"))")
         }
         return out
     }

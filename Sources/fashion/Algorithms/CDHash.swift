@@ -132,7 +132,7 @@ extension MachO {
      */
     struct CodeDirectoryHash {
         let hash: String
-        /// The hash type's name (see `HashType`): `sha1` or `sha256` for a synthesized ad-hoc directory.
+        /// The hash type's name (see `HashType`): `sha256` for a synthesized ad-hoc directory.
         let type: String
         let adhoc: Bool
         /// See `CDHash.SliceResult.invalid`.
@@ -148,10 +148,10 @@ extension MachO {
      A signed slice yields every code directory Security loads from its signature, strongest first per `HashType.rank`: the
      head is the kernel-enforced cdhash. Each of them is checked against the code (`validateExecutables`).
 
-     An unsigned slice yields its synthesized ad-hoc cdhashes (SHA-256 then SHA-1). So does a signed slice whose code
-     directories Security rejects, marked invalid: `codesign` calls it "not signed at all" and signs it up to where its
-     signature starts, the code limit of `MachORep::signingLimit`. A signature Security cannot read at all is an error, as
-     `codesign` cannot sign over it.
+     An unsigned slice yields its synthesized ad-hoc cdhash, the SHA-256 one `syspolicyd` looks up. So does a signed
+     slice whose code directories Security rejects, marked invalid: `codesign` calls it "not signed at all" and signs it
+     up to where its signature starts, the code limit of `MachORep::signingLimit`. A signature Security cannot read at
+     all is an error, as `codesign` cannot sign over it.
 
      A slice of a universal file is judged on its own, as if extracted: `codesign` instead decides a whole 32-bit
      universal file from its first slice, and treats a 64-bit one (`lipo -fat64`) as a generic file outright.
@@ -401,12 +401,15 @@ extension MachO {
     // MARK: - Ad-hoc synthesis
 
     /**
-     The ad-hoc cdhashes of an unsigned slice whose code ends at `codeLimit`, SHA-256 then SHA-1: the digests of the
-     directories `codesign --detached -s - --identifier ADHOC --digest-algorithm=sha1,sha256` builds, byte for byte.
+     The ad-hoc cdhash of an unsigned slice whose code ends at `codeLimit`: the digest of the directory
+     `codesign --detached -s - --identifier ADHOC` builds, byte for byte, the one `syspolicyd` looks up a ticket for.
+     One directory per hash type of `hashTypes`, as `Signer::signMachO` builds them: SHA-256 alone, as `codesign -s -`
+     and `syspolicyd` sign; the tests ask for SHA-1, truncated SHA-256 and SHA-384 beside it, every digest Security
+     signs with: it refuses SHA-512, which it only reads.
      Throws where Security fails to sign: for a version or segment command it cannot read, or a directory too large.
-     `invalid` when they stand in for a signature Security rejects.
+     `invalid` when it stands in for a signature Security rejects.
      */
-    private func adhocCDHashes(codeLimit: Int, invalid: Bool) throws -> [CodeDirectoryHash] {
+    func adhocCDHashes(codeLimit: Int, invalid: Bool, hashTypes: [HashType] = [.sha256]) throws -> [CodeDirectoryHash] {
         // Security's Signer::populate: fill a CodeDirectory::Builder with what MachORep reports.
         let execSeg = try self.execSeg()
         let builder = try CodeDirectoryBuilder(
@@ -415,7 +418,8 @@ extension MachO {
             execSegBase: execSeg.base,
             execSegLimit: execSeg.limit,
             execSegFlags: self.filetype == UInt32(MH_EXECUTE) ? 1 : 0, // CS_EXECSEG_MAIN_BINARY
-            specialSlots: [1: self.infoPlistDigests(), 2: CodeDirectoryBuilder.digests(of: Self.emptyRequirementsBlob)].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
+            hashTypes: hashTypes,
+            specialSlots: [1: self.infoPlistDigests(hashTypes), 2: CodeDirectoryBuilder.digests(of: Self.emptyRequirementsBlob, hashTypes)].compactMapValues { $0 }, // cdInfoSlot, cdRequirementsSlot
         )
 
         return try builder.build(code: self).map { built in
@@ -505,14 +509,14 @@ extension MachO {
     }
 
     /**
-     The Info.plist embedded in `__TEXT,__info_plist`, like `MachORep::infoPlist`, digested under each of the
-     builder's hash types as it streams by, whatever it holds, or nil. As in `MachOBase::findSection`, a segment
+     The Info.plist embedded in `__TEXT,__info_plist`, like `MachORep::infoPlist`, digested under each of
+     `hashTypes` as it streams by, whatever it holds, or nil. As in `MachOBase::findSection`, a segment
      command too short for the section table it declares holds no section. `MachORep::infoPlist` catches a failed
      `MachO::dataAt`, so a section `codesign` cannot read is no Info.plist either: one past the slice's end, or one
      larger than the 2 GiB a single read(2) takes (`nbyte > INT_MAX` is EINVAL). On a big-endian slice (ppc, ppc64)
      `codesign` bounds the section table with the unswapped section count, so it never finds the section.
      */
-    private func infoPlistDigests() throws -> [HashType: Data]? {
+    private func infoPlistDigests(_ hashTypes: [HashType]) throws -> [HashType: Data]? {
         guard
             !self.swap,
             let text = try self.findSegment("__TEXT")
@@ -555,7 +559,7 @@ extension MachO {
                 return nil
             }
             do {
-                var hashers = CodeDirectoryBuilder.hashTypes.map { ($0, $0.hasher()) }
+                var hashers = hashTypes.map { ($0, $0.hasher()) }
                 try self.stream(Int(offset) ..< Int(offset + size)) { chunk in
                     for index in hashers.indices {
                         hashers[index].1.update(bufferPointer: chunk)
@@ -868,14 +872,14 @@ private struct CodeDirectoryBuilder {
     let execSegBase: UInt64
     let execSegLimit: UInt64
     let execSegFlags: UInt64
-    /// The directories built, SHA-256 first, as `codesign --digest-algorithm=sha1,sha256` orders them.
-    static let hashTypes: [HashType] = [.sha256, .sha1]
+    /// The directories built, one per hash type as `Signer::signMachO` builds them.
+    let hashTypes: [HashType]
     /// Special slot digests by slot number and hash type, written into slot -n.
     let specialSlots: [Int: [HashType: Data]]
 
     /// `blob` digested under each of `hashTypes`, what a special slot holds of it.
-    static func digests(of blob: Data) -> [HashType: Data] {
-        Dictionary(uniqueKeysWithValues: self.hashTypes.map { ($0, $0.digest(blob)) })
+    static func digests(of blob: Data, _ hashTypes: [HashType]) -> [HashType: Data] {
+        Dictionary(uniqueKeysWithValues: hashTypes.map { ($0, $0.digest(blob)) })
     }
 
     /// `Builder::build`'s choice: the oldest version that holds every field in use.
@@ -903,12 +907,12 @@ private struct CodeDirectoryBuilder {
     }
 
     /**
-     The directory of each hash type `codesign --digest-algorithm=sha1,sha256` builds, SHA-256 first, like
-     `Builder::build`: the header the fields call for, the identifier, the special slots, then a hash slot per page of
-     code, read from the image once for both types. A directory too large is refused before any code is read.
+     The directory of each of `hashTypes`, like `Builder::build`: the header the fields call for, the identifier, the
+     special slots, then a hash slot per page of code, read from the image once. A directory too large is refused
+     before any code is read.
      */
     func build(code image: MachO) throws -> [Built] {
-        let hashTypes = Self.hashTypes
+        let hashTypes = self.hashTypes
         var directories = try hashTypes.map { try self.directory(hashType: $0) }
         try image.forEachPage(upTo: self.codeLimit, pageSize: 1 << Int(self.pageSizeLog)) { page in
             for index in hashTypes.indices {

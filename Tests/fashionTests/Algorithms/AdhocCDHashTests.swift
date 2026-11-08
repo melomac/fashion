@@ -424,9 +424,9 @@ final class AdhocCDHashTests: XCTestCase {
             let hashed = try slice.codeDirectoryHashes(exact: false)
             let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
             XCTAssertNil(skipReason, name)
-            XCTAssertEqual(hashes.map(\.adhoc), [true, true], name)
+            XCTAssertEqual(hashes.map(\.adhoc), [true], name)
             // Unlike an unsigned slice's, its ad-hoc cdhashes stand for a signature that does not hold.
-            XCTAssertEqual(hashes.map(\.invalid), [true, true], name)
+            XCTAssertEqual(hashes.map(\.invalid), [true], name)
         }
 
         let twice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: [(0, sha256), (0x1000, sha256)]))))
@@ -454,8 +454,8 @@ final class AdhocCDHashTests: XCTestCase {
         let slice = try XCTUnwrap(MachO(self.makeMachO()))
         let directories = try slice.codeDirectoryHashes(exact: false).hashes
 
-        // An unsigned slice yields both synthesized ad-hoc cdhashes: SHA-256 first, then SHA-1.
-        XCTAssertEqual(directories.count, 2)
+        // An unsigned slice yields one synthesized ad-hoc cdhash, SHA-256.
+        XCTAssertEqual(directories.count, 1)
         XCTAssertFalse(directories.contains(where: \.invalid))
 
         let sha256 = try XCTUnwrap(directories.first)
@@ -463,12 +463,6 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertEqual(sha256.type, "sha256")
         XCTAssertEqual(sha256.hash.count, 64) // full SHA-256 of the SHA-256 CodeDirectory
         XCTAssertTrue(sha256.hash.allSatisfy(\.isHexDigit))
-
-        let sha1 = try XCTUnwrap(directories.last)
-        XCTAssertTrue(sha1.adhoc)
-        XCTAssertEqual(sha1.type, "sha1")
-        XCTAssertEqual(sha1.hash.count, 40) // full SHA-1 of the SHA-1 CodeDirectory
-        XCTAssertTrue(sha1.hash.allSatisfy(\.isHexDigit))
 
         // Deterministic.
         XCTAssertEqual(directories.map(\.hash), try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
@@ -483,7 +477,7 @@ final class AdhocCDHashTests: XCTestCase {
 
         let dirtyExact = try MachO(dirty)?.codeDirectoryHashes(exact: true).hashes.map(\.hash)
         let dirtyWhole = try MachO(dirty)?.codeDirectoryHashes(exact: false).hashes.map(\.hash)
-        XCTAssertEqual(dirtyExact, cleanHashes, "Exact must strip appended garbage (both cdhashes)")
+        XCTAssertEqual(dirtyExact, cleanHashes, "Exact must strip appended garbage")
         XCTAssertNotEqual(dirtyWhole, cleanHashes, "Whole-slice adhoc must include garbage")
     }
 
@@ -497,7 +491,7 @@ final class AdhocCDHashTests: XCTestCase {
             let slice = try XCTUnwrap(MachO(self.makeMachO(filetype: UInt32(filetype))))
             let hashed = try slice.codeDirectoryHashes(exact: false)
             let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
-            XCTAssertEqual(hashes.count, code.contains(filetype) ? 2 : 0, slice.filetypeName)
+            XCTAssertEqual(hashes.count, code.contains(filetype) ? 1 : 0, slice.filetypeName)
             XCTAssertEqual(skipReason == nil, code.contains(filetype), slice.filetypeName)
         }
     }
@@ -527,7 +521,7 @@ final class AdhocCDHashTests: XCTestCase {
 
     func testCDHashTagsUnsignedSliceAdhoc() throws {
         let results = try CDHash.hash(fixture: self.makeMachO())
-        XCTAssertEqual(results.count, 2, "an unsigned thin slice yields both ad-hoc cdhashes")
+        XCTAssertEqual(results.count, 1, "an unsigned thin slice yields its ad-hoc cdhash")
 
         for result in results {
             XCTAssertTrue(result.adhoc, "CDHash tags an unsigned slice ADHOC")
@@ -546,7 +540,7 @@ final class AdhocCDHashTests: XCTestCase {
         let hashed = try slice.codeDirectoryHashes(exact: false)
         let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
         XCTAssertNil(skipReason)
-        XCTAssertEqual(hashes.map(\.adhoc), [true, true])
+        XCTAssertEqual(hashes.map(\.adhoc), [true])
 
         // Whatever follows the signature's offset is not code; what precedes it is.
         var afterSignature = data

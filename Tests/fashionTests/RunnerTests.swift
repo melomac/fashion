@@ -326,7 +326,7 @@ final class RunnerTests: XCTestCase {
         XCTAssertTrue(try lines(["--match", String(sha256.dropLast()) + (sha256.hasSuffix("0") ? "1" : "0")]).isEmpty)
 
         let cdhash = try XCTUnwrap(CDHash.hash(data: slice))
-        XCTAssertEqual(try lines(["--algo", "cdhash"]).map(\.tint), [.adhoc, .adhoc])
+        XCTAssertEqual(try lines(["--algo", "cdhash"]).map(\.tint), [.adhoc])
         XCTAssertEqual(try lines(["--algo", "cdhash", "--match", String(cdhash.prefix(40))]).map(\.tint), [.match(distance: 0)])
     }
 
