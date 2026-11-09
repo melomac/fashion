@@ -105,6 +105,10 @@ fuzz-watch:
 fuzz-merge:
 	Fuzz/fuzz.sh merge $(FUZZ_FROM) $(FUZZ_HARNESSES)
 
+.PHONY: fuzz-coverage
+fuzz-coverage:
+	Fuzz/fuzz.sh coverage $(FUZZ_HARNESSES)
+
 .PHONY: fuzz-clean
 fuzz-clean:
 	Fuzz/fuzz.sh clean

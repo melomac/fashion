@@ -37,6 +37,7 @@ make fuzz-seed                # seed only, the corpora grown so far merged into 
 make fuzz-watch               # in another terminal: follow the logs as a run writes them
 make fuzz-merge               # minimize the corpora: what reaches an edge the rest does not stays
 make fuzz-merge FUZZ_FROM=/path/to/another/tree   # take that tree's corpora in the same way
+make fuzz-coverage            # what code the corpora reach, a report per source file
 make fuzz-clean               # drop the corpora, logs and artifacts; the next run seeds afresh
 ```
 
@@ -62,6 +63,14 @@ the binaries run with Swift's hashing seed fixed, fuzzing and merging alike, so 
 every time and a merge of the same units twice keeps the same set. A reseed merges the corpora grown so far into the
 seeded ones, so new fixtures cost no coverage. `make fuzz-clean` drops the corpora, logs and artifacts and keeps the
 binaries: the next run seeds and reports from nothing.
+
+A run's edge count says where a corpus stands against itself, not what the parsers it never touches are, and a run
+that gains nothing for hours is at the edge of its seeds, not of the code. `make fuzz-coverage` builds the binaries
+again under `coverage/` with profile instrumentation, replays each corpus through them once and writes a report
+under `coverage/report/`: a line per source file with the regions and lines reached, each source annotated with its
+counts, and the lines never run that carry a string literal, which in the verifier are the findings no unit ever
+produced. What that list holds decides what to seed next; the certificate chains the signer classes, for one, no
+mutation reaches without a real signature among the seeds.
 
 The corpora are seeded with every fixture the tests build (hand-made, compiled or codesigned: `FASHION_FIXTURES` in
 TestHelpers.swift keeps them while `swift test` runs), with `/bin/ls` whole and by slice, with a XAR of this directory,

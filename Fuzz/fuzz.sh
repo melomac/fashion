@@ -13,6 +13,8 @@
 #   Fuzz/fuzz.sh watch [harness...]           follow the logs of a run as they are written, waves to come included
 #   Fuzz/fuzz.sh merge [tree] [harness...]    merge another tree's corpora into these, or these into themselves,
 #                                             keeping what reaches an edge the rest does not
+#   Fuzz/fuzz.sh coverage [harness...]        what code the corpora reach: the binaries built again with profile
+#                                             instrumentation, each corpus replayed once, a report per source file
 #   Fuzz/fuzz.sh clean            remove what seed and run wrote, corpora, logs and artifacts; the binaries stay
 #
 # FUZZ_BUILD names the tree, .build/fuzz by default, which make distclean removes with the rest of .build: a
@@ -49,6 +51,20 @@ endings() {
         macho | cdhash | unpack | verify) echo "strict segments" ;;
         *) echo strict ;;
     esac
+}
+
+# That every argument names a harness, or the names there are.
+named() {
+    local harness
+    for harness in "$@"; do
+        case " $harnesses " in
+            *" $harness "*) ;;
+            *)
+                echo "no harness named $harness; there are: $harnesses" >&2
+                exit 2
+                ;;
+        esac
+    done
 }
 
 # The binaries `build` makes, one per harness and ending: every harness's, or those named.
@@ -107,29 +123,22 @@ fuzzer_runtime() {
     exit 1
 }
 
-build() {
-    local runtime
-    runtime=$(fuzzer_runtime)
-
+# What every build shares: the toolchain stamp, the module maps and ArgumentParser.
+prepare() {
     # The products are remade when their sources are newer, which a toolchain update leaves as they are, though a
     # module built under one SDK or compiler is refused by the next. The compiler and the SDK are stamped in the
     # tree, and everything built goes when the stamp changes; the corpora, logs and artifacts stay.
     local toolchain
     toolchain=$(xcrun swiftc -version 2>&1 | head -1; xcrun -sdk macosx --show-sdk-version)
     if [ "$(cat "$build/toolchain" 2>/dev/null)" != "$toolchain" ]; then
-        rm -rf "$build/modules" "$build/objects" "$build/strict" "$build/segments" "${bin:?}"
+        rm -rf "$build/modules" "$build/objects" "$build/strict" "$build/segments" "${bin:?}" "$build/coverage"
         mkdir -p "$build"
         echo "$toolchain" > "$build/toolchain"
     fi
-    mkdir -p "$build/modules" "$build/objects" "$bin"
-
-    # swiftc as SwiftPM runs it for the package, plus the sanitizers for the code under test.
-    local swift=(xcrun swiftc -O -g -parse-as-library -swift-version 6 -target "$(uname -m)-apple-macos13.0")
-    local sanitize=(-sanitize=address -Xfrontend -sanitize=fuzzer,address)
-    local includes=(-I "$build/modules" -I "$build/modules/CSSDeep" -I "$build/modules/CTLSH" -I "$build/modules/CMachOCompat")
+    mkdir -p "$build/modules" "$build/objects"
 
     # ArgumentParser, which the CLI imports, from the checkout SwiftPM resolves; it is not what is fuzzed, so it is
-    # neither instrumented nor sanitized.
+    # neither instrumented nor sanitized, and every build links the same objects.
     local ap=$swiftpm/checkouts/swift-argument-parser/Sources
     if [ ! -d "$ap" ]; then
         xcrun swift package resolve --package-path "$root" --scratch-path "$swiftpm"
@@ -145,9 +154,9 @@ build() {
         "${swift[@]}" -c -wmo -module-name ArgumentParser -I "$build/modules" -emit-module -emit-module-path "$build/modules/ArgumentParser.swiftmodule" "${files[@]}" -o "$build/objects/ArgumentParser.o"
     fi
 
-    # The C targets, with the module maps SwiftPM writes for them, instrumented too: ssdeep, TLSH and UPX's decoders
-    # read the bytes. The bridges to the submodules are in Bridges/, fashion's own C in Sources/.
-    local name include header cflags=(-c -O1 -g -fsanitize=fuzzer-no-link,address -target "$(uname -m)-apple-macos13.0")
+    # The module maps SwiftPM writes for the C targets. The bridges to the submodules are in Bridges/, fashion's own
+    # C in Sources/.
+    local name include header
     for name in Bridges/CSSDeep Bridges/CTLSH Bridges/CUCL Bridges/CLZMA Sources/CMachOCompat; do
         include=$root/$name/include
         name=$(basename "$name")
@@ -159,20 +168,44 @@ build() {
             printf 'module %s {\n    umbrella "%s"\n    export *\n}\n' "$name" "$include" > "$build/modules/$name/module.modulemap"
         fi
     done
+}
+
+# swiftc as SwiftPM runs it for the package, plus the sanitizers for the code under test.
+swift=(xcrun swiftc -O -g -parse-as-library -swift-version 6 -target "$(uname -m)-apple-macos13.0")
+sanitize=(-sanitize=address -Xfrontend -sanitize=fuzzer,address)
+cflags=(-c -O1 -g -fsanitize=fuzzer-no-link,address -target "$(uname -m)-apple-macos13.0")
+
+# The C objects, the fashion module once per --exact ending and one binary per harness and ending, under the tree
+# $1: objects/, strict/, segments/ and bin/ in it. The fuzzed tree is $build; `coverage` builds the same under
+# $build/coverage with profile instrumentation on top of the sanitizers, which $2, `profile`, asks for.
+products() {
+    local tree=$1 profile=${2:-} runtime
+    runtime=$(fuzzer_runtime)
+    local swift=("${swift[@]}" "${sanitize[@]}") cflags=("${cflags[@]}")
+    if [ "$profile" = profile ]; then
+        swift+=(-profile-generate -profile-coverage-mapping)
+        cflags+=(-fprofile-instr-generate -fcoverage-mapping)
+    fi
+    local includes=(-I "$build/modules" -I "$build/modules/CSSDeep" -I "$build/modules/CTLSH" -I "$build/modules/CMachOCompat")
+    local objects=$tree/objects bin=$tree/bin
+    mkdir -p "$objects" "$bin"
+
+    # The C targets, instrumented too: ssdeep, TLSH and UPX's decoders read the bytes.
+    local file name
     for file in "$root"/Bridges/CSSDeep/*.c "$root"/Sources/CMachOCompat/*.c; do
-        name=$build/objects/$(basename "$file" .c).o
+        name=$objects/$(basename "$file" .c).o
         if stale "$name" "$file" "$(dirname "$file")/include" "$root/submodules/ssdeep"; then
             xcrun clang "${cflags[@]}" -I "$(dirname "$file")/include" "$file" -o "$name"
         fi
     done
     for file in "$root"/Bridges/CUCL/*.c "$root"/Bridges/CLZMA/*.c; do
-        name=$build/objects/$(basename "$file" .c).o
+        name=$objects/$(basename "$file" .c).o
         if stale "$name" "$file" "$root/submodules/ucl" "$root/submodules/lzma-sdk"; then
             xcrun clang "${cflags[@]}" -I "$root/submodules/ucl/include" -I "$root/submodules/ucl" "$file" -o "$name"
         fi
     done
     for file in "$root"/Bridges/CTLSH/*.cpp; do
-        name=$build/objects/$(basename "$file" .cpp).o
+        name=$objects/$(basename "$file" .cpp).o
         if stale "$name" "$file" "$root/Bridges/CTLSH/include" "$root/submodules/tlsh"; then
             xcrun clang++ "${cflags[@]}" -DBUCKETS_128 -DCHECKSUM_1B -I "$root/Bridges/CTLSH/include" -I "$root/submodules/tlsh/include" "$file" -o "$name"
         fi
@@ -182,35 +215,43 @@ build() {
     # point renamed so that libFuzzer's main links.
     local ending define out
     for ending in strict segments; do
-        out=$build/$ending
+        out=$tree/$ending
         mkdir -p "$out"
         if stale "$out/fashion.o" "$root/Sources/fashion"; then
             define=()
             if [ "$ending" = strict ]; then
                 define=(-D SECURITY_STRICT_VALIDATION)
             fi
-            "${swift[@]}" "${sanitize[@]}" ${define[@]+"${define[@]}"} -c -wmo -enable-testing -module-name fashion \
+            "${swift[@]}" ${define[@]+"${define[@]}"} -c -wmo -enable-testing -module-name fashion \
                 -Xfrontend -entry-point-function-name -Xfrontend fashion_main "${includes[@]}" \
                 -emit-module -emit-module-path "$out/fashion.swiftmodule" \
                 "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/Algorithms/*.swift "$root"/Sources/fashion/Bridges/*.swift "$root"/Sources/fashion/Commands/*.swift "$root"/Sources/fashion/MachO/*.swift -o "$out/fashion.o"
         fi
     done
 
-    # One binary per harness and ending.
-    local harness
+    # One binary per harness and ending, over the tree's objects and ArgumentParser's, which the fuzzed tree holds.
+    local harness linked=("$objects"/*.o)
+    if [ "$tree" != "$build" ]; then
+        linked+=("$build"/objects/ArgumentParser*.o)
+    fi
     for name in $(binaries); do
         harness=${name#fuzz-}
         harness=${harness%-segments}
-        out=$build/strict
+        out=$tree/strict
         if [ "$name" != "${name%-segments}" ]; then
-            out=$build/segments
+            out=$tree/segments
         fi
-        if stale "$bin/$name" "$root/Fuzz/support.swift" "$root/Fuzz/$harness.swift" "$out/fashion.o" "$build/objects"; then
-            "${swift[@]}" "${sanitize[@]}" -module-name "fuzz_$harness" -I "$out" "${includes[@]}" \
-                "$root/Fuzz/support.swift" "$root/Fuzz/$harness.swift" "$out/fashion.o" "$build"/objects/*.o \
+        if stale "$bin/$name" "$root/Fuzz/support.swift" "$root/Fuzz/$harness.swift" "$out/fashion.o" "$objects" "$build/objects"; then
+            "${swift[@]}" -module-name "fuzz_$harness" -I "$out" "${includes[@]}" \
+                "$root/Fuzz/support.swift" "$root/Fuzz/$harness.swift" "$out/fashion.o" "${linked[@]}" \
                 -Xlinker "$runtime" -lc++ -o "$bin/$name"
         fi
     done
+}
+
+build() {
+    prepare
+    products "$build"
     binaries
 }
 
@@ -435,15 +476,7 @@ merge() {
                 ;;
         esac
     fi
-    for harness in "$@"; do
-        case " $harnesses " in
-            *" $harness "*) ;;
-            *)
-                echo "no harness named $harness; there are: $harnesses" >&2
-                exit 2
-                ;;
-        esac
-    done
+    named "$@"
     mkdir -p "$logs"
     # A merge runs one process, so as many harnesses go at once as there are cores, the rest as those end; each says
     # its line as it ends, so the lines come in that order.
@@ -468,15 +501,7 @@ run() {
             shift
             ;;
     esac
-    for harness in "$@"; do
-        case " $harnesses " in
-            *" $harness "*) ;;
-            *)
-                echo "no harness named $harness; there are: $harnesses" >&2
-                exit 2
-                ;;
-        esac
-    done
+    named "$@"
     if [ ! -d "$corpus" ]; then
         seed
     fi
@@ -557,6 +582,72 @@ summary() {
     done
 }
 
+# What code the corpora reach. A run's edge count says where a corpus stands against itself, not what the parsers
+# it never touches are, so the binaries are built again under $build/coverage with profile instrumentation on top
+# of the sanitizers, each corpus is replayed through them once (-runs=0, no mutation) under the limits a run has, and
+# the profiles are merged into a report under $build/coverage/report: files.txt, a line per source file of
+# Sources/ and Bridges/ with its regions and lines reached; sources/<file>.txt, each source annotated with its
+# counts; and unrun.txt, the lines never run that carry a string literal, which in the verifier are the findings no
+# unit ever produced, and in the error types the messages the harnesses catch without printing. The instrumented
+# binaries lay their edges out anew, so the cov a replay prints is not a run's; and `MachO.logicalEnd`, which the
+# two --exact endings compile to different counters, is counted from one ending's profiles alone, the merge warning
+# of the other's (logs/merge.log).
+coverage() {
+    local tree=$build/coverage name harness running=0 first= objects=()
+    named "$@"
+    if [ ! -d "$corpus" ]; then
+        echo "no corpora at $corpus; seed first" >&2
+        exit 2
+    fi
+    prepare
+    products "$tree" profile
+    rm -rf "$tree/profiles" "$tree/report"
+    mkdir -p "$tree/profiles" "$tree/report/sources" "$tree/logs"
+
+    echo "Replaying the corpora through the instrumented binaries..."
+    for name in $(binaries "$@"); do
+        if [ "$running" -ge "$cores" ]; then
+            wait
+            running=0
+        fi
+        harness=${name#fuzz-}
+        harness=${harness%-segments}
+        LLVM_PROFILE_FILE="$tree/profiles/$name.%p.profraw" "$tree/bin/$name" -runs=0 -timeout=60 -rss_limit_mb=2048 \
+            -malloc_limit_mb="$(malloc_limit "$harness")" -max_len="$(max_len "$harness")" "$corpus/$harness" \
+            > "$tree/logs/$name.log" 2>&1 ||
+            echo "replaying $corpus/$harness under $name failed, see $tree/logs/$name.log" >&2 &
+        running=$((running + 1))
+    done
+    wait
+    xcrun llvm-profdata merge -sparse "$tree"/profiles/*.profraw -o "$tree/all.profdata" 2> "$tree/logs/merge.log"
+
+    # llvm-cov reads one binary and as many -object others, the profile over them all, the paths given limiting the
+    # report to fashion's sources: the submodules' and the harnesses' own stay out.
+    for name in $(binaries "$@"); do
+        if [ -z "$first" ]; then
+            first=$tree/bin/$name
+        else
+            objects+=(-object "$tree/bin/$name")
+        fi
+    done
+    local cov=(xcrun llvm-cov) common=("$first" ${objects[@]+"${objects[@]}"} -instr-profile "$tree/all.profdata" -Xdemangler "$(xcrun --find swift-demangle)")
+    "${cov[@]}" report "${common[@]}" "$root/Sources" "$root/Bridges" > "$tree/report/files.txt"
+    : > "$tree/report/unrun.txt"
+    local file
+    for file in "$root"/Sources/fashion/*.swift "$root"/Sources/fashion/*/*.swift "$root"/Sources/CMachOCompat/*.c "$root"/Bridges/*/*.c "$root"/Bridges/*/*.cpp; do
+        name=$(basename "$file")
+        "${cov[@]}" show "${common[@]}" -use-color=false "$file" > "$tree/report/sources/$name.txt" 2>/dev/null || continue
+        # An annotated line is "<line>|<count>|<source>", the count empty where no region starts.
+        awk -v f="$name" -F'|' 'NF >= 3 && $2 ~ /^ *0$/ && $3 ~ /"/ { sub(/^ */, "", $1); sub(/^ */, "", $3); print f ":" $1 ": " $3 }' \
+            "$tree/report/sources/$name.txt" >> "$tree/report/unrun.txt"
+    done
+
+    # The summary, a file a line: the regions and lines of each, and what the corpora missed.
+    printf '%-44s %8s %7s %8s %8s %7s %8s\n' File Regions Missed Covered Lines Missed Covered
+    awk -v root="$root/" '$1 ~ /\.(swift|c|cpp)$/ || $1 == "TOTAL" { sub(root, "", $1); printf "%-44s %8s %7s %8s %8s %7s %8s\n", $1, $2, $3, $4, $8, $9, $10 }' "$tree/report/files.txt"
+    echo "Report in $tree/report: files.txt, sources/<file>.txt, unrun.txt ($(wc -l < "$tree/report/unrun.txt" | tr -d ' ') lines never run that carry a string)"
+}
+
 # Back to a built tree: the corpora and what they gained, a seeding of them left unfinished, the fixtures they were
 # seeded from, the logs and the artifacts go, so the next run seeds afresh and reports its own findings alone; the
 # binaries stay, as building them is the slow part.
@@ -565,11 +656,11 @@ clean() {
 }
 
 case ${1:-} in
-    build | seed | run | summary | watch | merge | clean)
+    build | seed | run | summary | watch | merge | coverage | clean)
         "$@"
         ;;
     *)
-        sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
