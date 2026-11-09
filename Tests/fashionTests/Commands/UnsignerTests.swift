@@ -13,9 +13,10 @@ final class UnsignerTests: XCTestCase {
         return url
     }
 
-    /// The lines hash mode prints for `path` with `arguments`.
+    /// The lines hash mode prints for `path` with `arguments`. The file seeds the fuzzer's corpora.
     private func hashLines(_ path: String, _ arguments: [String] = []) throws -> [String] {
-        try Digester(Hasher.parse([path, "--quiet"] + arguments)).lines(for: path, reporter: Reporter(console: Console())).map(\.text)
+        saveFixture(path: path)
+        return try Digester(Hasher.parse([path, "--quiet"] + arguments)).lines(for: path, reporter: Reporter(console: Console())).map(\.text)
     }
 
     /**
