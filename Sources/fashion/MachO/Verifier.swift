@@ -1582,27 +1582,56 @@ struct MachOVerifier {
     }
 
     /**
-     The index as the kernel's `cs_validate_csblob` walks it, where Security reads slot 0 and the alternates up to the
-     first one missing: every entry of a code directory's slot, 0 or 0x1000 to 0x1004, wherever it lies, goes through
-     `cs_validate_codedirectory` and refuses the signature whole when it fails, as do two directories of one hash
-     type, two entries of an entitlements slot, and an entry at offset 0, the superblob's own header. A directory
-     past a gap in the alternates is one Security never loads and the kernel ranks with the others. The checks of a
-     directory are those Security does not make: its length, its magic, its identifier's offset, its linkage.
+     The index as the kernel's `cs_validate_csblob` walks it. Security reads slot 0 and the alternates up to the
+     first one missing; the kernel reads every entry, and refuses the signature whole for any of:
+
+     - an entry of a code directory's slot, 0 or 0x1000 to 0x1004, wherever it lies, that fails
+       `cs_validate_codedirectory`. The checks made here are those Security does not make: the directory's
+       length, its magic, its identifier's offset, its linkage;
+     - two entries of an entitlements slot, or of a constraint slot;
+     - a constraint under another magic than its own;
+     - an entry at offset 0, the superblob's own header.
+
+     A directory past a gap in the alternates is one Security never loads and the kernel ranks with the others.
+
+     Two directories of one hash type. The kernel ranks each directory as it comes (`hash_rank`) and keeps the
+     highest as its best so far:
+
+     ```
+     rank    1 SHA-1    2 truncated SHA-256    3 SHA-256    4 SHA-384
+
+     a directory that ranks      is
+     -------------------------   ----------------------------------------------------------------------
+     above the best so far       the new best
+     as the best so far          refused: "multiple hash=%d CodeDirectories in signature; rejecting"
+     below the best so far       passed over
+     ```
+
+     So the second directory of a hash type is refused only while the first is still the best. After a stronger
+     one, both are passed over and the signature is taken.
      */
     private static func kernelIndexAnomalies(of superblob: Data) -> [String] {
         var found: [String] = []
         var hashTypes: [UInt8: Int] = [:]
-        var entitlements: [UInt32: Int] = [:]
+        var entered: [UInt32: Int] = [:]
+        // The rank of the directory the kernel holds as its best so far, and the hash types it refuses a second of.
+        var best: Int?
+        var refused: Set<UInt8> = []
+        var mismagicked: Set<UInt32> = []
         // The slots Security loads a directory from: 0, then the alternates up to the first one missing.
         var loaded: Set<UInt32> = [0]
         while MachO.component(0x1000 + UInt32(loaded.count - 1), of: superblob) != nil {
             loaded.insert(0x1000 + UInt32(loaded.count - 1))
         }
+
         for entry in 0 ..< Int(Self.bigEndian(superblob, at: 8)) {
             let slot = Self.bigEndian(superblob, at: 12 + 8 * entry)
             let offset = Int(Self.bigEndian(superblob, at: 12 + 8 * entry + 4))
-            if [MachO.csslotEntitlements, MachO.csslotDEREntitlements].contains(slot) {
-                entitlements[slot, default: 0] += 1
+            if [MachO.csslotEntitlements, MachO.csslotDEREntitlements].contains(slot) || Self.constraintSlots.contains(slot) {
+                entered[slot, default: 0] += 1
+            }
+            if Self.constraintSlots.contains(slot), offset != 0, Self.bigEndian(superblob, at: offset) != Self.constraintMagic, mismagicked.insert(slot).inserted {
+                found.append("the magic of \(Self.sealedNames[slot] ?? "slot \(slot)") is \(Self.bigEndian(superblob, at: offset).hex), not \(Self.constraintMagic.hex), which the kernel refuses the signature for")
             }
             guard slot == 0 || (0x1000 ... 0x1004).contains(slot) else {
                 continue
@@ -1626,17 +1655,39 @@ struct MachOVerifier {
             }
 
             hashTypes[head[37], default: 0] += 1
+            let rank = Self.kernelRank(head[37])
+            if let held = best, rank == held {
+                refused.insert(head[37])
+            }
+            best = max(best ?? rank, rank)
             if !loaded.contains(slot) {
                 found.append("\(name) lies past a gap in the alternates: Security never loads it, the kernel validates it and may read the signature by it")
             }
         }
+
         for (type, count) in hashTypes.sorted(by: { $0.key < $1.key }) where count > 1 {
-            found.append("\(count) code directories of hash type \(HashType(rawValue: type)?.name ?? "\(type)") in the index, which the kernel refuses the signature for")
+            found.append("\(count) code directories of hash type \(HashType(rawValue: type)?.name ?? "\(type)") in the index, " + (refused.contains(type) ? "which the kernel refuses the signature for" : "which the kernel takes: a stronger one is entered before the second"))
         }
-        for (slot, count) in entitlements.sorted(by: { $0.key < $1.key }) where count > 1 {
+        for (slot, count) in entered.sorted(by: { $0.key < $1.key }) where count > 1 {
             found.append("\(count) entries for slot \(slot) in the index, which the kernel refuses the signature for")
         }
         return found
+    }
+
+    /// The launch and library constraints' slots, and the magic the kernel wants of a blob there
+    /// (`CSMAGIC_EMBEDDED_LAUNCH_CONSTRAINT`).
+    private static let constraintSlots: Set<UInt32> = [8, 9, 10, 11]
+    private static let constraintMagic: UInt32 = 0xfade_8181
+
+    /// The kernel's rank of a hash type (`hash_rank`): higher is better, 0 for one it does not know.
+    private static func kernelRank(_ type: UInt8) -> Int {
+        switch type {
+        case 1: 1 // SHA-1
+        case 3: 2 // truncated SHA-256
+        case 2: 3 // SHA-256
+        case 4: 4 // SHA-384
+        default: 0
+        }
     }
 
     /// Why the kernel's `cs_validate_codedirectory` refuses a code directory of `length` bytes, among the checks

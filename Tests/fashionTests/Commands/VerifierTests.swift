@@ -2177,11 +2177,18 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
-     The index as the kernel walks it, where Security stops at the first alternate missing: a code directory whose
-     identifier offset is 0, or whose magic is not a directory's, which Security loads and the kernel refuses the
-     signature for; a directory past a gap in the alternates, which Security never loads and the kernel counts, two
-     of one hash type then; an entry at offset 0; slot 0 entered three times, which the kernel counts as three; and
-     a directory shorter than the fields the kernel reads.
+     The index as the kernel walks it, where Security stops at the first alternate missing:
+
+     - a code directory whose identifier offset is 0, or whose magic is not a directory's, which Security loads
+       and the kernel refuses the signature for;
+     - a directory past a gap in the alternates, which Security never loads and the kernel counts, two of one hash
+       type then;
+     - an entry at offset 0;
+     - slot 0 entered three times, which the kernel counts as three;
+     - a constraint slot entered twice, or holding another magic than a launch constraint's;
+     - a hash type entered twice, which the kernel refuses only when the second meets the first as its best so
+       far, as it ranks them in the order of the index;
+     - a directory shorter than the fields the kernel reads.
      */
     func testTheIndexAsTheKernelWalksItIsNamed() throws {
         let directory = try self.directory("index")
@@ -2214,6 +2221,40 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try self.verify(embedded([(0, sha256), (2, requirements), (0x1000, nil)]), "zero", in: directory).lines, [": the code directory the index places at slot 0x1000 at offset 0, the superblob's own header, which the kernel refuses the signature for"])
         // Slot 0 three times over: Security reads the first, the kernel counts three of one hash type, said once.
         XCTAssertEqual(try self.verify(embedded([(0, sha256), (0, sha256), (0, sha256), (2, requirements)]), "thrice", in: directory).lines, [": 3 code directories of hash type sha256 in the index, which the kernel refuses the signature for"])
+        // A constraint slot entered twice, and a constraint under another magic than a launch constraint's: the
+        // kernel refuses the signature for either; the first entry's blob is what Security would read, unsealed here.
+        /// A blob of `magic` over `payload`.
+        func blob(_ magic: UInt32, _ payload: String) -> Data {
+            var blob = Data()
+            [magic, UInt32(8 + payload.utf8.count)].forEach { blob.appendUInt32BE($0) }
+            return blob + Data(payload.utf8)
+        }
+        let unsealed = ": the launch constraint on the process is not sealed by the sha256 code directory"
+        XCTAssertEqual(try self.verify(embedded([(0, sha256), (2, requirements), (8, blob(0xfade_8181, "one")), (8, blob(0xfade_8181, "two"))]), "constraints", in: directory).lines, [": 2 entries for slot 8 in the index, which the kernel refuses the signature for", unsealed])
+        XCTAssertEqual(try self.verify(embedded([(0, sha256), (2, requirements), (8, blob(0x1234_5678, "one"))]), "constraint-magic", in: directory).lines, [": the magic of the launch constraint on the process is 0x12345678, not 0xfade8181, which the kernel refuses the signature for", unsealed])
+
+        // A hash type entered twice is refused when the second meets the first as the kernel's best so far, and
+        // taken when a stronger one came between or before. Here: SHA-1 at slot 0 and SHA-256 its alternate, then
+        // one of them again, past a gap, where Security loads none, or before the other in the index.
+        let twice = directory / "twice"
+        try self.program("x86_64", in: directory).write(to: twice)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", "--digest-algorithm=sha1,sha256", twice.path])
+        let both = try Data(contentsOf: twice)
+        let pair = try XCTUnwrap(MachO(File(data: both)))
+        let pairSignature = try XCTUnwrap(pair.findCodeSignature())
+        let pairBlob = try pair.signingData(pairSignature)
+        let weak = try Data(XCTUnwrap(MachO.component(0, of: pairBlob)))
+        let strong = try Data(XCTUnwrap(MachO.component(0x1000, of: pairBlob)))
+        XCTAssertEqual([weak[37], strong[37]], [1, 2], "SHA-1 at slot 0, SHA-256 its alternate")
+        /// The two-directory program with a signature of `blobs`, each at its slot, placed in order.
+        func ranked(_ blobs: [(slot: UInt32, blob: Data?)]) -> Data {
+            Self.embedding(blobs, in: both, at: pairSignature)
+        }
+        let gap = ": the code directory the index places at slot 0x1002 lies past a gap in the alternates: Security never loads it, the kernel validates it and may read the signature by it"
+        XCTAssertEqual(try self.verify(ranked([(0, weak), (2, requirements), (0x1000, strong), (0x1002, weak)]), "weak-after", in: directory).lines, [gap, ": 2 code directories of hash type sha1 in the index, which the kernel takes: a stronger one is entered before the second"])
+        XCTAssertEqual(try self.verify(ranked([(0, weak), (2, requirements), (0x1000, strong), (0x1002, strong)]), "strong-after", in: directory).lines, [gap, ": 2 code directories of hash type sha256 in the index, which the kernel refuses the signature for"])
+        XCTAssertEqual(try self.verify(ranked([(0, weak), (0x1002, weak), (2, requirements), (0x1000, strong)]), "weak-before", in: directory).lines, [gap, ": 2 code directories of hash type sha1 in the index, which the kernel refuses the signature for"])
+
         // A directory shorter than the fields the kernel reads, by the length it declares.
         var short = Data(sha256.prefix(0x40))
         short.store(UInt32(0x40).bigEndian, at: 4)
