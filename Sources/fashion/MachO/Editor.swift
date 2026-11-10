@@ -248,15 +248,47 @@ enum MachOEditor {
      padded with zeros up to the segment, a page at most, since nothing the image references is missing, and `caveat`
      hears of it, the padded file then opened in its place. Any other file as it is, opened the once: a segment with
      bytes past the end is a malformed Mach-O, which the parser refuses.
+
+     The padding is the image's only when the image ends in it. Where the image ends is where Security ends it
+     (`strictEnd`), whichever ending this build cuts by:
+
+     ```
+     the file as read   |-----------------------|
+     padded             |-----------------------|0000000|
+     the image ends     ............................^        the padding is the image's
+     the image ends     ..................^                  padded for nothing
+     ```
+
+     An image that ends within the bytes the file holds was padded for nothing: cut where it ends, it would be the
+     file again, or less of it. The file is refused as the parser refuses it, with no word of a padding.
      */
     static func padded(_ file: File, caveat: (String) -> Void) throws -> Padded {
         do {
             return try Padded(file: file, opened: Universal.open(file))
-        } catch let ParserError.invalidSegmentRange(name, offset, size, fileSize) where size == 0 && fileSize == file.size && offset > UInt64(fileSize) && offset - UInt64(fileSize) <= 0x4000 {
+        } catch let refusal as ParserError {
+            guard case let .invalidSegmentRange(name, offset, size, fileSize) = refusal, size == 0, fileSize == file.size, offset > UInt64(fileSize), offset - UInt64(fileSize) <= 0x4000 else {
+                throw refusal
+            }
+
             let missing = Int(offset) - fileSize
-            caveat("cut short of its last page, \(missing.hex) bytes before \(name) at \(offset.hex): padded with zeros")
+            let said = "cut short of its last page, \(missing.hex) bytes before \(name) at \(offset.hex): padded with zeros"
             let padded = File(editing: file, pieces: [.range(0 ..< fileSize), .bytes(Data(count: missing))])
-            return try Padded(file: padded, opened: Universal.open(padded))
+
+            let opened: Universal
+            do {
+                opened = try Universal.open(padded)
+            } catch {
+                // The padding is said before the error the padded file ends in, which names the padded size.
+                caveat(said)
+                throw error
+            }
+
+            if case let .thin(image) = opened, image.strictEnd() ?? 0 <= UInt64(fileSize) {
+                throw refusal
+            }
+
+            caveat(said)
+            return Padded(file: padded, opened: opened)
         }
     }
 
@@ -306,8 +338,13 @@ enum MachOEditor {
         if unpack {
             // A signature added after packing hides the 16-byte __LINKEDIT UPX leaves, so upx -d gives up on it: the
             // image is looked at without it.
-            let probed = unsigned.flatMap { try? MachO(File(editing: file, pieces: $0)) } ?? image
-            if let packMach = try PackMach(probed) {
+            // Without a signature to take out, the image is looked at as the cut left it: that is the state the
+            // unpacked one follows. A cut that leaves no Mach-O leaves nothing packed to look for. A padded image
+            // is the exception: the cut may take it back to the file the padding was read for, so it is looked
+            // at as padded.
+            let cut = end < image.length ? try? MachO(File(editing: file, pieces: [.range(image.offset ..< image.offset + end)])) : image
+            let probed = unsigned.flatMap { try? MachO(File(editing: file, pieces: $0)) } ?? cut ?? (padded ? image : nil)
+            if let probed, let packMach = try PackMach(probed) {
                 // What decompressed of an image that fails a check, or decoded under no key where a key was applied,
                 // kept as it is for --keep: named for the edits before it, the signature that came out for UPX to be
                 // found behind it included.

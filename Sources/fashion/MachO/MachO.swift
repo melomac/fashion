@@ -336,10 +336,13 @@ struct MachO {
      refused. An image with no such range is refused whatever its length.
      */
     func failsStrictValidation(length: Int) -> Bool {
-        guard let range = self.strictExtent() else {
-            return true
-        }
-        return range.offset &+ range.size != UInt64(length)
+        self.strictEnd() != UInt64(length)
+    }
+
+    /// Where the image ends for Security's strict validation (`strictExtent`), in either build: `logicalEnd` may
+    /// cut by another ending. Nil for an image with neither a `__LINKEDIT` segment nor an `LC_SYMTAB`.
+    func strictEnd() -> UInt64? {
+        self.strictExtent().map { $0.offset &+ $0.size }
     }
 
 #if SECURITY_STRICT_VALIDATION

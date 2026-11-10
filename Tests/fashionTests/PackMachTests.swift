@@ -1348,6 +1348,64 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
+     The unpacked state follows the cut one. An image that --exact cuts down to no Mach-O has nothing packed left
+     to look for, so there is no unpacked state under a name that says exact, though the image as it is unpacks.
+
+     A packed file made by hand, its first segment renamed `__LINKEDIT`: for --exact it ends, as Security ends an
+     image, before the 16-byte `__LINKEDIT` its headers place last. The cut is listed alone, and without --exact
+     the image unpacks to the original.
+     */
+    func testTheUnpackedStateFollowsTheCutOne() throws {
+        let directory = try self.directory("cut-then-unpack")
+        var (packed, original) = try self.packedByHand(overlapping: 0)
+        packed.replaceSubrange(40 ..< 56, with: Data("__LINKEDIT".utf8) + Data(count: 6))
+        let file = directory / "renamed"
+        try packed.write(to: file)
+        saveFixture(path: file.path)
+
+        let cut = try Thinner.lines(for: file.path, exact: true, unsign: false, unpack: true, write: false, reporter: Reporter(console: Console()))
+// Where --exact ends an image at every byte its segments reference, nothing is cut, and the image unpacks.
+#if SECURITY_STRICT_VALIDATION
+        XCTAssertEqual(cut.filter { !$0.diagnostic }.map(\.text), ["\(file.path) (exact)"])
+#else
+        XCTAssertEqual(cut.filter { !$0.diagnostic }.map(\.text), ["\(file.path) (unpacked)"])
+#endif
+        let whole = try Thinner.lines(for: file.path, exact: false, unsign: false, unpack: true, write: true, reporter: Reporter(console: Console()))
+        XCTAssertEqual(whole.filter { !$0.diagnostic }.map(\.text), [file.path + "_unpacked"])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: file.path + "_unpacked")), original)
+    }
+
+    /**
+     A file is padded for --exact when an empty segment lies past its end and the image ends there. Here the image
+     ends within the bytes the file holds: the segment past its end is not the one that ends it. Padded, it would
+     be cut straight back to itself, so it is padded for nothing. No state comes of it, and the file is refused as
+     the parser refuses it, with no word of a padding. Hash mode hashes it as it is.
+     */
+    func testAFilePaddedForNothingHasNoExactState() throws {
+        let directory = try self.directory("padded-for-nothing")
+        var data = Data()
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_EXECUTE), 3, 216, 0, 0].forEach { data.appendUInt32($0) }
+        for (name, address, offset, size) in [("__PAGEZERO", 0, 0x3000, 0), ("__TEXT", 0x1_0000_0000, 0, 0x1000), ("__LINKEDIT", 0x1_0000_1000, 0x1000, 0x1000)] {
+            data.appendUInt32(UInt32(LC_SEGMENT_64)); data.appendUInt32(72)
+            data.append(Data(name.utf8) + Data(count: 16 - name.utf8.count))
+            [UInt64(address), UInt64(max(size, 0x1000)), UInt64(offset), UInt64(size)].forEach { data.appendUInt64($0) }
+            [0, 0, 0, 0].forEach { data.appendUInt32(UInt32($0)) }
+        }
+        data.append(Data(count: 0x2000 - data.count))
+        let file = directory / "padded"
+        try data.write(to: file)
+        saveFixture(path: file.path)
+
+        let refusal = "fashion: \(file.path): Invalid Mach-O: segment __PAGEZERO at offset 0x3000 with size 0x0 is outside the 0x2000-byte slice"
+        let reporter = Reporter(console: Console())
+        let lines = try Thinner.lines(for: file.path, exact: true, unsign: false, unpack: false, write: true, reporter: reporter)
+        XCTAssertEqual(lines.map(\.text), [refusal])
+        XCTAssertEqual(reporter.errorCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path + "_exact"))
+        XCTAssertEqual(try self.hashLines(file.path, ["--exact"]), try [refusal + ", hashed as it is", XCTUnwrap(ByteHash.sha256.digest(data))])
+    }
+
+    /**
      A dylib UPX packed, made by hand as UPX lays one out (the installed UPX packs none): an `x86_64` dylib of a
      `__TEXT` page, a `__DATA_CONST` of 64 bytes, a `__LINKEDIT` of 32 and an `LC_UUID` (canUnpack wants three
      segments' worth of commands and an entry's, whatever the filetype), the headers in an NRV2B block and the rest
