@@ -1808,16 +1808,27 @@ struct MachOVerifier {
     // MARK: - Universal files
 
     /**
-     What is odd about a universal file itself: one the kernel runs no slice of (`FAT_MAGIC_64`); a slice hidden past
-     the table's count, which codesign finds and the kernel does not, and dyld finds when the entry names arm64 with
-     no subtype and the table counts fewer than 16 (`forEachSlice`, `Architecture::operator==`); two slices of one
-     architecture, which the kernel refuses (`fatfile_validate_fatarches`); slices that overlap; a slice not aligned as its entry declares;
-     padding before a slice that is not zero, which Security calls suspicious (`Universal::Universal`); and bytes past
-     the last slice.
+     What is odd about a universal file itself:
+
+     - a magic in the other byte order, which Security alone reads (`Universal::Universal`);
+     - one the kernel runs no slice of (`FAT_MAGIC_64`);
+     - a slice hidden past the table's count, which codesign finds and the kernel does not, and dyld finds when
+       the entry names arm64 with no subtype and the table counts fewer than 16 (`forEachSlice`,
+       `Architecture::operator==`);
+     - two slices of one architecture, which the kernel refuses (`fatfile_validate_fatarches`);
+     - slices that overlap;
+     - a slice not aligned as its entry declares;
+     - padding before a slice that is not zero, which Security calls suspicious (`Universal::Universal`);
+     - bytes past the last slice.
      */
     static func anomalies(universal file: File, _ table: Universal.Table) -> [String] {
         let (archs, is64) = (table.archs, table.is64)
         var found: [String] = []
+        // Security's `Universal` takes the magic in either byte order, and reads the table big-endian either way.
+        // The kernel, dyld and lipo take the big-endian magic alone.
+        if let magic = try? file.read(at: 0, count: 4), [[0xbe, 0xba, 0xfe, 0xca], [0xbf, 0xba, 0xfe, 0xca]].contains(Array(magic)) {
+            found.append("a universal file whose magic is byte-swapped, which codesign reads all the same: the kernel, dyld and lipo take it for no Mach-O")
+        }
         if is64 {
             found.append("a 64-bit universal file, which the kernel does not run and codesign signs as a generic file")
         }

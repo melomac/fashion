@@ -1623,6 +1623,25 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     A universal file whose magic is in the other byte order, its table big-endian as ever, is one to Security,
+     which takes the magic either way, and to nothing else: `codesign -dv` reads `/bin/ls` so changed, `lipo`
+     calls it no Mach-O, and the kernel and dyld take the big-endian magic alone. It is read here as Security
+     reads it, and named.
+     */
+    func testAUniversalMagicInTheOtherByteOrderIsNamed() throws {
+        let directory = try self.directory("swapped-magic")
+        var data = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
+        try XCTSkipUnless(Array(data.prefix(4)) == [0xca, 0xfe, 0xba, 0xbe], "/bin/ls is not universal")
+        data.replaceSubrange(0 ..< 4, with: [0xbe, 0xba, 0xfe, 0xca])
+        let file = directory / "ls"
+        try data.write(to: file)
+
+        XCTAssertTrue(try execute("/usr/bin/codesign", ["-dv", file.path]), "codesign reads it")
+        XCTAssertFalse(try execute("/usr/bin/lipo", ["-archs", file.path]), "lipo does not")
+        self.assertVerify(file.path, ["\(file.path): a universal file whose magic is byte-swapped, which codesign reads all the same: the kernel, dyld and lipo take it for no Mach-O"])
+    }
+
+    /**
      A CMS blob with no bytes does not decode, rather than trip over its missing address.
      */
     func testAnEmptyCMSBlobDoesNotDecode() {

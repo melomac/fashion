@@ -87,6 +87,7 @@ left out, with the reason.
 | A slice not aligned to its own page: 16 KiB for arm64, 4 KiB otherwise | dyld `isValidSlice` "slice is not page aligned" (`uses16KPages`) | killed (unsigned arm64) |
 | Padding between the table and slices, or between slices, not zero | Security `Universal::Universal` "non-zero gap byte", `mSuspicious` | `codesign -s -` refuses the file; the kernel does not look |
 | `FAT_MAGIC_64` | kernel `fatfile_validate_fatarches` `magic != FAT_MAGIC` → `LOAD_FAILURE`; Security treats it as a generic file | `errno 8 Exec format error` |
+| A universal magic in the other byte order, `be ba fe ca` on disk | Security `Universal::Universal` compares the magic as read with `FAT_MAGIC` and `FAT_CIGAM` alike and reads the table big-endian whichever it is: `codesign -dv` lists the slices; kernel `fatfile_validate_fatarches` and dyld take the big-endian magic alone, and `lipo -archs` says "not a mach-o" | |
 | A slice that is itself universal | kernel `parse_machfile` magic | `errno 8` |
 | More than 100 (Security) / 204 (dyld) slices; `fashion` stops at dyld's `kMaxSliceCount` 16: past it, a file whose entries hold is named with its count, neither hashed nor verified as slices, where a Java class (0xCAFEBABE too) says nothing | kernel `fatfile_validate_fatarches` reads as many entries as its page holds, 204 or 818, and runs one | |
 
