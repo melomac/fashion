@@ -856,10 +856,10 @@ final class VerifierTests: XCTestCase {
         // Encryption as the kernel's set_code_unprotect takes it: cryptid 1 and 0x10 name its crypters, any other it
         // refuses; a size of 0 it ignores; the range must lie inside one segment's file bytes, which one straddling
         // __TEXT's end does not.
-        func encryption(cryptoff: UInt32, cryptsize: UInt32, cryptid: UInt32) -> Data {
+        func encryption(cryptoff: UInt32, cryptsize: UInt32, cryptid: UInt32, in image: Data = program) -> Data {
             var command = Data()
             [UInt32(LC_ENCRYPTION_INFO_64), 24, cryptoff, cryptsize, cryptid, 0].forEach { command.appendUInt32($0) }
-            return self.appending(command, to: program)
+            return self.appending(command, to: image)
         }
         XCTAssertEqual(try self.verify(encryption(cryptoff: 0x1000, cryptsize: 0x1000, cryptid: 1), "encrypted", in: directory).lines, [": encrypted: cryptid 1 over 0x1000 bytes at 0x1000"])
         XCTAssertEqual(try self.verify(encryption(cryptoff: 0x1000, cryptsize: 0x1000, cryptid: 0x10), "null", in: directory).lines, [": encrypted: cryptid 0x10, the kernel's null crypter com.apple.null, over 0x1000 bytes at 0x1000"])
@@ -868,6 +868,14 @@ final class VerifierTests: XCTestCase {
         let text = try XCTUnwrap(XCTUnwrap(MachO(File(data: program))).findSegment("__TEXT")).load(segment_command_64.self)
         let straddling = UInt32(text.fileoff + text.filesize) - 0x1000
         XCTAssertEqual(try self.verify(encryption(cryptoff: straddling, cryptsize: 0x2000, cryptid: 1), "straddling", in: directory).lines, [": encrypted: cryptid 1 over 0x2000 bytes at \(straddling.hex), which no one segment's file bytes hold: the kernel refuses it"])
+        // A segment laid inside another: a range past the inner one's end lies in the outer one's bytes all the same,
+        // and one over the outer one's end in no one segment's.
+        let nested = try Data(contentsOf: self.crafted("nested", in: directory, size: 0x4000, segments: [("__TEXT", 0x1000, 0x3000, 0, 0x3000, 5), ("__INNER", 0x4000, 0x100, 0x1000, 0x100, 1), ("__DATA", 0x5000, 0x1000, 0x3000, 0x1000, 3)]))
+        func nestedEncryption(cryptoff: UInt32, cryptsize: UInt32) throws -> [String] {
+            try self.verify(encryption(cryptoff: cryptoff, cryptsize: cryptsize, cryptid: 1, in: nested), "nested-\(cryptoff.hex)", in: directory).lines.filter { $0.contains("encrypted") }
+        }
+        XCTAssertEqual(try nestedEncryption(cryptoff: 0x1800, cryptsize: 0x800), [": encrypted: cryptid 1 over 0x800 bytes at 0x1800"])
+        XCTAssertEqual(try nestedEncryption(cryptoff: 0x2800, cryptsize: 0x1000), [": encrypted: cryptid 1 over 0x1000 bytes at 0x2800, which no one segment's file bytes hold: the kernel refuses it"])
 
         var flags = program
         flags.store(program.load(UInt32.self, at: 24) & ~UInt32(MH_PIE) & ~UInt32(MH_TWOLEVEL) | UInt32(MH_ALLOW_STACK_EXECUTION), at: 24)
@@ -1448,7 +1456,8 @@ final class VerifierTests: XCTestCase {
     /**
      Segments laid over the same bytes, thousands of them with a section each as a crafted table lays them, have the
      bytes no section covers read once, not once per segment: a 4 MiB file under 4000 such segments would be 16 GiB
-     of reads. And a segment laid inside another names none of the outer one's content as lying between segments.
+     of reads. Gaps laid inside one another are each counted over the pieces they are read in, none walked once per
+     gap. And a segment laid inside another names none of the outer one's content as lying between segments.
      */
     func testPaddingIsReadOnceUnderSegmentsOverTheSameBytes() throws {
         let directory = try self.directory("padding-once")
@@ -1474,6 +1483,36 @@ final class VerifierTests: XCTestCase {
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(10), "every segment's padding read on its own")
         XCTAssertTrue(lines.contains("\(file.path): \((size - headerEnd - 1).hex) bytes of __S0 that no section covers are not zero, the first at \((headerEnd + 1).hex)"))
         XCTAssertTrue(lines.contains("\(file.path): \((size - headerEnd - 1).hex) bytes of __S\(count - 1) that no section covers are not zero, the first at \((headerEnd + 1).hex)"))
+
+        // Gaps laid inside one another: 64 segments over the same bytes, each with one section from 64 bytes further
+        // to the end, so each one's gap runs from the headers to its section, over every gap before it; a byte
+        // that is not zero where each section starts lies in the gap of every segment after it, and is counted
+        // there, the first of them the first.
+        let staggered = 64
+        let top = 32 + staggered * 152
+        var stairs = Data()
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_PRELOAD), UInt32(staggered), UInt32(staggered * 152), 0, 0].forEach { stairs.appendUInt32($0) }
+        for index in 0 ..< staggered {
+            let start = top + 64 * (index + 1)
+            stairs.appendUInt32(UInt32(LC_SEGMENT_64)); stairs.appendUInt32(152)
+            try stairs.append(XCTUnwrap("__G\(index)".data(using: .utf8)) + Data(count: 16 - "__G\(index)".utf8.count))
+            [UInt64(0x1_0000_0000), 0x10000, 0, 0x10000].forEach { stairs.appendUInt64($0) } // vmaddr, vmsize, fileoff, filesize
+            [UInt32(5), 5, 1, 0].forEach { stairs.appendUInt32($0) } // maxprot, initprot, nsects, flags
+            try stairs.append(XCTUnwrap("__text".data(using: .utf8)) + Data(count: 10) + XCTUnwrap("__G\(index)".data(using: .utf8)) + Data(count: 16 - "__G\(index)".utf8.count))
+            [UInt64(0x1_0000_0000) + UInt64(start), UInt64(0x10000 - start)].forEach { stairs.appendUInt64($0) } // addr, size
+            [UInt32(start), 0, 0, 0, 0x8000_0400, 0, 0, 0].forEach { stairs.appendUInt32($0) } // offset, align, reloff, nreloc, flags, reserved
+        }
+        stairs.append(Data(count: 0x10000 - stairs.count))
+        for index in 0 ..< staggered {
+            stairs[top + 64 * (index + 1)] = 0x43
+        }
+        let stairsFile = directory / "staggered"
+        try stairs.write(to: stairsFile)
+        let stairsLines = self.verify(stairsFile.path).lines
+        XCTAssertFalse(stairsLines.contains { $0.contains(" of __G0 that no section covers") }, "nothing but zeros before the first section")
+        for index in [1, 2, 31, 63] {
+            XCTAssertTrue(stairsLines.contains("\(stairsFile.path): \(index.hex) bytes of __G\(index) that no section covers are not zero, the first at \((top + 64).hex)"), "__G\(index)")
+        }
 
         // __INNER lies inside __TEXT's bytes: what follows it to __DATA is __TEXT's content, not bytes between them.
         let nested = try self.crafted("nested", in: directory, size: 0x4000, segments: [("__TEXT", 0x1000, 0x3000, 0, 0x3000, 5), ("__INNER", 0x4000, 0x100, 0x1000, 0x100, 1), ("__DATA", 0x5000, 0x1000, 0x3000, 0x1000, 3)])
@@ -1859,7 +1898,8 @@ final class VerifierTests: XCTestCase {
      The index as the kernel walks it, where Security stops at the first alternate missing: a code directory whose
      identifier offset is 0, or whose magic is not a directory's, which Security loads and the kernel refuses the
      signature for; a directory past a gap in the alternates, which Security never loads and the kernel counts, two
-     of one hash type then; and an entry at offset 0.
+     of one hash type then; an entry at offset 0; slot 0 entered three times, which the kernel counts as three; and
+     a directory shorter than the fields the kernel reads.
      */
     func testTheIndexAsTheKernelWalksItIsNamed() throws {
         let directory = try self.directory("index")
@@ -1890,6 +1930,12 @@ final class VerifierTests: XCTestCase {
             ": 2 code directories of hash type sha256 in the index, which the kernel refuses the signature for",
         ])
         XCTAssertEqual(try self.verify(embedded([(0, sha256), (2, requirements), (0x1000, nil)]), "zero", in: directory).lines, [": the code directory the index places at slot 0x1000 at offset 0, the superblob's own header, which the kernel refuses the signature for"])
+        // Slot 0 three times over: Security reads the first, the kernel counts three of one hash type, said once.
+        XCTAssertEqual(try self.verify(embedded([(0, sha256), (0, sha256), (0, sha256), (2, requirements)]), "thrice", in: directory).lines, [": 3 code directories of hash type sha256 in the index, which the kernel refuses the signature for"])
+        // A directory shorter than the fields the kernel reads, by the length it declares.
+        var short = Data(sha256.prefix(0x40))
+        short.store(UInt32(0x40).bigEndian, at: 4)
+        XCTAssertEqual(try self.verify(embedded([(0, sha256), (2, requirements), (0x1001, short)]), "short", in: directory).lines, [": the code directory the index places at slot 0x1001 is one the kernel refuses the signature for: it is 0x40 bytes, shorter than the 0x70 the kernel reads"])
     }
 
     /**

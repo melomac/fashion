@@ -1218,12 +1218,6 @@ struct MachOVerifier {
         let end: UInt64
     }
 
-    /// A piece of the gaps read once: where it ends, and what of it is not zero.
-    private struct ReadPiece {
-        let end: Int
-        let nonZero: File.NonZero?
-    }
-
     // MARK: - Padding
 
     /**
@@ -1257,6 +1251,7 @@ struct MachOVerifier {
             }
             uncovered.append(Uncovered(name: segment.name, gaps: gaps))
         }
+
         var between: [Between] = []
         var furthest: Furthest?
         for segment in self.segments.filter({ $0.filesize > 0 }).sorted(by: { $0.fileoff < $1.fileoff }) {
@@ -1268,20 +1263,54 @@ struct MachOVerifier {
             }
         }
 
-        // Every gap is a run of pieces cut at every gap's bounds, each piece read once, by where it starts.
-        let read = Dictionary(uniqueKeysWithValues: Self.pieces(of: uncovered.flatMap(\.gaps) + between.map(\.gap)).map { ($0.lowerBound, ReadPiece(end: $0.upperBound, nonZero: self.nonZero(in: [$0]))) })
+        // The gaps may lie over one another: a crafted table lays thousands of them over the same bytes, each to
+        // the file's end. So they are cut into pieces at every gap's bounds, and each piece is read once. Sums
+        // kept ahead over the pieces then answer a gap by one subtraction, with no walk over its pieces:
+        //
+        //   pieces   |  p0  |  p1  |  p2  |  p3  |
+        //   gap A    |-------------|                  counts[2] - counts[0]
+        //   gap B           |--------------------|    counts[4] - counts[1]
+        let pieces = Self.pieces(of: uncovered.flatMap(\.gaps) + between.map(\.gap))
+        let read = pieces.map { self.nonZero(in: [$0]) }
+
+        // counts[i]: the bytes not zero in the pieces before piece i. The last entry counts them all.
+        var counts = [0]
+        for nonZero in read {
+            counts.append(counts[counts.count - 1] + (nonZero?.count ?? 0))
+        }
+
+        // next[i]: the first piece from i on that holds a byte not zero, the count of pieces when none does.
+        var next = [Int](repeating: pieces.count, count: pieces.count + 1)
+        for index in pieces.indices.reversed() {
+            next[index] = read[index] == nil ? next[index + 1] : index
+        }
+
+        /// The first piece that starts at `bound` or after it, the count of pieces when none does.
+        func piece(at bound: Int) -> Int {
+            var (low, high) = (0, pieces.count)
+            while low < high {
+                let middle = (low + high) / 2
+                if pieces[middle].lowerBound < bound {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+            return low
+        }
+
         /// What of `gaps` is not zero, by the pieces read: how many bytes, and the first.
         func nonZero(in gaps: [Range<Int>]) -> File.NonZero? {
             var count = 0
             var first = Int.max
             for gap in gaps {
-                var at = gap.lowerBound
-                while at < gap.upperBound, let piece = read[at] {
-                    if let nonZero = piece.nonZero {
-                        count += nonZero.count
-                        first = min(first, nonZero.first)
-                    }
-                    at = piece.end
+                let (from, to) = (piece(at: gap.lowerBound), piece(at: gap.upperBound))
+                guard from < to else {
+                    continue
+                }
+                count += counts[to] - counts[from]
+                if next[from] < to, let nonZero = read[next[from]] {
+                    first = min(first, nonZero.first)
                 }
             }
             return count > 0 ? File.NonZero(count: count, first: first) : nil
@@ -1538,18 +1567,25 @@ struct MachOVerifier {
             guard slot == 0 || (0x1000 ... 0x1004).contains(slot) else {
                 continue
             }
-            let name = "the code directory the index places at slot \(slot.hex)"
+            var name: String {
+                "the code directory the index places at slot \(slot.hex)"
+            }
             guard offset != 0 else {
                 found.append("\(name) at offset 0, the superblob's own header, which the kernel refuses the signature for")
                 continue
             }
-            // The index was checked as `signingData` checks it: the blob lies inside, header included.
-            let blob = Data(superblob.bytes(in: offset ..< offset + Int(Self.bigEndian(superblob, at: offset + 4))))
-            if let refusal = Self.kernelRefusal(of: blob) {
+
+            // The index was checked as `signingData` checks it: the blob lies inside, header included. The fields
+            // the kernel checks lie in the blob's first 0x70 bytes, so those alone are copied out: an index may
+            // name one directory of megabytes thousands of times.
+            let length = Int(Self.bigEndian(superblob, at: offset + 4))
+            let head = Data(superblob.bytes(in: offset ..< offset + min(length, 0x70)))
+            if let refusal = Self.kernelRefusal(of: head, length: length) {
                 found.append("\(name) is one the kernel refuses the signature for: \(refusal)")
                 continue
             }
-            hashTypes[blob[37], default: 0] += 1
+
+            hashTypes[head[37], default: 0] += 1
             if !loaded.contains(slot) {
                 found.append("\(name) lies past a gap in the alternates: Security never loads it, the kernel validates it and may read the signature by it")
             }
@@ -1563,10 +1599,9 @@ struct MachOVerifier {
         return found
     }
 
-    /// Why the kernel's `cs_validate_codedirectory` refuses `blob`, a code directory from its start, among the checks
-    /// Security does not make; nil when it passes them.
-    private static func kernelRefusal(of blob: Data) -> String? {
-        let length = blob.count
+    /// Why the kernel's `cs_validate_codedirectory` refuses a code directory of `length` bytes, among the checks
+    /// Security does not make; nil when it passes them. `blob` is its first 0x70 bytes, or all of a shorter one.
+    private static func kernelRefusal(of blob: Data, length: Int) -> String? {
         guard length >= 0x70 else {
             return "it is \(length.hex) bytes, shorter than the 0x70 the kernel reads"
         }
