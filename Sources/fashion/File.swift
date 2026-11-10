@@ -168,6 +168,13 @@ final class File {
         (error as? Errno)?.description ?? error.localizedDescription
     }
 
+    /// Whether `error` is the file failing to be read, or changing under the read, the file or a slice of a universal
+    /// one: the file's failure, not the edit's or the parse's, which the bytes would meet the same way.
+    static func isReadError(_ error: Error) -> Bool {
+        let error = (error as? SliceError)?.error ?? error
+        return error is Errno || error is FileError
+    }
+
     // MARK: - Private
 
     /**

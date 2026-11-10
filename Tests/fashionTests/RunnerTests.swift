@@ -166,6 +166,63 @@ final class RunnerTests: XCTestCase {
     }
 
     /**
+     A universal file with one slice that does not parse has its other slices' cdhashes read all the same, as
+     codesign reads each slice by itself. The slice at fault is reported once, after its architecture, and left
+     out, and the run succeeds: a slice no loader picks must not keep every cdhash unread.
+
+     The same under --exact and --unsign, where the editor refuses the file for the same fault: one fault is
+     reported once. Under --symhash the slice is reported once too, and left out. With --unsign beside --symhash,
+     the file is first said to be hashed as it is: its symbols are those of its slices as they are.
+     */
+    func testASliceThatDoesNotParseLeavesTheOthersTheirCDHashes() throws {
+        let ls = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
+        guard case let .fat(table) = try Universal.open(data: ls), table.count >= 2 else {
+            throw XCTSkip("/bin/ls is not universal")
+        }
+        let named = Universal.named(table.archs)
+        var data = ls
+        data.store(UInt32(0x7fff_ffff), at: named[1].arch.offset + 20) // sizeofcmds, past the slice
+        let bad = try self.write(data, name: "ls-bad-slice")
+        defer {
+            try? FileManager.default.removeItem(at: bad)
+        }
+        let others = try CDHash.hash(path: "/bin/ls").filter { $0.arch != named[1].name }.map(\.hash)
+        XCTAssertFalse(others.isEmpty)
+        let fault = "fashion: \(bad.path) (\(named[1].name)): Invalid Mach-O: sizeofcmds 2147483647 does not hold a load-command table in the \(named[1].arch.length)-byte slice"
+
+        for flags in [[], ["--exact"], ["--unsign"]] {
+            let (status, errors) = try runFashion(["--algo", "cdhash"] + flags + [bad.path])
+            XCTAssertEqual(status, 0, "\(flags)")
+            XCTAssertEqual(errors, [fault + ", left out"], "\(flags)")
+            let lines = try Digester(Hasher.parse([bad.path, "--algo", "cdhash", "--quiet"] + flags)).lines(for: bad.path, reporter: Reporter(console: Console()))
+            XCTAssertEqual(lines.filter { !$0.diagnostic }.map(\.text), others, "\(flags)")
+        }
+        // With no word to hand a refusal to, it is thrown after its architecture.
+        XCTAssertThrowsError(try CDHash.hash(path: bad.path)) { error in
+            XCTAssertEqual((error as? SliceError)?.arch, named[1].name)
+        }
+
+        for (flags, said) in [(["--symhash"], [fault + ", left out"]), (["--symhash", "--unsign"], [fault + ", the file hashed as it is", fault + ", left out"])] {
+            let (status, errors) = try runFashion(flags + [bad.path])
+            XCTAssertEqual(status, 0, "\(flags)")
+            XCTAssertEqual(errors, said, "\(flags)")
+        }
+    }
+
+    /**
+     Two slices of one architecture, which the kernel refuses, are told apart in cdhash mode as in every other: the
+     second is numbered, `x86_64_2`.
+     */
+    func testCDHashModeNumbersTheSecondSliceOfAnArchitecture() throws {
+        let ls = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
+        guard case let .fat(table) = try Universal.open(data: ls), let first = table.first else {
+            throw XCTSkip("/bin/ls is not universal")
+        }
+        let slice = (cpuType: first.cpuType, cpuSubtype: first.cpuSubtype, data: Universal.sliceData(fileData: ls, arch: first), align: 14)
+        XCTAssertEqual(try CDHash.hash(fixture: makeUniversal([slice, slice])).map(\.arch), [first.name, first.name + "_2"])
+    }
+
+    /**
      --exact ends a slice where it lies in the universal file: with 100 bytes appended inside the slice, the file
      still hashes whole, then the slice as the table places it, then without them, the state thinr --exact writes.
      */

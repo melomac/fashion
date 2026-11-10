@@ -1195,13 +1195,6 @@ struct Digester {
         error is UnpackError || (error as? SliceError)?.error is UnpackError
     }
 
-    /// Whether `error` is the file failing to be read, or changing under the read, the file or a slice of a universal
-    /// one: the file's failure, not the edit's or the parse's, which the bytes would meet the same way.
-    private static func isReadError(_ error: Error) -> Bool {
-        let error = (error as? SliceError)?.error ?? error
-        return error is Errno || error is FileError
-    }
-
     // MARK: - Digests
 
     /**
@@ -1220,6 +1213,8 @@ struct Digester {
         // Whether what was refused is a slice of a universal file, which keeps its slices as the table places them,
         // where a thin file refused parses no better a second time and is not opened again.
         var refusedSlice = false
+        // What the editor refused in cdhash mode, held until the cdhashes are read.
+        var unedited: Error?
         // What becomes of a file that is refused, in the mode's words.
         let fate = switch self.mode {
         case .symhash: "no symhash as it is"
@@ -1239,14 +1234,22 @@ struct Digester {
                 // with --unsign, its signatures out. unpack writes what decompressed under --keep.
                 subject.warn(error, fate: "hashed packed")
                 return self.unsign || self.exact ? try edit(unsign: self.unsign, unpack: false) : nil
-            } catch where Self.isReadError(error) {
+            } catch where File.isReadError(error) {
                 // The file could not be read, or changed under the read: the file's failure, reported once, where the
                 // bytes would fail the same way.
                 throw error
             } catch {
                 refused = true
                 refusedSlice = error is SliceError
-                subject.warn(error, fate: fate)
+                // cdhash mode reads the image itself next and reports what it finds there. The editor's refusal
+                // is held until then, and reported only if cdhash mode does not report the same fault.
+                if case .cdhash = self.mode {
+                    unedited = error
+                } else {
+                    // A universal file whose slice is refused is hashed as it is, its other slices' symbols read,
+                    // where a thin file has no symhash.
+                    subject.warn(error, fate: refusedSlice ? "hashed as it is" : fate)
+                }
                 return nil
             }
         }
@@ -1320,17 +1323,34 @@ struct Digester {
         case let .xarToc(hashes, decompress):
             return try XARParser.hashToc(file, algorithms: hashes, decompress: decompress, caveat: { subject.inform($0) }).map { DigestResult(digest: $0.digest, algorithm: $0.hash.algorithm) }
         case .cdhash:
-            return try self.cdHashDigests(file, subject: subject)
+            return try self.cdHashDigests(file, subject: subject, unedited: unedited)
         }
     }
 
     /**
      One digest per code directory of each slice, --exact trimming an unsigned slice to its logical extent before
      synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is labeled INVALID, and warned about
-     once, however many of its directories fail.
+     once, however many of its directories fail. A slice of a universal file that does not parse is reported after
+     its architecture and left out.
+
+     `unedited` is what the editor refused before. It is reported here unless a slice is left out, or the file
+     refused, for that very fault: one fault is reported once.
      */
-    private func cdHashDigests(_ file: File, subject: Reporter.Subject) throws -> [DigestResult] {
-        let results = try CDHash.hash(file, path: subject.path, exact: self.exact)
+    private func cdHashDigests(_ file: File, subject: Reporter.Subject, unedited: Error?) throws -> [DigestResult] {
+        var refusals: [SliceError] = []
+        let results = try CDHash.hash(file, path: subject.path, exact: self.exact, refused: { refusals.append($0) })
+
+        // The editor's refusal, unless a slice is left out below for the same fault: the file is hashed as it is.
+        if let unedited, !refusals.contains(where: { $0.arch == (unedited as? SliceError)?.arch && File.message(for: $0) == File.message(for: unedited) }) {
+            subject.warn(unedited, fate: "hashed as it is")
+        }
+
+        // A slice at fault is reported and left out, and the others are hashed: hash mode hashes every file, and
+        // a slice no loader picks must not keep the others' cdhashes from being read.
+        for refusal in refusals {
+            subject.warn("\(File.message(for: refusal)), left out", arch: refusal.arch)
+        }
+
         var warned: Set<String> = []
         for result in results where result.invalid && warned.insert(result.arch ?? "").inserted {
             // Three cases: Security rejects the signature, so the slice is hashed as unsigned; its code or
@@ -1456,11 +1476,15 @@ struct Digester {
         let universal: Universal
         do {
             universal = try Universal.open(file)
-        } catch where Self.isReadError(error) {
+        } catch where File.isReadError(error) {
             throw error
         } catch {
             subject.warn(error, fate: fate)
             return nil
+        }
+        // Under --symhash such a slice has no symbols to hash: it is reported once, where it is left out.
+        if case .symhash = self.mode {
+            return universal
         }
         if case let .fat(table) = universal {
             for slice in Universal.named(table.archs) {

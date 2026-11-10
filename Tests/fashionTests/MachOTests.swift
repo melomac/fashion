@@ -370,8 +370,10 @@ final class MachOTests: XCTestCase {
         XCTAssertNoThrow(try Universal.open(data: data))
 
         let expected = ParserError.invalidLoadCommandTable(size: 16, fileSize: slice.count)
+        // cdhash mode's reader throws it after the slice's architecture, with no one to hand it to.
         XCTAssertThrowsError(try CDHash.hash(fixture: data)) { error in
-            XCTAssertEqual(error as? ParserError, expected)
+            XCTAssertEqual((error as? SliceError)?.arch, "arm64")
+            XCTAssertEqual((error as? SliceError)?.error as? ParserError, expected)
         }
         XCTAssertThrowsError(try SymHash.compute(File(data: data), algorithm: .md5, separator: ",", sortSymbols: true)) { error in
             XCTAssertEqual(error as? ParserError, expected)

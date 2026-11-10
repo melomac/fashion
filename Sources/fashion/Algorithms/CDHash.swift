@@ -90,18 +90,36 @@ enum CDHash {
 
      Each embedded code directory is checked against the code it signs, which reads the slice once, no further than the
      first slot that fails.
+
+     Each slice of a universal file is hashed on its own, as codesign reads one architecture at a time (`-a`). A
+     slice that does not parse, or whose signature Security cannot read, is passed to `refused` as a `SliceError`
+     naming its architecture, and left out. The other slices are still hashed, so a slice no loader picks cannot
+     keep their cdhashes from being read. Without `refused`, the `SliceError` is thrown.
      */
-    static func hash(_ file: File, path: String, exact: Bool = false) throws -> [SliceResult] {
+    static func hash(_ file: File, path: String, exact: Bool = false, refused: ((SliceError) -> Void)? = nil) throws -> [SliceResult] {
         switch try Universal.open(file) {
         case let .fat(table):
-            try table.flatMap { arch -> [SliceResult] in
-                let name = arch.name
-                // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has no code directory.
-                guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
-                    self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")
+            // Slices are named as everywhere else: the second of one architecture is numbered.
+            try Universal.named(table.archs).flatMap { named -> [SliceResult] in
+                let (arch, name) = (named.arch, named.name)
+                do {
+                    // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has
+                    // no code directory.
+                    guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
+                        self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")
+                        return []
+                    }
+                    return try self.results(for: image, arch: name, path: path, exact: exact)
+                } catch {
+                    // A fault in the slice's own bytes goes to `refused`, and the slice is left out. A file that
+                    // cannot be read fails as a whole: that is thrown.
+                    let failure = SliceError(arch: name, error: error)
+                    guard let refused, !File.isReadError(error) else {
+                        throw failure
+                    }
+                    refused(failure)
                     return []
                 }
-                return try self.results(for: image, arch: name, path: path, exact: exact)
             }
         case let .thin(image):
             try self.results(for: image, arch: nil, path: path, exact: exact)
