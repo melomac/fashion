@@ -433,8 +433,8 @@ extension MachO {
      False when a byte of code changed since signing, which `codesign --verify` reports as "code or signature have
      been modified", or when the slice ends before the code limit. The slice streams once for all the directories,
      each page through each directory's hasher as it arrives, however large the pages, and no further than the last
-     slot still to check. A scattered directory, whose slots map to the pages its scatter vector places, is not
-     checked, and sets no geometry.
+     slot still to check. A scattered directory's slots are checked in order like any other's: Security reads no
+     scatter vector here.
      */
     func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [Verdict] {
         guard let geometry = Self.geometry(of: directories) else {
@@ -703,9 +703,24 @@ struct EmbeddedCodeDirectory {
     let hashOffset: Int
     /// The bytes of code the code slots cover, from the start of the slice.
     let codeLimit: UInt64
-    /// The bytes of code each code slot covers, the last one fewer: all of them when the directory is not paged.
+    /**
+     The bytes of code each code slot covers when Security checks the slots (`validateExecutable`), the last one
+     fewer. The code limit itself when the directory is not paged.
+
+     Security computes `1 << pageSize` on an `int`: the shift counts modulo 32 on the hardware it runs on, and the
+     result is widened with its sign.
+
+     ```
+     exponent   1 << (exponent & 31)    pages of
+     --------   ---------------------   ------------------------------------------
+     12         0x1000                  4 KiB
+     31, 63     0x80000000, negative    0xffffffff80000000 bytes: past any code limit
+     32         1                       1 byte
+     44         0x1000                  4 KiB
+     ```
+     */
     let pageSize: UInt64
-    /// Whether a scatter vector places the pages its code slots cover.
+    /// Whether the directory holds a scatter vector, which Security does not read: it checks the slots in order.
     let scattered: Bool
     /// The directory's flags: `CS_ADHOC` among them.
     let flags: UInt32
@@ -832,8 +847,9 @@ struct EmbeddedCodeDirectory {
             }
         }
 
-        // One code slot per page of the code limit, or a single slot when the directory is not paged. A shift counts
-        // modulo 64, as on the hardware Security runs on.
+        // One code slot per page of the code limit, or a single slot when the directory is not paged. Here Security
+        // shifts a 64-bit limit, which counts modulo 64 on the hardware it runs on. The shift that sizes the pages
+        // it checks is of an `int`, and counts modulo 32 (see `pageSize`).
         let codeLimit64 = version >= 0x20300 ? blob.bigEndianUInt64(at: 56) : 0
         let codeLimit = codeLimit64 != 0 ? codeLimit64 : UInt64(blob.bigEndianUInt32(at: 32))
         let codeSlots: UInt64? = if pageSizeLog != 0 {
@@ -849,7 +865,7 @@ struct EmbeddedCodeDirectory {
         self.hashType = hashType
         self.hashOffset = hashOffset
         self.codeLimit = codeLimit
-        self.pageSize = pageSizeLog != 0 ? 1 &<< UInt64(pageSizeLog) : codeLimit
+        self.pageSize = pageSizeLog != 0 ? UInt64(bitPattern: Int64(Int32(bitPattern: 1 << UInt32(pageSizeLog & 31)))) : codeLimit
         self.scattered = scatterOffset != 0
         self.flags = blob.bigEndianUInt32(at: 12)
         self.nSpecialSlots = nSpecialSlots
@@ -882,8 +898,11 @@ struct EmbeddedCodeDirectory {
 /**
  One code directory's slots checked as the code streams by: each page hashed as its bytes arrive, the last one shorter,
  against its slot, until one fails or the code limit is reached, the pages cut as the `geometry` directory lays them,
- which Security takes for every directory. A directory with fewer slots than pages fails at the first it lacks. A
- geometry the slice cannot hold fails every directory outright; a scattered one is taken as it is.
+ which Security takes for every directory. A directory with fewer slots than pages fails at the first it lacks.
+ So does a directory whose exponent is 32 or more, when the pages cut are smaller than its code: its slots are
+ counted by the exponent as written, its pages cut by the exponent modulo 32 (`EmbeddedCodeDirectory.pageSize`).
+ A geometry the slice cannot hold fails every directory outright. A scatter vector is not read, as Security reads
+ none here: the slots are checked in order.
  */
 private struct SlotValidator {
     /// Thrown through the stream once no slot is left to check.
@@ -907,7 +926,7 @@ private struct SlotValidator {
         self.directory = directory
         self.hasher = directory.hashType.hasher()
         self.valid = valid
-        self.limit = valid && !geometry.scattered ? Int(geometry.codeLimit) : 0
+        self.limit = valid ? Int(geometry.codeLimit) : 0
         self.pageSize = valid ? Int(min(geometry.pageSize, geometry.codeLimit)) : 0
     }
 

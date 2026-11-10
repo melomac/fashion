@@ -1967,7 +1967,7 @@ final class VerifierTests: XCTestCase {
             ("missing", [(0, cd), (2, requirements)], [": \(type) seals the entitlements blob, which the signature does not hold", ": \(type) seals the DER entitlements blob, which the signature does not hold"]),
             ("undecodable", [(0, cd), (2, requirements), (5, entitlements), (7, undecodable)], [": the DER entitlements blob does not hash to its slot in \(type)", ": DER entitlements holding no element to read, which AMFI refuses the code for"]),
             ("past", [(0, reshaped(codeLimit: program.count + 0x100)), (2, requirements), (5, entitlements), (7, der)], [": \(type) covers \((program.count + 0x100).hex) bytes, past the image's \(program.count.hex)"] + baseline),
-            ("scattered", [(0, scattered), (2, requirements), (5, entitlements), (7, der)], [": \(type) is scattered, which is not checked here"] + baseline),
+            ("scattered", [(0, scattered), (2, requirements), (5, entitlements), (7, der)], [": \(type) is scattered, which Security does not read: its slots are checked in order"] + baseline),
             ("pagesize", [(0, reshaped(codeLimit: Int(cd.load(UInt32.self, at: 32).bigEndian), pageSizeLog: 13)), (2, requirements), (5, entitlements), (7, der)], [": page 0 of the code does not hash to \(type)", ": \(type)'s page size, 2^13, is neither the 4 KiB nor the 16 KiB the kernel takes"] + baseline),
         ] as [(String, [(slot: UInt32, blob: Data?)], [String])] {
             XCTAssertEqual(try self.verify(embedded(blobs), name, in: directory).lines, expected, name)
@@ -1985,6 +1985,9 @@ final class VerifierTests: XCTestCase {
      - the top directory's blob, slot 4, must lie under a wrapper, sealed or not;
      - the signature slot's must too, behind a directory flagged ad hoc as behind any;
      - the code limit must be the signature's offset, not past it;
+     - the pages are cut by an `int` shifted by the directory's exponent, which counts modulo 32: one slot over
+       all the code holds under an exponent of 31 or 63, pages past any limit, and not under 44, pages of 4 KiB;
+     - a scatter vector is not read: the slots are checked in order, sound or changed;
      - an alternate's own seals are never read: a wrong one beside a sound best directory is no INVALID, and a
        wrong one in the best is, on every line.
      */
@@ -2044,7 +2047,36 @@ final class VerifierTests: XCTestCase {
         let head = Self.superblob([(0, further), (2, requirements), (0x10000, wrapper)]).prefix(36)
         further.replaceSubrange(last ..< last + 32, with: Data(SHA256.hash(data: program[page ..< signature.offset] + head)))
 
+        let hashOffset = Int(UInt32(bigEndian: sha256.load(UInt32.self, at: 16)))
+        /// `sha256` paged by 2^`exponent`, with the one slot that many bytes a page asks for, over all the code.
+        func paged(_ exponent: UInt8) -> Data {
+            var directory = Data(sha256.prefix(hashOffset + 32))
+            directory[39] = exponent
+            directory.store(UInt32(1).bigEndian, at: 28)
+            directory.store(UInt32(directory.count).bigEndian, at: 4)
+            directory.replaceSubrange(hashOffset ..< hashOffset + 32, with: Data(SHA256.hash(data: program[..<signature.offset])))
+            return directory
+        }
+
+        /// `directory` with a scatter vector at its end, one run of its pages from the start, then the zero entry.
+        func scattered(_ directory: Data) -> Data {
+            var scattered = directory
+            scattered.store(UInt32(directory.count).bigEndian, at: 44)
+            scattered.appendUInt32BE(UInt32(slots)); scattered.appendUInt32BE(0); scattered.appendUInt64(0); scattered.appendUInt64(0)
+            scattered.append(Data(count: 24))
+            scattered.store(UInt32(scattered.count).bigEndian, at: 4)
+            return scattered
+        }
+
+        var changed = sha256
+        changed[hashOffset + 32] ^= 0xff
+
         var cases: [(name: String, file: Data, invalid: Bool)] = [
+            ("page-44", embedded([(0, paged(44)), (2, requirements), (0x10000, wrapper)]), true),
+            ("page-31", embedded([(0, paged(31)), (2, requirements), (0x10000, wrapper)]), false),
+            ("page-63", embedded([(0, paged(63)), (2, requirements), (0x10000, wrapper)]), false),
+            ("scattered", embedded([(0, scattered(sha256)), (2, requirements), (0x10000, wrapper)]), false),
+            ("scattered-changed", embedded([(0, scattered(changed)), (2, requirements), (0x10000, wrapper)]), true),
             ("sound", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]), false),
             ("constraint", embedded([(0, sealing(sha256, [8: constraint])), (2, requirements), (8, constraint), (0x10000, wrapper)]), false),
             ("constraint-changed", embedded([(0, sealing(sha256, [8: blob(0xfade_8181, "another")])), (2, requirements), (8, constraint), (0x10000, wrapper)]), true),

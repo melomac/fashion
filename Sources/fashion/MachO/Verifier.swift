@@ -1367,7 +1367,7 @@ struct MachOVerifier {
      The signature as Security verifies it and the kernel takes it: an arm64 image without one, which the kernel does
      not run; a signature Security loads no code directory from; for each directory, the first page of code that does
      not hash to it (`validateExecutable`), a code limit short of the signature's offset, which leaves the pages before
-     it unsigned (the kernel's `csb_end_offset`), or past it, a scatter vector, which is not checked here, a page size
+     it unsigned (the kernel's `csb_end_offset`), or past it, a scatter vector, which Security does not read, a page size
      the kernel refuses; no CMS blob behind a directory not flagged ad hoc; a special slot that does not seal the blob
      it should, `__TEXT,__info_plist`, the requirements, the entitlements and their DER form, which the kernel checks
      for the last two and Security for all; entitlements that opt out of hardening; and who signed, as `Signer` has
@@ -1420,7 +1420,7 @@ struct MachOVerifier {
                 found.append("\(type) covers \(directory.codeLimit.hex) bytes, past the signature at \(signature.offset.hex)")
             }
             if directory.scattered {
-                found.append("\(type) is scattered, which is not checked here")
+                found.append("\(type) is scattered, which Security does not read: its slots are checked in order")
             }
             if ![12, 14].contains(directory.pageSizeLog) {
                 found.append("\(type)'s page size, 2^\(directory.pageSizeLog), is neither the 4 KiB nor the 16 KiB the kernel takes")
