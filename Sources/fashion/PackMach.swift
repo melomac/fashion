@@ -9,7 +9,8 @@ enum UnpackError: MalformedInput, Equatable {
     /// Packed data that decompressed to its end and whose image's headers do not parse, in UPX's words as much; what
     /// decompressed, `thinr` and `unpack` write as it is under --keep, which the editor's `keep` gets.
     case unverified(String)
-    /// An image larger than this tool unpacks in memory, which UPX, bounding each block and not the image, would.
+    /// An image too large to unpack in memory. UPX would unpack it: it bounds each block, not the image. `limit`
+    /// is what is left of `PackMach.maxSize`, which the images of one file share.
     case imageTooLarge(size: Int, limit: Int)
 }
 
@@ -19,7 +20,9 @@ extension UnpackError: LocalizedError {
         case let .cantUnpack(reason), let .unverified(reason):
             "Invalid UPX data: \(reason)"
         case let .imageTooLarge(size, limit):
-            "Mach-O too large: the image UPX packed would be \(size) bytes, more than the \(limit) this tool unpacks in memory"
+            limit < PackMach.maxSize
+                ? "Mach-O too large: the image UPX packed would be \(size) bytes, more than the \(limit) left of the \(PackMach.maxSize) this tool unpacks of one file in memory"
+                : "Mach-O too large: the image UPX packed would be \(size) bytes, more than the \(limit) this tool unpacks in memory"
         }
     }
 }
@@ -227,9 +230,10 @@ struct PackMach {
 
     /// The most load commands UPX takes (`MAX_N_CMDS`).
     private static let maxCommands = 256
-    /// The largest file UPX packs (`UPX_RSIZE_MAX`), which bounds each block it unpacks and not the image; the image
-    /// is made in memory here, so it bounds the image too, a limit of this tool's.
-    private static let maxSize = 768 << 20
+    /// The largest file UPX packs (`UPX_RSIZE_MAX`). UPX bounds each block it unpacks by it, not the image. Here the
+    /// image is made in memory, so it bounds the image too, and the images of one universal file together, which
+    /// are held in memory at once (`MachOEditor.edit`).
+    static let maxSize = 768 << 20
     /// How many blocks the notes name one by one, where a crafted stream holds millions: the rest are counted.
     private static let notedBlocks = 16
 
@@ -470,7 +474,8 @@ struct PackMach {
     /**
      The image UPX packed, as `unpack` writes it: its Mach-O headers come first, then each segment from its offset, in
      the order of their offsets, then what lies between them and after the last up to the original size; a dylib's
-     segments but the first are copied as they are. Throws for packed data that does not hold.
+     segments but the first are copied as they are. Throws for packed data that does not hold, and for an image
+     larger than `limit`: what is left of `maxSize` for the file this image is part of.
 
      With it come a caveat when a modified UPX packed the image (the marker it bears in place of "UPX!", its XOR
      key, or both) and `notes` for the log, on how it was packed and where its parts lie (`Unpacked`).
@@ -510,8 +515,8 @@ struct PackMach {
 
      `decompressed` is set only when a key was found: the image as it unpacks without the key, for --keep to write.
      */
-    func unpack() throws -> Unpacked {
-        let plain = try self.unpack(key: [])
+    func unpack(limit: Int = PackMach.maxSize) throws -> Unpacked {
+        let plain = try self.unpack(key: [], limit: limit)
         var sums: [String] = []
         if plain.cAdler != self.cAdler {
             sums.append("the packed bytes sum to \(plain.cAdler.hex), the pack header says \(self.cAdler.hex)")
@@ -540,7 +545,7 @@ struct PackMach {
         // Each candidate is tried: the image decoded again under it. It is the key when the image then matches
         // `u_adler`. The image as it unpacks without the key goes with it, for --keep.
         for key in plain.pass.sample.keys {
-            var keyed = try self.unpack(key: key)
+            var keyed = try self.unpack(key: key, limit: limit)
             if keyed.adler == self.uAdler {
                 keyed.decompressed = plain.data
                 return finished(keyed, xor: key)
@@ -655,7 +660,7 @@ struct PackMach {
      by block as the packer sums them; whether a block was unfiltered; the methods and filters of the blocks; and,
      without a `key`, the candidates for one (`KeySample`).
      */
-    private func unpack(key: [UInt8]) throws -> Unpacked {
+    private func unpack(key: [UInt8], limit: Int) throws -> Unpacked {
         let pInfo = try self.read(at: self.overlayOffset, count: 12)
         let progid = self.image.word(pInfo, at: 0)
         let fileSize = Int(self.image.word(pInfo, at: 4))
@@ -663,8 +668,8 @@ struct PackMach {
         guard blocksize <= fileSize else {
             throw UnpackError.cantUnpack("file header corrupted")
         }
-        guard fileSize <= Self.maxSize else {
-            throw UnpackError.imageTooLarge(size: fileSize, limit: Self.maxSize)
+        guard fileSize <= limit else {
+            throw UnpackError.imageTooLarge(size: fileSize, limit: limit)
         }
 
         // The first block, the image's Mach-O headers, read ahead for its load commands: a block of the first segment,
@@ -724,7 +729,7 @@ struct PackMach {
         }
 
         if self.image.filetype == MH_DYLIB {
-            try self.copyDylibSegments(commands, into: &output, pass: &pass)
+            try self.copyDylibSegments(commands, into: &output, limit: limit, pass: &pass)
         } else {
             for (index, segment) in segments.enumerated() where segment.filesize != 0 {
                 let gap = Self.gap(after: index, in: segments, end: fileSize)
@@ -835,7 +840,7 @@ struct PackMach {
 
     /**
      The candidates for the key a modified UPX XORed the filtered blocks with, sampled from the blocks as they
-     decompress (see `unpack()`):
+     decompress (see `unpack(limit:)`):
 
      - the lead: the shortest stretch of the first filtered block's start that repeats. What repeats there is the
        zero padding after the load commands, XORed, so the stretch is the key: one byte, or several.
@@ -1060,7 +1065,7 @@ struct PackMach {
      where the original headers place them, the image grown to hold one placed past its end, as UPX's output file
      grows, the pointer in `__mod_init_func`, which UPX points at its loader, restored.
      */
-    private func copyDylibSegments(_ commands: [Command], into output: inout Data, pass: inout Pass) throws {
+    private func copyDylibSegments(_ commands: [Command], into output: inout Data, limit: Int, pass: inout Pass) throws {
         // UPX compares the two headers' ncmds, the packed file's and the original's.
         let packed = self.image.loadCommands.prefix(self.image.ncmds)
         guard self.image.ncmds == commands.count else {
@@ -1087,8 +1092,8 @@ struct PackMach {
                 data.replaceSubrange(data.startIndex + at ..< data.startIndex + at + 4, with: original)
             }
             let end = sc.fileoff.addingReportingOverflow(rc.filesize)
-            guard sc.fileoff >= 0, !end.overflow, end.partialValue <= Self.maxSize else {
-                throw UnpackError.imageTooLarge(size: end.overflow ? Int.max : end.partialValue, limit: Self.maxSize)
+            guard sc.fileoff >= 0, !end.overflow, end.partialValue <= limit else {
+                throw UnpackError.imageTooLarge(size: end.overflow ? Int.max : end.partialValue, limit: limit)
             }
             if end.partialValue > output.count {
                 output.append(Data(count: end.partialValue - output.count))

@@ -165,9 +165,11 @@ enum MachOEditor {
      and architecture: the bytes a cut dropped, the signature removed, and how UPX packed what is unpacked, with where
      its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand. `keep`, when given,
      gets what decompressed of an image that fails a check after, a sum or its headers, with the edits done before it
-     and `decompressed` for it, and the architecture: the refusal is thrown all the same.
+     and `decompressed` for it, and the architecture: the refusal is thrown all the same. The images unpacked of
+     one file take `unpackLimit` bytes together, the unpacker's limit for one image: they are held together until
+     the file is digested or written, and a slice whose image no longer fits is refused as one too large is.
      */
-    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit {
+    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, unpackLimit: Int = PackMach.maxSize, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit {
         let read = file
         var held: [String] = []
         let file: File
@@ -195,7 +197,8 @@ enum MachOEditor {
             defer {
                 (padding + said).forEach { caveat(nil, $0) }
             }
-            let edit = try self.edit(image, of: file, subject: file.path, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, caveat: { said.append($0) }, keep: keep.map { held in { held(nil, $0, $1) } })
+            var room = unpackLimit
+            let edit = try self.edit(image, of: file, subject: file.path, exact: exact, unsign: unsign, unpack: unpack, padded: file !== read, room: &room, caveat: { said.append($0) }, keep: keep.map { held in { held(nil, $0, $1) } })
             guard let last = edit.states.last else {
                 // Padded as needed for nothing: the file as it is, which the parser refuses, says why.
                 padding = []
@@ -207,7 +210,10 @@ enum MachOEditor {
             return Edit(file: File(editing: file, pieces: last.pieces), states: [edit.states], cuts: [nil], source: file, opened: opened)
         case let .fat(table):
             // Each slice is named as Universal.named names it, the second of one architecture apart, as the artifacts
-            // of them are.
+            // of them are. The unpacked images are held in memory until the file is digested or written, so they
+            // share one image's limit: a table of sixteen entries over one packed image would hold it sixteen
+            // times.
+            var room = unpackLimit
             let slices = try Universal.named(table.archs).map { named -> Slice in
                 let (arch, name) = (named.arch, named.name)
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
@@ -216,7 +222,7 @@ enum MachOEditor {
                         // An archive, which lipo aligns to 2^3 whatever its architecture.
                         return Slice(arch: arch, pieces: whole, align: 3)
                     }
-                    let edit = try self.edit(image, of: file, subject: "\(file.path) (\(name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, caveat: { caveat(name, $0) }, keep: keep.map { held in { held(name, $0, $1) } })
+                    let edit = try self.edit(image, of: file, subject: "\(file.path) (\(name))", exact: exact, unsign: unsign, unpack: unpack, padded: false, room: &room, caveat: { caveat(name, $0) }, keep: keep.map { held in { held(name, $0, $1) } })
                     guard let last = edit.states.last else {
                         return Slice(arch: arch, pieces: whole, align: image.universalAlignment, cut: edit.cut)
                     }
@@ -261,17 +267,20 @@ enum MachOEditor {
     }
 
     /**
-     The states `image` of `file` goes through as the edits are done, the last as they leave it, the first the image
-     `padded` where `file` was cut short of its last page, cut where it ends as the padding is the cut's doing, and the
-     alignment `lipo` gives the image they make; none when they change nothing, an image the `exact` cut alone would
-     shorten included, which is left as it is, its cut kept beside as `cut` where the flag asks for it, and the padded
-     image as needed. `caveat` hears `PackMach`'s word on the
-     image: that a modified UPX packed it, and how. Each edit is noted in the unified log after `subject`, the image's
-     path and architecture. An unpacked image lives in memory, the states after it sharing its bytes. `keep` gets
-     what decompressed of an image that fails a check after, with the edits before it and `decompressed`, before the
-     refusal is thrown.
+     The states `image` of `file` goes through as the edits are done, the last as they leave it, and the alignment
+     `lipo` gives the image they make. The first state is the image `padded`, where `file` was cut short of its last
+     page: cut where it ends, as the padding is the cut's doing.
+
+     No state when the edits change nothing. That includes an image the `exact` cut alone would shorten, which is
+     left as it is, its cut kept beside as `cut` where the flag asks for it, and the padded image as needed.
+
+     `caveat` hears `PackMach`'s word on the image: that a modified UPX packed it, and how. `room` is what is left
+     of the limit the file's unpacked images share: this image's size comes off it once it is unpacked. Each edit
+     is noted in the unified log after `subject`, the image's path and architecture. An unpacked image lives in
+     memory, the states after it sharing its bytes. `keep` gets what decompressed of an image that fails a check
+     after, with the edits before it and `decompressed`, before the refusal is thrown.
      */
-    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> Edited {
+    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, room: inout Int, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> Edited {
         var states: [State] = []
         var edits: Edits = padded ? [.exact] : []
         let end = padded ? image.logicalEnd() : self.cut(image, exact: exact)
@@ -314,8 +323,9 @@ enum MachOEditor {
                     keep(kept, data)
                     logger.info("\(subject, privacy: .public): decompressed, kept as it is: \(why, privacy: .public)")
                 }
-                let output = try packMach.unpack()
+                let output = try packMach.unpack(limit: room)
                 let data = output.data
+                room -= data.count
                 if let message = output.caveat {
                     caveat(message)
                 }

@@ -1233,6 +1233,7 @@ final class PackMachTests: XCTestCase {
                 XCTAssertEqual(lines.first?.hasSuffix(Self.noKey), true, name)
                 XCTAssertEqual(lines.last, try XCTUnwrap(ByteHash.sha256.digest(unpacked)), name)
             }
+
             let (status, _) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 0, name)
         }
@@ -1273,6 +1274,45 @@ final class PackMachTests: XCTestCase {
             let (status, _) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 0, name)
         }
+    }
+
+    /**
+     The unpacked images of a universal file are held in memory together, so they share one image's limit, the
+     unpacker's 768 MiB. A table of two entries over one packed image of a page, made by hand, unpacks twice under
+     the limit. Under a limit of a page and a half, the second is refused as an image too large is: after its
+     architecture, for what is left of the limit. A thin image past the limit is refused the same way.
+     */
+    func testTheImagesOfAUniversalFileShareOneUnpackLimit() throws {
+        let directory = try self.directory("limit")
+        let (packed, original) = try self.packedByHand(overlapping: 0)
+        var fat = Data()
+        [FAT_MAGIC, 2].forEach { fat.appendUInt32BE($0) }
+        for _ in 0 ..< 2 {
+            [UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), 0x1000, UInt32(packed.count), 12].forEach { fat.appendUInt32BE($0) }
+        }
+        fat.append(Data(count: 0x1000 - fat.count))
+        fat += packed
+        let file = directory / "fat"
+        try fat.write(to: file)
+        saveFixture(path: file.path)
+
+        let edit = try MachOEditor.edit(File(path: file.path), exact: .never, unsign: false, unpack: true)
+        XCTAssertEqual(edit.states.map { $0.map(\.edits) }, [[.unpacked], [.unpacked]])
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack", "--slices"]).suffix(4), try [packed, original, packed, original].map { try XCTUnwrap(ByteHash.sha256.digest($0)) })
+
+        XCTAssertThrowsError(try MachOEditor.edit(File(path: file.path), exact: .never, unsign: false, unpack: true, unpackLimit: 0x1800)) { error in
+            let slice = error as? SliceError
+            XCTAssertEqual(slice?.arch, "x86_64_2")
+            XCTAssertEqual(slice?.error as? UnpackError, .imageTooLarge(size: 0x1000, limit: 0x800))
+            XCTAssertEqual(File.message(for: error), "Mach-O too large: the image UPX packed would be 4096 bytes, more than the 2048 left of the \(768 << 20) this tool unpacks of one file in memory")
+        }
+
+        let thin = directory / "thin"
+        try packed.write(to: thin)
+        XCTAssertThrowsError(try MachOEditor.edit(File(path: thin.path), exact: .never, unsign: false, unpack: true, unpackLimit: 0x800)) { error in
+            XCTAssertEqual(error as? UnpackError, .imageTooLarge(size: 0x1000, limit: 0x800))
+        }
+        XCTAssertEqual(File.message(for: UnpackError.imageTooLarge(size: 1 << 30, limit: 768 << 20)), "Mach-O too large: the image UPX packed would be \(1 << 30) bytes, more than the \(768 << 20) this tool unpacks in memory")
     }
 
     /**
