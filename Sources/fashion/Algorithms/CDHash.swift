@@ -64,11 +64,19 @@ enum CDHash {
         let type: String?
         /// True when the slice is unsigned and the hash was synthesized.
         let adhoc: Bool
-        /// True when the slice's signature does not hold as Security's static validation holds it: a code directory
-        /// it cannot load, so the hash is synthesized; code that no longer hashes to this directory; or, judged by
-        /// the best directory for every one of them, a sealed blob missing or changed, a code limit that is not
-        /// the signature's offset, a CMS signature missing or not verifying (`MachO.securityTakes`).
+        /**
+         True when Security's static validation refuses the slice's signature, for any of:
+
+         - a code directory it cannot load, so the hash is synthesized;
+         - code that no longer hashes to this directory;
+         - a fault of the best directory, which counts against every directory: a sealed blob missing or changed,
+           a code limit that is not the signature's offset, a CMS signature missing or not verifying
+           (`MachO.securityTakes`);
+         - an image that does not end where strict validation wants it to (`MachO.failsStrictValidation`).
+         */
         let invalid: Bool
+        /// True when the last of those is the only fault: the signature holds, and bytes follow the image.
+        let strictOnly: Bool
     }
 
     /**
@@ -116,7 +124,7 @@ enum CDHash {
         let ambiguous = directories.count > 1
 
         return directories.map { cd in
-            SliceResult(hash: cd.hash, arch: arch, type: ambiguous ? cd.type : nil, adhoc: cd.adhoc, invalid: cd.invalid)
+            SliceResult(hash: cd.hash, arch: arch, type: ambiguous ? cd.type : nil, adhoc: cd.adhoc, invalid: cd.invalid, strictOnly: cd.strictOnly)
         }
     }
 
@@ -138,6 +146,8 @@ extension MachO {
         let adhoc: Bool
         /// See `CDHash.SliceResult.invalid`.
         let invalid: Bool
+        /// See `CDHash.SliceResult.strictOnly`.
+        let strictOnly: Bool
     }
 
     /**
@@ -147,7 +157,11 @@ extension MachO {
      signed or not: `codesign -d` calls such a file "not signed at all" whatever its `LC_CODE_SIGNATURE` holds.
 
      A signed slice yields every code directory Security loads from its signature, strongest first per `HashType.rank`: the
-     head is the kernel-enforced cdhash. Each of them is checked against the code (`validateExecutables`).
+     head is the kernel-enforced cdhash. Three checks mark them invalid: each directory against the code
+     (`validateExecutables`), the signature by its best directory (`securityTakes`), and where the image ends
+     (`failsStrictValidation`). Strict validation refuses a main executable with bytes appended past it, which
+     `codesign --verify` calls an invalid signature. With `exact` the image is hashed without those bytes, and
+     judged without them.
 
      An unsigned slice yields its synthesized ad-hoc cdhash, the SHA-256 one `syspolicyd` looks up. So does a signed
      slice whose code directories Security rejects, marked invalid: `codesign` calls it "not signed at all" and signs it
@@ -168,8 +182,11 @@ extension MachO {
             let loaded = try Self.loadCodeDirectories(superblob)
             let directories = loaded.sorted { $0.hashType.rank > $1.hashType.rank }
             let taken = Self.securityTakes(directories, primary: loaded.first, in: superblob, signature: signature)
+            // Whether strict validation refuses the image for where it ends. With `exact`, it is judged as cut.
+            let unended = self.failsStrictValidation(length: exact ? self.logicalEnd() : self.length)
             let hashes = try zip(directories, self.validateExecutables(directories)).map { cd, verdict in
-                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !verdict.valid || !taken)
+                let holds = verdict.valid && taken
+                return CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !holds || unended, strictOnly: holds && unended)
             }
             if !hashes.isEmpty {
                 return CodeDirectoryHashes(hashes: hashes, skipReason: nil)
@@ -492,7 +509,7 @@ extension MachO {
         )
 
         return try builder.build(code: self).map { built in
-            CodeDirectoryHash(hash: built.hashType.digest(built.directory).hexString, type: built.hashType.name, adhoc: true, invalid: invalid)
+            CodeDirectoryHash(hash: built.hashType.digest(built.directory).hexString, type: built.hashType.name, adhoc: true, invalid: invalid, strictOnly: false)
         }
     }
 

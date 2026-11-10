@@ -298,16 +298,12 @@ struct MachO {
 
     // MARK: - Logical Extent
 
-#if SECURITY_STRICT_VALIDATION
     /**
-     Where the Mach-O image ends, as Security's `MachO` decides it for strict validation: at the end of the
-     `__LINKEDIT` segment or of the `LC_SYMTAB` string table, whichever command comes first. Bytes past it are
-     appended to the image, which `codesign` rejects. `Package.swift` defines `SECURITY_STRICT_VALIDATION` unless the
-     environment sets it to `NO`, for the other ending below.
-
-     The whole slice when it declares neither, or an end that lies past the slice.
+     The range that ends the image for Security's `MachO` (`MachO::validateStructure`): the file bytes of the
+     `__LINKEDIT` segment, or the `LC_SYMTAB` string table, whichever command comes first. Nil for an image with
+     neither.
      */
-    func logicalEnd() -> Int {
+    private func strictExtent() -> Extent? {
         for command in self.loadCommands {
             let isLinkedit = command.isSegment(named: "__LINKEDIT")
             let range: Extent? = switch command.cmd {
@@ -320,13 +316,47 @@ struct MachO {
             default:
                 nil
             }
-
             if let range {
-                let count = UInt64(self.length)
-                return range.size <= count && range.offset <= count - range.size ? Int(range.offset + range.size) : self.length
+                return range
             }
         }
-        return self.length
+        return nil
+    }
+
+    /**
+     Whether Security's strict validation, codesign's and Gatekeeper's default, refuses the image as a main
+     executable when it is `length` bytes long: "main executable failed strict validation" (`MachO::isSuspicious`).
+
+     ```
+     0                                         strictEnd()            length
+     | headers | segments .. | __LINKEDIT .... | bytes appended ..... |
+     ```
+
+     The range that ends the image (`strictExtent`) must end at `length` exactly: bytes appended past it are
+     refused. An image with no such range is refused whatever its length.
+     */
+    func failsStrictValidation(length: Int) -> Bool {
+        guard let range = self.strictExtent() else {
+            return true
+        }
+        return range.offset &+ range.size != UInt64(length)
+    }
+
+#if SECURITY_STRICT_VALIDATION
+    /**
+     Where the Mach-O image ends, as Security's `MachO` decides it for strict validation: at the end of the
+     `__LINKEDIT` segment or of the `LC_SYMTAB` string table, whichever command comes first. Bytes past it are
+     appended to the image, which `codesign` rejects. `Package.swift` defines `SECURITY_STRICT_VALIDATION` unless the
+     environment sets it to `NO`, for the other ending below.
+
+     The whole slice when it declares neither, or an end that lies past the slice.
+     */
+    func logicalEnd() -> Int {
+        guard let range = self.strictExtent() else {
+            return self.length
+        }
+        let count = UInt64(self.length)
+        return range.size <= count && range.offset <= count - range.size ? Int(range.offset + range.size) : self.length
     }
 #else
     /**

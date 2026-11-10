@@ -1333,8 +1333,17 @@ struct Digester {
         let results = try CDHash.hash(file, path: subject.path, exact: self.exact)
         var warned: Set<String> = []
         for result in results where result.invalid && warned.insert(result.arch ?? "").inserted {
-            // Security rejects the signature, so the slice is hashed as unsigned, or its code changed since signing.
-            subject.warn(result.adhoc ? "signature rejected, hashed as unsigned" : "invalid signature (code or signature have been modified)", arch: result.arch)
+            // Three cases: Security rejects the signature, so the slice is hashed as unsigned; its code or
+            // signature changed since signing; or the signature holds, and strict validation refuses the image
+            // for the bytes that follow it.
+            let why = if result.adhoc {
+                "signature rejected, hashed as unsigned"
+            } else if result.strictOnly {
+                "invalid signature (the image does not end where its bytes do, which strict validation refuses)"
+            } else {
+                "invalid signature (code or signature have been modified)"
+            }
+            subject.warn(why, arch: result.arch)
         }
 
         return results.map { result in

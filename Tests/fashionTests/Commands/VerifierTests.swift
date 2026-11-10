@@ -1988,6 +1988,8 @@ final class VerifierTests: XCTestCase {
      - the pages are cut by an `int` shifted by the directory's exponent, which counts modulo 32: one slot over
        all the code holds under an exponent of 31 or 63, pages past any limit, and not under 44, pages of 4 KiB;
      - a scatter vector is not read: the slots are checked in order, sound or changed;
+     - the image must end where its bytes do, as strict validation has it: bytes appended are INVALID, and not
+       with --exact, which hashes the image without them;
      - an alternate's own seals are never read: a wrong one beside a sound best directory is no INVALID, and a
        wrong one in the best is, on every line.
      */
@@ -2113,13 +2115,18 @@ final class VerifierTests: XCTestCase {
             ("best-seal", embedded([(0, first), (2, requirements), (0x1000, unsealed(second)), (0x10000, wrapper)], in: both, at: pairSignature), true),
         ]
 
+        cases.append(("appended", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]) + Data("appended".utf8), true))
+
         for (name, data, invalid) in cases {
             let file = directory / name
             try data.write(to: file)
             let results = try CDHash.hash(path: file.path)
             XCTAssertEqual(results.map(\.invalid), results.map { _ in invalid }, name)
+            XCTAssertEqual(results.map(\.strictOnly), results.map { _ in name == "appended" }, name)
             XCTAssertEqual((try? codesign(["--verify", file.path])) == nil, invalid, "\(name): codesign --verify")
         }
+        let appended = directory / "appended"
+        XCTAssertEqual(try CDHash.hash(path: appended.path, exact: true).map(\.invalid), [false])
     }
 
     /**

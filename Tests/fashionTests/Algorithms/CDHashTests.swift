@@ -632,6 +632,41 @@ final class CDHashTests: XCTestCase {
     }
 
     /**
+     Bytes appended to a signed image leave its signature holding, and the cdhash as it was, but the image no longer
+     ends where its bytes do. `codesign --verify` reports "main executable failed strict validation", and fashion
+     labels the cdhash INVALID and says why on stderr, without failing the run. With --exact, which hashes the
+     image without what follows it, there is nothing to say.
+     */
+    func testBytesAppendedToASignedImageAreFlagged() throws {
+        let dir = try self.temporaryDirectory()
+        let signed = try compile("signed", in: dir, ["-arch", "arm64"])
+        _ = try codesign(["-s", "-", signed.path])
+        let appended = dir / "appended"
+        try (Data(contentsOf: signed) + Data("appended".utf8)).write(to: appended)
+
+        let results = try CDHash.hash(path: appended.path)
+        XCTAssertEqual(results.map(\.hash), try CDHash.hash(path: signed.path).map(\.hash))
+        XCTAssertEqual(try CDHash.hash(path: signed.path).map(\.invalid), [false])
+        XCTAssertEqual(results.map(\.invalid), [true])
+        XCTAssertEqual(results.map(\.strictOnly), [true])
+        XCTAssertThrowsError(try codesign(["--verify", appended.path])) { error in
+            XCTAssertTrue(String(describing: error).contains("strict validation"), "\(error)")
+        }
+
+        let warning = "fashion: \(appended.path): invalid signature (the image does not end where its bytes do, which strict validation refuses)"
+        let lines = try Digester(Hasher.parse([appended.path, "--algo", "cdhash"])).lines(for: appended.path, reporter: Reporter(console: Console()))
+        XCTAssertEqual(lines.filter(\.diagnostic).map(\.text), [warning])
+        XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("INVALID") }, [true])
+        let (status, errors) = try runFashion(["--algo", "cdhash", appended.path])
+        XCTAssertEqual(status, 0)
+        XCTAssertEqual(errors, [warning])
+
+        let exact = try Digester(Hasher.parse([appended.path, "--algo", "cdhash", "--exact"])).lines(for: appended.path, reporter: Reporter(console: Console()))
+        XCTAssertEqual(exact.map(\.diagnostic), [false])
+        XCTAssertEqual(exact.map { $0.text.contains("INVALID") }, [false])
+    }
+
+    /**
      Security's MachO ends the image at `__LINKEDIT`, and codesign's strict validation rejects any byte past it:
      the bytes appended to a built binary are exactly the ones logicalEnd trims.
      */
