@@ -1120,22 +1120,25 @@ final class PackMachTests: XCTestCase {
      A file UPX packed, made by hand as UPX 5 lays one out: an `x86_64` executable of a page, one `__TEXT` segment over
      it, its headers in an NRV2B block and the rest stored; with `overlapping` more segments in its headers laid
      over the same page, each wanting the page's worth of blocks again, stored, where UPX writes each byte of an
-     original once. The pack header's sums are the packer's. `editing` rewrites the original's headers before they
-     are packed, for a test of what the unpacker makes of them. With `filtered`, the rest of the page is `body`,
-     which must hold runs for the encoder to pack and no call or jump for the filter to rewrite, in an NRV2B block
-     under filter 0x49, its bytes XORed with `key`, repeated from the block's start, before it is packed, as a
-     modified UPX does.
+     original once. The pack header's sums are the packer's.
+
+     `editing` rewrites the original's headers before they are packed, for a test of what the unpacker makes of
+     them. `commands` are load commands put after its segments'. With `filtered`, the rest of the page is `body`,
+     in an NRV2B block under filter 0x49, its bytes XORed with `key`, repeated from the block's start, before it is
+     packed, as a modified UPX does. `body` must hold runs for the encoder to pack, and no call or jump for the
+     filter to rewrite.
      */
-    private func packedByHand(overlapping: Int, filtered: (body: Data, key: [UInt8])? = nil, editing: (inout Data) -> Void = { _ in }) throws -> (packed: Data, original: Data) {
+    private func packedByHand(overlapping: Int, filtered: (body: Data, key: [UInt8])? = nil, commands: [Data] = [], editing: (inout Data) -> Void = { _ in }) throws -> (packed: Data, original: Data) {
         let size = 0x1000
         var original = Data()
-        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_EXECUTE), UInt32(1 + overlapping), UInt32(72 * (1 + overlapping)), 0, 0].forEach { original.appendUInt32($0) }
+        [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_EXECUTE), UInt32(1 + overlapping + commands.count), UInt32(72 * (1 + overlapping) + commands.reduce(0) { $0 + $1.count }), 0, 0].forEach { original.appendUInt32($0) }
         for _ in 0 ... overlapping {
             original.appendUInt32(UInt32(LC_SEGMENT_64)); original.appendUInt32(72)
             original.append(Data("__TEXT".utf8) + Data(count: 10))
             [UInt64(0x1_0000_0000), UInt64(size), 0, UInt64(size)].forEach { original.appendUInt64($0) }
             [5, 5, 0, 0].forEach { original.appendUInt32(UInt32($0)) }
         }
+        commands.forEach { original += $0 }
         let headers = original.count
         if let filtered {
             XCTAssertEqual(filtered.body.count, size - headers, "the body fills the page after the headers")
@@ -1313,6 +1316,35 @@ final class PackMachTests: XCTestCase {
             XCTAssertEqual(error as? UnpackError, .imageTooLarge(size: 0x1000, limit: 0x800))
         }
         XCTAssertEqual(File.message(for: UnpackError.imageTooLarge(size: 1 << 30, limit: 768 << 20)), "Mach-O too large: the image UPX packed would be \(1 << 30) bytes, more than the \(768 << 20) this tool unpacks in memory")
+    }
+
+    /**
+     UPX refuses a packed file whose original headers hold a load command it does not know, or one of another size
+     than it expects: "bad packed Mach load_command" (`is_bad_linker_command`). Two such commands here: a number
+     past UPX's table, and an `LC_UUID` of 32 bytes. The bytes are the original's, whichever packer kept them, so
+     the image is unpacked all the same, and the warning names the refusal UPX would give and where the command
+     lies. A sound `LC_UUID` brings no warning.
+     */
+    func testALoadCommandUPXRefusesIsSaidAndUnpacked() throws {
+        let directory = try self.directory("refused-command")
+        /// A load command `number` of `size` bytes, zeros after its two words.
+        func command(_ number: UInt32, _ size: Int) -> Data {
+            var command = Data()
+            [number, UInt32(size)].forEach { command.appendUInt32($0) }
+            return command + Data(count: size - 8)
+        }
+
+        for (name, extra, refused) in [("unknown", command(0x7f, 8), true), ("sized", command(UInt32(LC_UUID), 32), true), ("sound", command(UInt32(LC_UUID), 24), false)] {
+            let (packed, original) = try self.packedByHand(overlapping: 0, commands: [extra])
+            let file = directory / name
+            try packed.write(to: file)
+            let lines = try self.hashLines(file.path, ["--unpack"])
+            XCTAssertEqual(lines.last, try XCTUnwrap(ByteHash.sha256.digest(original)), name)
+            XCTAssertEqual(lines.filter { $0.hasPrefix("fashion: ") }, refused ? ["fashion: \(file.path): its headers hold a load command UPX refuses to unpack, at 0x68"] : [], name)
+            if let upx = try? self.upx() {
+                XCTAssertEqual(try execute(upx, ["-q", "-d", "-o", file.path + "_upx-d", file.path]), !refused, "\(name): upx -d")
+            }
+        }
     }
 
     /**

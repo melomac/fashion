@@ -523,11 +523,13 @@ struct PackMach {
         }
 
         /// `image` with its caveat and its notes. The caveat is nil when there is nothing to say: the packer's marker
-        /// and key (`caveat(xor:)`), and the sums that do not match, `unverified` among them.
+        /// and key (`caveat(xor:)`), a load command UPX refuses, and the sums that do not match, `unverified` among
+        /// them.
         func finished(_ image: Unpacked, xor: [UInt8] = [], unverified: String? = nil) -> Unpacked {
             var image = image
             let all = sums + (unverified.map { [$0] } ?? [])
-            let text = [self.caveat(xor: xor), all.isEmpty ? nil : "checksums neither UPX nor its stub reads: " + all.joined(separator: ", ")].compactMap(\.self).joined(separator: "; ")
+            let refused = plain.refusedCommand.map { "its headers hold a load command UPX refuses to unpack, at \($0.hex)" }
+            let text = [self.caveat(xor: xor), refused, all.isEmpty ? nil : "checksums neither UPX nor its stub reads: " + all.joined(separator: ", ")].compactMap(\.self).joined(separator: "; ")
             image.caveat = text.isEmpty ? nil : text
             image.notes = self.notes(image)
             return image
@@ -619,6 +621,9 @@ struct PackMach {
         var caveat: String?
         var notes: [String] = []
         var decompressed: Data?
+        /// The offset in the image's headers of the first load command UPX refuses, "bad packed Mach
+        /// load_command". The image is unpacked all the same: its bytes are the original's.
+        fileprivate var refusedCommand: Int?
         fileprivate var pass: Pass
         fileprivate let pInfo: PInfo
 
@@ -692,6 +697,7 @@ struct PackMach {
 
         // The block is decoded into a buffer of its own, up to the block size, which the commands copy their bytes out
         // of, so that it goes before the image is made rather than stay beside it.
+        var refusedCommand: Int?
         let commands: [Command]
         do {
             var headers = Data(count: first.uncompressed)
@@ -704,7 +710,7 @@ struct PackMach {
             guard 1 ... Self.maxCommands ~= ncmds else {
                 throw UnpackError.cantUnpack("bad Mach_header.ncmds = \(ncmds)")
             }
-            commands = try self.commands(in: headers, from: headerSize, count: ncmds)
+            commands = try self.commands(in: headers, from: headerSize, count: ncmds, refused: &refusedCommand)
         }
         let segments = commands.compactMap(\.segment).sorted(by: Segment.precedes)
 
@@ -744,7 +750,7 @@ struct PackMach {
         // whose p_filesize claims more than its segments reach would otherwise come out that long, zeros after the
         // last one, and cost that much to hash.
         output.count = pass.extent
-        return Unpacked(data: output, pass: pass, pInfo: PInfo(progid: progid, fileSize: fileSize, blocksize: blocksize))
+        return Unpacked(data: output, refusedCommand: refusedCommand, pass: pass, pInfo: PInfo(progid: progid, fileSize: fileSize, blocksize: blocksize))
     }
 
     // MARK: - Private
@@ -966,7 +972,7 @@ struct PackMach {
      The load commands of the decompressed headers, as `unpack` walks them, each a copy of its bytes: each must fit what
      is left of them.
      */
-    private func commands(in headers: Data, from start: Int, count: Int) throws -> [Command] {
+    private func commands(in headers: Data, from start: Int, count: Int, refused: inout Int?) throws -> [Command] {
         var commands: [Command] = []
         var offset = start
         for _ in 0 ..< count {
@@ -981,11 +987,58 @@ struct PackMach {
             else {
                 throw UnpackError.cantUnpack("bad packed Mach load_command @\(offset.hex)")
             }
+            // UPX refuses more than that: a command it does not know, or one of a size it does not expect. Such a
+            // command is noted for the caveat, and the image is unpacked anyway: its bytes are the original's,
+            // whichever packer kept them.
+            if refused == nil, self.isBadLinkerCommand(cmd, size: cmdsize) {
+                refused = offset
+            }
             let command = MachO.LoadCommand(cmd: cmd, data: headers.subdata(in: offset ..< offset + cmdsize))
             commands.append(Command(segment: Segment(command, in: self.image)))
             offset += cmdsize
         }
         return commands
+    }
+
+    /// The size UPX expects of each load command, by command number (`lc_cmd_size`): a positive entry is the exact
+    /// size, a negative one a minimum, 0 a command UPX does not take. The table ends at `LC_FILESET_ENTRY`.
+    private static let commandSizes: [Int] = [
+        0, -56, 24, 0, -16, -16, 0, 0, 0, 0, 0, 80, -24, -24, -12, -12, // 0x00
+        0, 0, 0, 0, 0, 0, -16, 0, -24, -72, 0, 24, -12, 16, 16, -24, // 0x10
+        8, 20, 48, 0, 16, 16, 16, -12, 24, 16, 16, 16, 24, 0, 0, 16, // 0x20
+        16, -40, -24, 16, 16, -32, // 0x30
+    ]
+
+    /**
+     Whether UPX refuses the load command `command` of `size` bytes, which lies within the headers
+     (`is_bad_linker_command`). It refuses:
+
+     - a command it does not take, or one past its table;
+     - a size that is not a multiple of the image's word, 4 or 8 bytes;
+     - a segment whose size is not its own header plus whole sections;
+     - a size other than the exact one in `commandSizes`, or under the minimum there.
+     */
+    private func isBadLinkerCommand(_ command: UInt32, size: Int) -> Bool {
+        let number = Int(command & ~UInt32(LC_REQ_DYLD))
+        guard number != 0, number < Self.commandSizes.count, Self.commandSizes[number] != 0 else {
+            return true
+        }
+
+        let known = Self.commandSizes[number]
+        let wide = self.image.is64
+        if size & ((wide ? 8 : 4) - 1) != 0 {
+            return true
+        }
+
+        if number == (wide ? Int(LC_SEGMENT_64) : Int(LC_SEGMENT)) {
+            let (segment, section) = wide ? (72, 80) : (56, 68)
+            // A segment shorter than its header is under the minimum below. UPX's unsigned subtraction wraps there.
+            if size >= segment, (size - segment) % section != 0 {
+                return true
+            }
+        }
+
+        return known > 0 ? known != size : -known > size
     }
 
     /**
