@@ -1270,7 +1270,7 @@ final class VerifierTests: XCTestCase {
         unbound.replaceSubrange(twiceSignature.offset ..< twiceSignature.offset + superblob2.count, with: superblob2)
         try unbound.write(to: directory / "unbound")
         XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", (directory / "unbound").path]), "a signature codesign takes")
-        XCTAssertEqual(try self.verify(unbound, "unbound", in: directory).lines, [": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
+        XCTAssertEqual(try self.verify(unbound, "unbound", in: directory).lines, [": the sha256 code directory, which Security and the kernel read the signature by, is not the one the CMS signs, the sha1 code directory at slot 0, and the signer binds none to it: anyone may have added it", ": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
     }
 
     /**
@@ -1600,7 +1600,7 @@ final class VerifierTests: XCTestCase {
         let ignored = try embedded([(0, cleared(sha1)), (2, requirements), (0x1000, sha256), (0x10000, cms(over: cleared(sha1), "ignored"))])
         XCTAssertEqual(try self.verify(ignored, "ignored", in: directory).lines, [": a CMS signature behind a code directory flagged ad hoc, which Security ignores"])
         let refused = try embedded([(0, sha1), (2, requirements), (0x1000, cleared(sha256)), (0x10000, cms(over: sha1, "refused"))])
-        XCTAssertEqual(try self.verify(refused, "refused", in: directory).lines, [": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
+        XCTAssertEqual(try self.verify(refused, "refused", in: directory).lines, [": the sha256 code directory, which Security and the kernel read the signature by, is not the one the CMS signs, the sha1 code directory at slot 0, and the signer binds none to it: anyone may have added it", ": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
     }
 
     /**
@@ -1691,12 +1691,16 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
-     A CMS blob is Security's to judge past the lengths its decoder takes at its word, as codesign has it judged:
-     `/bin/ls`'s `x86_64` signature holds with a byte after the message, with three, and with the root
-     certificate it carries bent, an OID in its issuer's name cut to no bytes so that what follows reads past the
-     sequence around it, since the decoder keeps a certificate's bytes as it finds them and reads no elements
-     there. Each is valid to `codesign --verify`, bears no INVALID in hash mode and has nothing said of it by
-     verify, where each was refused as not DER to its end.
+     Past the lengths its decoder does not check, a CMS blob is Security's to judge, as codesign has it judged.
+     `/bin/ls`'s `x86_64` signature holds in three changed forms:
+
+     - with a byte after the message;
+     - with three;
+     - with the root certificate it carries bent: an OID in its issuer's name cut to no bytes, so that what
+       follows reads past the sequence around it. The decoder keeps a certificate's bytes as it finds them and
+       reads no elements there.
+
+     Each is valid to `codesign --verify`, bears no INVALID in hash mode, and brings no line from verify.
      */
     func testACMSBlobIsSecuritysToJudgePastTheLengthsItTakesAtItsWord() throws {
         let directory = try self.directory("cms-lenient")
@@ -1865,6 +1869,56 @@ final class VerifierTests: XCTestCase {
         try unbound.write(to: directory / "unbound")
         XCTAssertFalse(try execute("/usr/bin/codesign", ["--verify", (directory / "unbound").path]), "an invalid signature to codesign")
         XCTAssertEqual(try self.verify(unbound, "unbound", in: directory).lines, [": the CMS signature does not bind the code directories as Security requires: its cdhashes plist lists other code directories than the signature holds, an invalid signature to it"])
+    }
+
+    /**
+     The CMS signs the directory at slot 0 and binds the others by the signer's hash-agility attributes. A signer
+     that wrote none binds nothing, and Apple's own platform signatures carry none.
+
+     A SHA-384 directory is made here over `/bin/ls`'s `x86_64` code and added beside the SHA-256 one Apple
+     signed. It outranks it, so Security and the kernel read the signature by it: codesign says valid on disk, and
+     hash mode lists its cdhash first with no INVALID. verify names it as the directory nothing binds, which
+     anyone may have added.
+     */
+    func testABestDirectoryNothingBindsIsNamed() throws {
+        let directory = try self.directory("unbound-best")
+        let program = try self.lsX86()
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try Data(image.signingData(signature))
+        var blobs = Self.blobs(of: superblob)
+        let signed = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        XCTAssertEqual(signed[37], 2, "SHA-256 at slot 0")
+        XCTAssertNil(MachO.component(0x1000, of: superblob), "no alternate")
+
+        // The same header and identifier, no special slot, a SHA-384 slot per page of the code.
+        let hashOffset = Int(UInt32(bigEndian: signed.load(UInt32.self, at: 16)))
+        let special = Int(UInt32(bigEndian: signed.load(UInt32.self, at: 24)))
+        var added = Data(signed.prefix(hashOffset - 32 * special))
+        let page = 1 << Int(signed[39])
+        for start in stride(from: 0, to: signature.offset, by: page) {
+            added += Data(SHA384.hash(data: program[start ..< min(start + page, signature.offset)]))
+        }
+        added.store(UInt32(added.count).bigEndian, at: 4)
+        added.store(UInt32(hashOffset - 32 * special).bigEndian, at: 16)
+        added.store(UInt32(0).bigEndian, at: 24)
+        added[36] = 48
+        added[37] = 4
+
+        blobs.insert((0x1000, added), at: blobs.count - 1)
+        XCTAssertEqual(blobs.last?.slot, 0x10000, "the CMS blob last")
+        let data = Self.embedding(blobs, in: program, at: signature)
+        let file = directory / "ls"
+        try data.write(to: file)
+
+        XCTAssertTrue(try codesign(["--verify", "--verbose=4", file.path]).contains("valid on disk"))
+        let results = try CDHash.hash(path: file.path)
+        XCTAssertEqual(results.map(\.type), ["sha384", "sha256"])
+        XCTAssertEqual(results.map(\.invalid), [false, false])
+        self.assertVerify(file.path, [
+            "\(file.path): the requirements blob is not sealed by the sha384 code directory",
+            "\(file.path): the sha384 code directory, which Security and the kernel read the signature by, is not the one the CMS signs, the sha256 code directory at slot 0, and the signer binds none to it: anyone may have added it",
+        ])
     }
 
     /**

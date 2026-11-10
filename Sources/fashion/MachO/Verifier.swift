@@ -1736,7 +1736,7 @@ struct MachOVerifier {
             signer = try Signer(cms: cms, over: primary.data, binding: directories.map { Signer.Binding(hashType: $0.hashType, cdhash: $0.hashType.digest($0.data)) }, best: best.hashType, enforcingExpiration: best.flags & Self.csEnforceExpiration != 0)
         } catch {
             let line = switch error {
-            case let .malformed(fault): "a CMS signature that is not DER to its end, \(fault), which Security's decoder would allocate for as it streams"
+            case let .malformed(fault): "a CMS signature with a length Security's decoder would take at its word, \(fault): it allocates what the length says as it streams"
             case .undecodable: "a CMS signature Security cannot decode"
             case .unsigned: "a CMS signature with no signer"
             case let .signers(count): "a CMS signature with \(count) signers, where Security requires exactly one, an invalid signature to it"
@@ -1750,6 +1750,14 @@ struct MachOVerifier {
         }
 
         var found: [String] = []
+        // The CMS signs the directory at slot 0 and binds the others by the signer's hash-agility attributes. A
+        // signer that wrote none binds nothing, which Security lets pass. Anyone can then add a directory that
+        // outranks the signed one, and Security and the kernel read the signature by it: its identifier, its
+        // flags and its seals.
+        let agility = Signer.hashAgility(in: cms)
+        if best.hashType != primary.hashType, agility.cdhashes == nil, agility.v2 == nil {
+            found.append("the \(best.hashType.name) code directory, which Security and the kernel read the signature by, is not the one the CMS signs, \(type) at slot 0, and the signer binds none to it: anyone may have added it")
+        }
         let summary = Self.shown(signer.summary)
         switch signer.kind {
         case .apple, .appStore:
