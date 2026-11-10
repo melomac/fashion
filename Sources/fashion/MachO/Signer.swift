@@ -39,7 +39,7 @@ import Security
 struct Signer {
     /// What `SecStaticCode::verifySignature` throws `errSecCSSignatureFailed` for.
     enum Failure: Error, Equatable {
-        /// The CMS blob is not DER read to its end: what is wrong and where, as the reader met it.
+        /// The CMS blob holds a length Security's decoder would take at its word: which, and where (`DER.fault`).
         case malformed(String)
         /// The CMS blob does not decode.
         case undecodable
