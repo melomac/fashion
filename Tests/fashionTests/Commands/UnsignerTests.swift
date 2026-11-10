@@ -337,7 +337,8 @@ final class UnsignerTests: XCTestCase {
 
     /**
      Security's `remove_signature_space` walks the `ncmds` commands the loaders read and takes the last `__LINKEDIT`,
-     the last `LC_SYMTAB` and the last `LC_CODE_SIGNATURE` of them. An arm64 program given a second, empty `__LINKEDIT`
+     the last `LC_SYMTAB` and the last `LC_CODE_SIGNATURE` of them, an `LC_SEGMENT` named `__LINKEDIT` before an
+     `LC_SEGMENT_64` one, whatever the image's width. An arm64 program given a second, empty `__LINKEDIT`
      after its own, signed by codesign, comes back as it was, byte for byte: codesign extends and shrinks the second,
      and leaves the 16 KiB signing gave it where unsign restores the nothing it had. One given a second `LC_SYMTAB`
      whose string table ends nowhere near the signature unsigns to what `codesign --remove-signature` writes, byte for
@@ -379,6 +380,37 @@ final class UnsignerTests: XCTestCase {
         let data = try Data(contentsOf: signed)
         let commands = try XCTUnwrap(MachO(File(data: data))).loadCommands
         XCTAssertEqual(commands.last?.cmd, UInt32(LC_CODE_SIGNATURE))
+
+        // An `LC_SEGMENT` named `__LINKEDIT` beside the image's own `LC_SEGMENT_64` one, put first among the commands
+        // of the signed program. Security shrinks the `LC_SEGMENT` one, whatever the image's width, and leaves the
+        // other as it was. So does unsign, byte for byte but for the vmsize it rounds where Security leaves it.
+        let own = try XCTUnwrap(XCTUnwrap(MachO(File(data: data))).findSegment("__LINKEDIT")).load(segment_command_64.self)
+        var narrow = Data()
+        [UInt32(LC_SEGMENT), 56].forEach { narrow.appendUInt32($0) }
+        narrow.append(Data("__LINKEDIT".utf8)); narrow.append(Data(count: 6))
+        [UInt32(own.vmaddr & 0xffff_ffff), 0, UInt32(own.fileoff), UInt32(own.filesize), 1, 1, 0, 0].forEach { narrow.appendUInt32($0) }
+        var both = data
+        let sizeofcmds = Int(both.load(UInt32.self, at: 20))
+        XCTAssertTrue(both[32 + sizeofcmds ..< 32 + sizeofcmds + narrow.count].allSatisfy { $0 == 0 }, "room in the header pad")
+        both.removeSubrange(32 + sizeofcmds ..< 32 + sizeofcmds + narrow.count)
+        both.insert(contentsOf: narrow, at: 32)
+        both.store(both.load(UInt32.self, at: 16) + 1, at: 16)
+        both.store(UInt32(sizeofcmds + narrow.count), at: 20)
+        let mixed = directory / "mixed"
+        try both.write(to: mixed)
+        let removed = directory / "mixed-codesign"
+        try FileManager.default.copyItem(at: mixed, to: removed)
+        _ = try codesign(["--remove-signature", removed.path])
+        XCTAssertEqual(try Unsigner.lines(for: mixed.path, write: false, reporter: Reporter(console: Console())).map(\.text), [mixed.path + "_unsigned"])
+        /// `image` with the vmsize of the `LC_SEGMENT` put first zeroed.
+        func masked(_ image: Data) -> Data {
+            var image = image
+            image.replaceSubrange(32 + 28 ..< 32 + 32, with: Data(count: 4))
+            return image
+        }
+        let oracle = try Data(contentsOf: removed)
+        XCTAssertEqual(try masked(Data(contentsOf: URL(fileURLWithPath: mixed.path + "_unsigned"))), masked(oracle))
+        XCTAssertLessThan(oracle.load(UInt32.self, at: 32 + 36), UInt32(own.filesize), "codesign shrank the LC_SEGMENT one")
         for (name, ncmds) in [("hidden", UInt32(commands.count - 1)), ("none", UInt32(0))] {
             var crafted = data
             crafted.replaceSubrange(16 ..< 20, with: withUnsafeBytes(of: ncmds.littleEndian) { Data($0) })

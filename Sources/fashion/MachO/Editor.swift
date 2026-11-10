@@ -577,23 +577,34 @@ extension MachO {
      it: its header and load commands rewritten, and where it now ends. Nil when it is not signed.
 
      Security removes the signature in process (`remove_signature_space`, which `MachOEditor::allocate` calls for each
-     architecture) where it once ran `codesign_allocate -r`: it walks the `ncmds` commands the loaders read, the last
-     `LC_CODE_SIGNATURE`, `__LINKEDIT` and `LC_SYMTAB` of them its, so a signature command hidden past `ncmds` is none
-     to it; `LC_CODE_SIGNATURE` comes out of the load commands, which close up behind it, and the image ends where the
+     architecture) where it once ran `codesign_allocate -r`. It walks the `ncmds` commands the loaders read, so a
+     signature command hidden past `ncmds` is none to it, and keeps the last it meets of each:
+
+     ```
+     LC_CODE_SIGNATURE   the last one
+     LC_SYMTAB           the last one
+     __LINKEDIT          the last LC_SEGMENT one; without any, the last LC_SEGMENT_64 one, whatever the image's width
+     ```
+
+     `LC_CODE_SIGNATURE` comes out of the load commands, which close up behind it, and the image ends where the
      signature started, or where the string table ends when no more than 12 bytes, the padding that aligns the
-     signature, lie between. `__LINKEDIT` ends there too. Throws
-     `EditError.signatureNotAtEnd` when the signature does not end the image, give or take the 7 bytes Security lets
-     go with it: removing it would cut off what follows.
+     signature, lie between. `__LINKEDIT` ends there too. Throws `EditError.signatureNotAtEnd` when the signature
+     does not end the image, give or take the 7 bytes Security lets go with it: removing it would cut off what
+     follows.
 
      Security leaves the vmsize of `__LINKEDIT` as the signature needed it, which `assure_signature_space` rounded up to
      16 KiB, so copies signed by different identities would still differ there: it is rounded as the tool that last
      wrote the segment rounded it, before any signature (`linkeditSizeRounding`).
 
-     Where Security goes astray, the intent is followed instead. It keeps pointers to the commands across the move, so
-     when `LC_CODE_SIGNATURE` is not the last command it writes the size of `__LINKEDIT` 16 bytes past a command that
-     moved, and reads `LC_SYMTAB` there; it moves the commands by 16 bytes whatever `cmdsize` says, and reads the
-     string table's range without swapping it. Security also refuses an image without `__LINKEDIT`, or of a filetype it
-     never signs, though what to write is as clear there.
+     Where Security goes astray, the intent is followed instead:
+
+     - It keeps pointers to the commands across the move, so when `LC_CODE_SIGNATURE` is not the last command it
+       writes the size of `__LINKEDIT` 16 bytes past a command that moved, and reads `LC_SYMTAB` there.
+     - It moves the commands by 16 bytes whatever `cmdsize` says.
+     - It reads the string table's range without swapping it, and sums its end in 32 bits, which wraps for a table
+       declared at the top of them.
+     - It refuses an image without `__LINKEDIT`, or of a filetype it never signs, or whose `ncmds` counts a command
+       past the table where the bytes there read as one with a size, though what to write is as clear there.
      */
     func removingSignature(end: Int) throws -> Unsigned? {
         let read = self.loadCommands.prefix(self.ncmds)
@@ -625,8 +636,11 @@ extension MachO {
             head.withUnsafeMutableBytes { $0.storeBytes(of: self.sw(value), toByteOffset: offset, as: T.self) }
         }
 
-        // Its size as Security writes it, wrapping when the segment starts past the new end.
-        if let linkedit = read.last(where: { $0.isSegment(named: "__LINKEDIT") }) {
+        // Its size as Security writes it, wrapping when the segment starts past the new end. Security keeps the last
+        // `__LINKEDIT` of each kind as it walks. It writes the `LC_SEGMENT` one when there is one, whatever the
+        // image's width, and the `LC_SEGMENT_64` one otherwise.
+        let linkedits = read.filter { $0.isSegment(named: "__LINKEDIT") }
+        if let linkedit = linkedits.last(where: { $0.cmd == UInt32(LC_SEGMENT) }) ?? linkedits.last {
             // Rounding to 1 leaves the size as it is, which is the choice where the rounding cannot be told.
             let page = self.linkeditSizeRounding ?? 1
             if linkedit.cmd == UInt32(LC_SEGMENT_64) {
