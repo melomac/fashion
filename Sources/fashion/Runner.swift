@@ -1120,10 +1120,15 @@ struct Digester {
     /**
      The lines to print for one file: every digest or, in match mode, every matching one, each as plain hash mode
      prints it, the slice or state labeled. A quiet match names the file once. A match is green, a fuzzy one by its
-     distance. Negated, match mode prints a file no digest of which matched as plain hash mode prints it, the path
-     alone when quiet, and nothing for one that matched. The file's diagnostics come first: a file that cannot be
-     read is reported in red and prints nothing else; what the edits refuse is a warning, and the file prints as it
-     is.
+     distance.
+
+     Negated, match mode prints a file no digest of which matched as plain hash mode prints it, the path alone when
+     quiet, and nothing for one that matched. A file with no digest prints nothing either, quiet or not, as plain
+     hash mode prints nothing for it. Such a file is not of the kind the mode hashes: no Mach-O under --symhash or
+     cdhash, or a file TLSH defines no digest of. Listing it as matching none would list every such file.
+
+     The file's diagnostics come first: a file that cannot be read is reported in red and prints nothing else;
+     what the edits refuse is a warning, and the file prints as it is.
      */
     func lines(for file: File, reporter: Reporter) -> [Line] {
         let subject = reporter.subject(file.path)
@@ -1143,6 +1148,7 @@ struct Digester {
             }
         } else if self.negate {
             let matched = results.contains { self.targets.match($0.digest, algorithm: $0.algorithm, threshold: self.score, xlen: self.xlen) != nil }
+            // A file with no digest is not one that matched none: it has nothing to compare, and prints nothing.
             if !matched, !results.isEmpty {
                 lines = self.quiet ? [Line(text: OutputFormatter.formatPath(path))] : results.map { result in
                     Line(text: OutputFormatter.formatLine(digest: result.digest, path: result.display(path), algorithm: result.algorithm), tint: result.tint)

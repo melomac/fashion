@@ -336,7 +336,8 @@ final class RunnerTests: XCTestCase {
     /**
      --negate turns match mode around: a file no digest of which matched prints as hash mode prints it, every
      algorithm the targets name, or its path alone with --quiet; one that matched, by any of its digests, prints
-     nothing. The run exits 0 when it printed, 1 when every file matched.
+     nothing, and so does one with no digest to compare. The run exits 0 when it printed, 1 when every file
+     matched.
      */
     func testNegateNamesTheFilesThatMatchNone() throws {
         let directory = FileManager.default.temporaryDirectory / "fashion-runner-negate-\(UUID())"
@@ -360,6 +361,14 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(try lines("md5", ["--quiet"]), [])
         XCTAssertEqual(try Hasher.parse([directory.path, "--quiet", "--negate"] + targets).scan(), 0)
         XCTAssertEqual(try Hasher.parse([directory.path, "--quiet", "--negate"] + targets + ["--match", digest(.md5, "none")]).scan(), 1)
+
+        // A file with no digest prints nothing, quiet or not: TLSH defines none of five bytes, and says so.
+        let tlsh = try XCTUnwrap(ByteHash(.tlsh)?.digest(Data((0 ..< 4096).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 5) })))
+        for arguments in [[], ["--quiet"]] {
+            let said = try Digester(Hasher.parse([directory.path, "--negate", "--match", tlsh] + arguments)).lines(for: (directory / "md5").path, reporter: Reporter(console: Console()))
+            XCTAssertEqual(said.filter { !$0.diagnostic }.map(\.text), [], "\(arguments)")
+            XCTAssertEqual(said.filter(\.diagnostic).count, 1, "\(arguments)")
+        }
     }
 
     /**
