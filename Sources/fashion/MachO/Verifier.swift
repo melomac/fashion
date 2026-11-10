@@ -1190,8 +1190,21 @@ struct MachOVerifier {
     private struct Sealed {
         let slot: UInt32
         let what: String
-        let blob: Data?
+        let bytes: MachO.Sealable
     }
+
+    /// The name a line gives to what each special slot seals, for the slots Security visits.
+    private static let sealedNames: [UInt32: String] = [
+        2: "the requirements blob",
+        4: "the top directory",
+        5: "the entitlements blob",
+        6: "the blob the file's kind keeps at slot 6",
+        7: "the DER entitlements blob",
+        8: "the launch constraint on the process",
+        9: "the launch constraint on its parent",
+        10: "the launch constraint on its responsible process",
+        11: "the library constraint",
+    ]
 
     /// The slices of one architecture, by its name, as the kernel compares entries: how many there are.
     private struct Counted {
@@ -1364,18 +1377,26 @@ struct MachOVerifier {
     ]
 
     /**
-     The signature as Security verifies it and the kernel takes it: an arm64 image without one, which the kernel does
-     not run; a signature Security loads no code directory from; for each directory, the first page of code that does
-     not hash to it (`validateExecutable`), a code limit short of the signature's offset, which leaves the pages before
-     it unsigned (the kernel's `csb_end_offset`), or past it, a scatter vector, which Security does not read, a page size
-     the kernel refuses; no CMS blob behind a directory not flagged ad hoc; a special slot that does not seal the blob
-     it should, `__TEXT,__info_plist`, the requirements, the entitlements and their DER form, which the kernel checks
-     for the last two and Security for all; entitlements that opt out of hardening; and who signed, as `Signer` has
-     it: a CMS blob that does not verify over the directory, a chain that ends outside Apple's roots, which codesign
-     and the kernel take and Gatekeeper refuses, a development or submission certificate, a Developer ID signature old
-     enough to run without a ticket, a team identifier the developer's certificate does not bear, a CMS blob Security
-     ignores behind an ad-hoc directory, and entitlements AMFI reserves to Apple's own signature. The Info.plist slot is not checked: for a
-     bundle's executable it seals the bundle's Info.plist, not the section's.
+     The signature as Security verifies it and the kernel takes it. Named:
+
+     - an arm64 image without a signature, which the kernel does not run;
+     - a signature Security loads no code directory from;
+     - for each directory: the first page of code that does not hash to it (`validateExecutable`); a code limit
+       short of the signature's offset, which leaves the pages before it unsigned (the kernel's `csb_end_offset`),
+       or past it; a scatter vector, which Security does not read; a page size the kernel refuses;
+     - no CMS blob behind a directory not flagged ad hoc;
+     - a special slot that does not seal the blob it should: the requirements, the top directory, the entitlements
+       and their DER form, the launch and library constraints. The kernel checks the entitlements' slots, Security
+       all of them, by its best directory;
+     - entitlements that opt out of hardening;
+     - who signed, as `Signer` has it: a CMS blob that does not verify over the directory, a chain that ends
+       outside Apple's roots, which codesign and the kernel take and Gatekeeper refuses, a development or
+       submission certificate, a Developer ID signature old enough to run without a ticket, a team identifier the
+       developer's certificate does not bear, a CMS blob Security ignores behind an ad-hoc directory, and
+       entitlements AMFI reserves to Apple's own signature.
+
+     The Info.plist slot is not checked: for a bundle's executable it seals the bundle's Info.plist, not the
+     section's.
 
      Bytes past the superblob inside `LC_CODE_SIGNATURE`'s range are not named: Apple's own arm64e slices keep a stale
      signature's hashes there, where the x86_64 slice's larger signature sized the range. Nor are an ad-hoc or a
@@ -1414,10 +1435,13 @@ struct MachOVerifier {
             if directory.hashType != geometry.hashType, directory.pageSize != geometry.pageSize || directory.codeLimit != geometry.codeLimit {
                 found.append("\(type) cuts \(directory.codeLimit.hex) bytes of code into pages of \(directory.pageSize.hex), where the \(geometry.hashType.name) code directory cuts \(geometry.codeLimit.hex) into \(geometry.pageSize.hex): Security checks every directory by the latter, the kernel by the directory it ranks first")
             }
+            // Strict validation wants the code limit at the signature exactly (`SingleDiskRep::strictValidate`),
+            // in the directory Security judges by, the best. It does not read an alternate's limit.
+            let judged = directory.hashType == best.hashType
             if directory.codeLimit < UInt64(signature.offset) {
-                found.append("\(type) covers \(directory.codeLimit.hex) bytes, \((UInt64(signature.offset) - directory.codeLimit).hex) short of the signature at \(signature.offset.hex): the rest is unsigned")
+                found.append("\(type) covers \(directory.codeLimit.hex) bytes, \((UInt64(signature.offset) - directory.codeLimit).hex) short of the signature at \(signature.offset.hex): the rest is unsigned" + (judged ? ", and strict validation refuses the signature" : ""))
             } else if checked.valid, directory.codeLimit > UInt64(signature.offset) {
-                found.append("\(type) covers \(directory.codeLimit.hex) bytes, past the signature at \(signature.offset.hex)")
+                found.append("\(type) covers \(directory.codeLimit.hex) bytes, past the signature at \(signature.offset.hex)" + (judged ? ", which strict validation refuses the signature for" : ""))
             }
             if directory.scattered {
                 found.append("\(type) is scattered, which Security does not read: its slots are checked in order")
@@ -1434,25 +1458,40 @@ struct MachOVerifier {
 
         found += Self.kernelIndexAnomalies(of: superblob)
 
-        let sealed = [
-            Sealed(slot: MachO.csslotRequirements, what: "the requirements blob", blob: MachO.component(MachO.csslotRequirements, of: superblob)),
-            Sealed(slot: MachO.csslotEntitlements, what: "the entitlements blob", blob: MachO.component(MachO.csslotEntitlements, of: superblob)),
-            Sealed(slot: MachO.csslotDEREntitlements, what: "the DER entitlements blob", blob: MachO.component(MachO.csslotDEREntitlements, of: superblob)),
-        ]
+        // The special slots Security visits, up to the library constraint's (`validateNonResourceComponents`), each
+        // with the bytes it seals: the whole blob, or the bytes under its wrapper (`MachO.sealable`). Security
+        // reads the seals of the directory it judges by, the best. The kernel reads the entitlements' seals, in
+        // the directory it ranks first.
+        let sealed = (1 ... MachO.csslotMax).filter { !MachO.csslotsLeftOut.contains($0) }.map { Sealed(slot: $0, what: Self.sealedNames[$0] ?? "the blob of slot \($0)", bytes: MachO.sealable($0, in: superblob)) }
+
+        // A blob that should lie under a wrapper and does not is refused where Security fetches it: for a slot
+        // the best directory has, and for the top directory whether the directory has its slot or not.
+        for seal in sealed where seal.slot == MachO.csslotTopDirectory || Int(seal.slot) <= best.nSpecialSlots {
+            if case .unwrapped = seal.bytes {
+                found.append("\(seal.what) does not lie under a wrapper, which Security refuses the signature for")
+            }
+        }
+
         for directory in directories {
             let type = "the \(directory.hashType.name) code directory"
+            let unread = directory.hashType == best.hashType ? "" : ", which Security does not read: it judges the signature by the \(best.hashType.name) one"
             for seal in sealed {
                 let hash = directory.specialSlot(Int(seal.slot))
                 let zero = hash?.allSatisfy { $0 == 0 } ?? true
-                if let blob = seal.blob {
+                switch seal.bytes {
+                case let .bytes(bytes):
                     // A slot the signer left empty seals nothing, which the kernel refuses of entitlements.
                     if zero {
                         found.append("\(seal.what) is not sealed by \(type)")
-                    } else if directory.hashType.digest(blob).prefix(directory.hashType.slotSize) != hash {
-                        found.append("\(seal.what) does not hash to its slot in \(type)")
+                    } else if directory.hashType.digest(bytes).prefix(directory.hashType.slotSize) != hash {
+                        found.append("\(seal.what) does not hash to its slot in \(type)" + unread)
                     }
-                } else if !zero {
-                    found.append("\(type) seals \(seal.what), which the signature does not hold")
+                case .none:
+                    if !zero {
+                        found.append("\(type) seals \(seal.what), which the signature does not hold" + unread)
+                    }
+                case .unwrapped:
+                    break
                 }
             }
         }
@@ -1506,14 +1545,15 @@ struct MachOVerifier {
         // The CMS blob, past its 8-byte header, which Security takes under its magic alone (`EmbeddedSignatureBlob`,
         // errSecCSSignatureInvalid otherwise), and reads only behind a directory not flagged ad hoc.
         // codesign writes an empty wrapper, its header alone, behind an ad-hoc signature.
-        let wrapped = MachO.component(MachO.csslotSignature, of: superblob).flatMap { $0.count > 8 ? $0 : nil }
+        let signatureBlob = MachO.component(MachO.csslotSignature, of: superblob)
+        let wrapped = signatureBlob.flatMap { $0.count > 8 ? $0 : nil }
         var cms = Data()
-        if let wrapped {
-            if let magic = Self.magic(of: wrapped), magic != 0xfade_0b01 {
-                found.append("the CMS blob's magic is \(magic.hex), not 0xfade0b01, which Security refuses the signature for")
-            } else {
-                cms = Data(wrapped.dropFirst(8))
-            }
+        // The magic is checked of a wrapper that is its header alone too, as codesign leaves it behind an ad-hoc
+        // signature.
+        if let signatureBlob, let magic = Self.magic(of: signatureBlob), magic != 0xfade_0b01 {
+            found.append("the CMS blob's magic is \(magic.hex), not 0xfade0b01, which Security refuses the signature for")
+        } else if let wrapped {
+            cms = Data(wrapped.dropFirst(8))
         }
         if best.flags & MachO.csAdhoc != 0 {
             if wrapped != nil {

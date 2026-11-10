@@ -960,7 +960,7 @@ final class VerifierTests: XCTestCase {
         let slots = Int(UInt32(bigEndian: program.load(UInt32.self, at: directoryOffset + 28)))
         short.store(UInt32((slots - 1) * page).bigEndian, at: directoryOffset + 32)
         short.store(UInt32(slots - 1).bigEndian, at: directoryOffset + 28)
-        XCTAssertEqual(try self.verify(short, "short", in: directory).lines, [": the sha256 code directory covers \(((slots - 1) * page).hex) bytes, \((signature.offset - (slots - 1) * page).hex) short of the signature at \(signature.offset.hex): the rest is unsigned"])
+        XCTAssertEqual(try self.verify(short, "short", in: directory).lines, [": the sha256 code directory covers \(((slots - 1) * page).hex) bytes, \((signature.offset - (slots - 1) * page).hex) short of the signature at \(signature.offset.hex): the rest is unsigned, and strict validation refuses the signature"])
         XCTAssertEqual(try CDHash.hash(fixture: short).map(\.invalid), [true], "strict validation refuses a code limit short of the signature")
 
         var refused = program
@@ -2031,6 +2031,9 @@ final class VerifierTests: XCTestCase {
        with --exact, which hashes the image without them;
      - an alternate's own seals are never read: a wrong one beside a sound best directory is no INVALID, and a
        wrong one in the best is, on every line.
+
+     verify names each in a line: the slot that does not seal its blob, by what it seals, and for an alternate that
+     Security does not read it; the blob that does not lie under its wrapper; the limit strict validation refuses.
      */
     func testINVALIDIsSecuritysVerdictOnTheBestDirectory() throws {
         let directory = try self.directory("static-verdict")
@@ -2112,24 +2115,25 @@ final class VerifierTests: XCTestCase {
         var changed = sha256
         changed[hashOffset + 32] ^= 0xff
 
-        var cases: [(name: String, file: Data, invalid: Bool)] = [
-            ("page-44", embedded([(0, paged(44)), (2, requirements), (0x10000, wrapper)]), true),
-            ("page-31", embedded([(0, paged(31)), (2, requirements), (0x10000, wrapper)]), false),
-            ("page-63", embedded([(0, paged(63)), (2, requirements), (0x10000, wrapper)]), false),
-            ("scattered", embedded([(0, scattered(sha256)), (2, requirements), (0x10000, wrapper)]), false),
-            ("scattered-changed", embedded([(0, scattered(changed)), (2, requirements), (0x10000, wrapper)]), true),
-            ("sound", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]), false),
-            ("constraint", embedded([(0, sealing(sha256, [8: constraint])), (2, requirements), (8, constraint), (0x10000, wrapper)]), false),
-            ("constraint-changed", embedded([(0, sealing(sha256, [8: blob(0xfade_8181, "another")])), (2, requirements), (8, constraint), (0x10000, wrapper)]), true),
-            ("constraint-missing", embedded([(0, sealing(sha256, [8: constraint])), (2, requirements), (0x10000, wrapper)]), true),
-            ("constraint-unsealed", embedded([(0, sha256), (2, requirements), (8, constraint), (0x10000, wrapper)]), false),
-            ("library-missing", embedded([(0, sealing(sha256, [11: constraint])), (2, requirements), (0x10000, wrapper)]), true),
-            ("twelve-missing", embedded([(0, sealing(sha256, [12: constraint])), (2, requirements), (0x10000, wrapper)]), false),
-            ("under-wrapper", embedded([(0, sealing(sha256, [6: Data("wrapped".utf8)])), (2, requirements), (6, wrapped), (0x10000, wrapper)]), false),
-            ("over-wrapper", embedded([(0, sealing(sha256, [6: wrapped])), (2, requirements), (6, wrapped), (0x10000, wrapper)]), true),
-            ("top-unwrapped", embedded([(0, sha256), (2, requirements), (4, requirements), (0x10000, wrapper)]), true),
-            ("signature-unwrapped", embedded([(0, sha256), (2, requirements), (0x10000, blob(0xfade_0b02))]), true),
-            ("limit-past", embedded([(0, further), (2, requirements), (0x10000, wrapper)]), true),
+        let type = "the sha256 code directory"
+        var cases: [(name: String, file: Data, invalid: Bool, lines: [String]?)] = [
+            ("page-44", embedded([(0, paged(44)), (2, requirements), (0x10000, wrapper)]), true, nil),
+            ("page-31", embedded([(0, paged(31)), (2, requirements), (0x10000, wrapper)]), false, nil),
+            ("page-63", embedded([(0, paged(63)), (2, requirements), (0x10000, wrapper)]), false, nil),
+            ("scattered", embedded([(0, scattered(sha256)), (2, requirements), (0x10000, wrapper)]), false, nil),
+            ("scattered-changed", embedded([(0, scattered(changed)), (2, requirements), (0x10000, wrapper)]), true, nil),
+            ("sound", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]), false, []),
+            ("constraint", embedded([(0, sealing(sha256, [8: constraint])), (2, requirements), (8, constraint), (0x10000, wrapper)]), false, []),
+            ("constraint-changed", embedded([(0, sealing(sha256, [8: blob(0xfade_8181, "another")])), (2, requirements), (8, constraint), (0x10000, wrapper)]), true, [": the launch constraint on the process does not hash to its slot in \(type)"]),
+            ("constraint-missing", embedded([(0, sealing(sha256, [8: constraint])), (2, requirements), (0x10000, wrapper)]), true, [": \(type) seals the launch constraint on the process, which the signature does not hold"]),
+            ("constraint-unsealed", embedded([(0, sha256), (2, requirements), (8, constraint), (0x10000, wrapper)]), false, [": the launch constraint on the process is not sealed by \(type)"]),
+            ("library-missing", embedded([(0, sealing(sha256, [11: constraint])), (2, requirements), (0x10000, wrapper)]), true, [": \(type) seals the library constraint, which the signature does not hold"]),
+            ("twelve-missing", embedded([(0, sealing(sha256, [12: constraint])), (2, requirements), (0x10000, wrapper)]), false, []),
+            ("under-wrapper", embedded([(0, sealing(sha256, [6: Data("wrapped".utf8)])), (2, requirements), (6, wrapped), (0x10000, wrapper)]), false, []),
+            ("over-wrapper", embedded([(0, sealing(sha256, [6: wrapped])), (2, requirements), (6, wrapped), (0x10000, wrapper)]), true, [": the blob the file's kind keeps at slot 6 does not hash to its slot in \(type)"]),
+            ("top-unwrapped", embedded([(0, sha256), (2, requirements), (4, requirements), (0x10000, wrapper)]), true, [": the top directory does not lie under a wrapper, which Security refuses the signature for"]),
+            ("signature-unwrapped", embedded([(0, sha256), (2, requirements), (0x10000, blob(0xfade_0b02))]), true, [": the CMS blob's magic is 0xfade0b02, not 0xfade0b01, which Security refuses the signature for"]),
+            ("limit-past", embedded([(0, further), (2, requirements), (0x10000, wrapper)]), true, [": \(type) covers \(past.hex) bytes, past the signature at \(signature.offset.hex), which strict validation refuses the signature for"]),
         ]
 
         // Two directories, SHA-256 the best: the requirements' seal wrong in one, then in the other.
@@ -2150,19 +2154,23 @@ final class VerifierTests: XCTestCase {
             return directory
         }
         cases += [
-            ("alternate-seal", embedded([(0, unsealed(first)), (2, requirements), (0x1000, second), (0x10000, wrapper)], in: both, at: pairSignature), false),
-            ("best-seal", embedded([(0, first), (2, requirements), (0x1000, unsealed(second)), (0x10000, wrapper)], in: both, at: pairSignature), true),
+            ("alternate-seal", embedded([(0, unsealed(first)), (2, requirements), (0x1000, second), (0x10000, wrapper)], in: both, at: pairSignature), false, [": the requirements blob does not hash to its slot in the sha1 code directory, which Security does not read: it judges the signature by the sha256 one"]),
+            ("best-seal", embedded([(0, first), (2, requirements), (0x1000, unsealed(second)), (0x10000, wrapper)], in: both, at: pairSignature), true, [": the requirements blob does not hash to its slot in \(type)"]),
         ]
 
-        cases.append(("appended", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]) + Data("appended".utf8), true))
+        cases.append(("appended", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]) + Data("appended".utf8), true, nil))
 
-        for (name, data, invalid) in cases {
+        for (name, data, invalid, lines) in cases {
             let file = directory / name
             try data.write(to: file)
             let results = try CDHash.hash(path: file.path)
             XCTAssertEqual(results.map(\.invalid), results.map { _ in invalid }, name)
             XCTAssertEqual(results.map(\.strictOnly), results.map { _ in name == "appended" }, name)
             XCTAssertEqual((try? codesign(["--verify", file.path])) == nil, invalid, "\(name): codesign --verify")
+            // What verify says of it, where this test is about the line.
+            if let lines {
+                XCTAssertEqual(self.verify(file.path).lines.map { $0.replacingOccurrences(of: file.path, with: "") }, lines, name)
+            }
         }
         let appended = directory / "appended"
         XCTAssertEqual(try CDHash.hash(path: appended.path, exact: true).map(\.invalid), [false])

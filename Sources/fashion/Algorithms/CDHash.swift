@@ -382,20 +382,19 @@ extension MachO {
         }
     }
 
-    /// What a special slot seals of the blob the superblob holds for it.
-    private enum Sealable {
-        /// No blob there.
+    /// The bytes a special slot's hash covers, of the blob the superblob holds for that slot.
+    enum Sealable {
+        /// No blob for the slot.
         case none
         /// The bytes the slot's hash is taken over.
         case bytes(Data)
-        /// A blob that should lie under a wrapper and does not, which Security refuses the signature for.
+        /// A blob that should lie under a wrapper and does not: Security refuses the signature for it.
         case unwrapped
     }
 
-    /// The bytes special slot `slot` seals in `superblob`, like `EmbeddedSignatureBlob::component`: the whole blob
-    /// for a slot whose component is a blob of its own (`cdComponentIsBlob`), what lies under its wrapper for any
-    /// other.
-    private static func sealable(_ slot: UInt32, in superblob: Data) -> Sealable {
+    /// The bytes special slot `slot` seals in `superblob`, as `EmbeddedSignatureBlob::component` gives them: the
+    /// whole blob when the component is itself a blob (`cdComponentIsBlob`), the bytes under its wrapper otherwise.
+    static func sealable(_ slot: UInt32, in superblob: Data) -> Sealable {
         guard let blob = self.component(slot, of: superblob) else {
             return .none
         }
@@ -682,18 +681,17 @@ extension MachO {
     private static let csslotCodeDirectory: UInt32 = 0
     private static let csslotAlternateBase: UInt32 = 0x1000
     private static let csslotAlternateLimit: UInt32 = 0x1005
-    /// The special slots Security seals a blob under: the requirements, the entitlements, their DER form.
-    static let csslotRequirements: UInt32 = 2
+    /// The entitlements' special slots: the XML form's, and the DER form's.
     static let csslotEntitlements: UInt32 = 5
     static let csslotDEREntitlements: UInt32 = 7
     /// The top directory's slot, and the last slot Security visits: the library constraint's (`cdSlotMax`).
-    private static let csslotTopDirectory: UInt32 = 4
-    private static let csslotMax: UInt32 = 11
+    static let csslotTopDirectory: UInt32 = 4
+    static let csslotMax: UInt32 = 11
     /// The slots sealed over the whole blob (`cdComponentIsBlob`): the requirements, the entitlements, their DER
     /// form and the four constraints. The others are sealed over the bytes under a wrapper.
     private static let csslotsOfBlobs: Set<UInt32> = [2, 5, 7, 8, 9, 10, 11]
     /// The slots hash mode does not judge: the Info.plist's and the resource directory's.
-    private static let csslotsLeftOut: Set<UInt32> = [1, 3]
+    static let csslotsLeftOut: Set<UInt32> = [1, 3]
     /// The CMS signature's slot, and the magic of the wrapper it lies under.
     static let csslotSignature: UInt32 = 0x10000
     static let csmagicBlobWrapper: UInt32 = 0xfade_0b01
