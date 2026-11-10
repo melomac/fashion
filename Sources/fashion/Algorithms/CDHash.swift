@@ -65,8 +65,9 @@ enum CDHash {
         /// True when the slice is unsigned and the hash was synthesized.
         let adhoc: Bool
         /// True when the slice's signature does not hold as Security's static validation holds it: a code directory
-        /// it cannot load, so the hash is synthesized; code that no longer hashes to this directory; a sealed blob
-        /// missing or changed; a code limit short of the signature; a CMS signature missing or not verifying.
+        /// it cannot load, so the hash is synthesized; code that no longer hashes to this directory; or, judged by
+        /// the best directory for every one of them, a sealed blob missing or changed, a code limit that is not
+        /// the signature's offset, a CMS signature missing or not verifying (`MachO.securityTakes`).
         let invalid: Bool
     }
 
@@ -167,8 +168,8 @@ extension MachO {
             let loaded = try Self.loadCodeDirectories(superblob)
             let directories = loaded.sorted { $0.hashType.rank > $1.hashType.rank }
             let taken = Self.securityTakes(directories, primary: loaded.first, in: superblob, signature: signature)
-            let hashes = try zip(directories, zip(self.validateExecutables(directories), taken)).map { cd, verdicts in
-                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !verdicts.0.valid || !verdicts.1)
+            let hashes = try zip(directories, self.validateExecutables(directories)).map { cd, verdict in
+                CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !verdict.valid || !taken)
             }
             if !hashes.isEmpty {
                 return CodeDirectoryHashes(hashes: hashes, skipReason: nil)
@@ -285,38 +286,106 @@ extension MachO {
     }
 
     /**
-     Whether Security's static validation takes each of `directories` beyond its code slots
-     (`SecStaticCode::staticValidateCore`): a sealed special slot, the requirements, the entitlements or their DER
-     form, whose blob is missing or hashes otherwise fails (`validateComponent`); a code limit short of the
-     signature fails strict validation, codesign's and Gatekeeper's default; and behind a best directory not flagged
-     ad hoc, the CMS blob must be there under its wrapper's magic and verify over `primary`, binding every directory
-     (`verifySignature`). Whose chain the signer's is, trustd's work, is verify's business, not hash mode's.
+     Whether Security's static validation takes the signature, beyond its code slots
+     (`SecStaticCode::staticValidateCore`). Security judges a signature by one directory, the best: the first of
+     `directories`. It never reads an alternate's own seals or limit.
+
+     The signature slot. The blob there must lie under a wrapper, whatever the directory's flags
+     (`EmbeddedSignatureBlob::component`): another magic is an invalid signature. When the directory is not flagged
+     ad hoc, the CMS blob under the wrapper must verify over `primary` and bind every directory
+     (`verifySignature`). When it is, the blob is not read. Whose chain the signer's is, trustd's work, is
+     verify's business, not hash mode's.
+
+     The code limit. Strict validation, codesign's and Gatekeeper's default, wants it at the signature's offset
+     exactly (`SingleDiskRep::strictValidate`, "code limit must cover (exactly) the entire file").
+
+     The special slots. Security visits the slots the directory has, up to slot 11
+     (`validateNonResourceComponents`). A sealed slot, one whose hash is not all zeros, wants its blob there and
+     hashing to it (`component`). An unsealed slot's blob is not read.
+
+     ```
+     slot   what it seals                       hashed over                   judged here
+     -----  ----------------------------------  ----------------------------  -----------
+     1      the Info.plist                      a file of the bundle          no
+     2      the requirements                    the whole blob                yes
+     3      the resource directory              a file of the bundle          no
+     4      the top directory                   the bytes under its wrapper   yes
+     5      the entitlements                    the whole blob                yes
+     6      what the file's kind keeps there    the bytes under its wrapper   yes
+     7      the DER entitlements                the whole blob                yes
+     8-11   the launch and library constraints  the whole blob                yes
+     ```
+
+     A blob hashed under its wrapper must have one: without it, the signature is invalid. Slots 1 and 3 are left
+     out because they need more than the slice: for an executable in a bundle, slot 1 seals the bundle's
+     Info.plist. The list of slots a top directory holds is left out too: Security compares it once slot 4 itself
+     holds.
      */
-    private static func securityTakes(_ directories: [EmbeddedCodeDirectory], primary: EmbeddedCodeDirectory?, in superblob: Data, signature: Span) -> [Bool] {
-        let sealed = [self.csslotRequirements, self.csslotEntitlements, self.csslotDEREntitlements].map { self.component($0, of: superblob) }
-        let signed: Bool = {
-            guard let best = directories.first, let primary, best.flags & self.csAdhoc == 0 else {
-                return true
-            }
-            guard let wrapped = self.component(self.csslotSignature, of: superblob), wrapped.count > 8, wrapped.bigEndianUInt32(at: 0) == self.csmagicBlobWrapper else {
+    private static func securityTakes(_ directories: [EmbeddedCodeDirectory], primary: EmbeddedCodeDirectory?, in superblob: Data, signature: Span) -> Bool {
+        guard let best = directories.first, let primary else {
+            return true
+        }
+
+        let wrapped = self.component(self.csslotSignature, of: superblob)
+        if let wrapped, wrapped.bigEndianUInt32(at: 0) != self.csmagicBlobWrapper {
+            return false
+        }
+        if best.flags & self.csAdhoc == 0 {
+            guard
+                let wrapped, wrapped.count > 8,
+                (try? Signer(cms: Data(wrapped.dropFirst(8)), over: primary.data, binding: directories.map { Signer.Binding(hashType: $0.hashType, cdhash: $0.hashType.digest($0.data)) }, best: best.hashType, evaluatingChain: false)) != nil
+            else {
                 return false
-            }
-            return (try? Signer(cms: Data(wrapped.dropFirst(8)), over: primary.data, binding: directories.map { Signer.Binding(hashType: $0.hashType, cdhash: $0.hashType.digest($0.data)) }, best: best.hashType, evaluatingChain: false)) != nil
-        }()
-        return directories.map { directory in
-            guard signed, directory.codeLimit >= UInt64(signature.offset) else {
-                return false
-            }
-            return zip([self.csslotRequirements, self.csslotEntitlements, self.csslotDEREntitlements], sealed).allSatisfy { slot, blob in
-                guard let hash = directory.specialSlot(Int(slot)), hash.contains(where: { $0 != 0 }) else {
-                    return true // unsealed: nothing for Security to check
-                }
-                guard let blob else {
-                    return false
-                }
-                return directory.hashType.digest(blob).prefix(directory.hashType.slotSize) == hash
             }
         }
+
+        guard best.codeLimit == UInt64(signature.offset) else {
+            return false
+        }
+
+        // Security fetches the top directory's blob whatever slots the directory has, and wants it wrapped.
+        if case .unwrapped = self.sealable(self.csslotTopDirectory, in: superblob) {
+            return false
+        }
+
+        // The slots the directory has: none for the linker's own ad hoc signature.
+        return (1 ... self.csslotMax).prefix(best.nSpecialSlots).allSatisfy { slot in
+            guard !self.csslotsLeftOut.contains(slot), let hash = best.specialSlot(Int(slot)) else {
+                return true
+            }
+            switch self.sealable(slot, in: superblob) {
+            case .unwrapped:
+                return false
+            case .none:
+                return !hash.contains { $0 != 0 }
+            case let .bytes(sealed):
+                // Unsealed: nothing for Security to check.
+                return !hash.contains { $0 != 0 } || best.hashType.digest(sealed).prefix(best.hashType.slotSize) == hash
+            }
+        }
+    }
+
+    /// What a special slot seals of the blob the superblob holds for it.
+    private enum Sealable {
+        /// No blob there.
+        case none
+        /// The bytes the slot's hash is taken over.
+        case bytes(Data)
+        /// A blob that should lie under a wrapper and does not, which Security refuses the signature for.
+        case unwrapped
+    }
+
+    /// The bytes special slot `slot` seals in `superblob`, like `EmbeddedSignatureBlob::component`: the whole blob
+    /// for a slot whose component is a blob of its own (`cdComponentIsBlob`), what lies under its wrapper for any
+    /// other.
+    private static func sealable(_ slot: UInt32, in superblob: Data) -> Sealable {
+        guard let blob = self.component(slot, of: superblob) else {
+            return .none
+        }
+        if self.csslotsOfBlobs.contains(slot) {
+            return .bytes(blob)
+        }
+        return blob.bigEndianUInt32(at: 0) == self.csmagicBlobWrapper ? .bytes(Data(blob.dropFirst(8))) : .unwrapped
     }
 
     /**
@@ -600,6 +669,14 @@ extension MachO {
     static let csslotRequirements: UInt32 = 2
     static let csslotEntitlements: UInt32 = 5
     static let csslotDEREntitlements: UInt32 = 7
+    /// The top directory's slot, and the last slot Security visits: the library constraint's (`cdSlotMax`).
+    private static let csslotTopDirectory: UInt32 = 4
+    private static let csslotMax: UInt32 = 11
+    /// The slots sealed over the whole blob (`cdComponentIsBlob`): the requirements, the entitlements, their DER
+    /// form and the four constraints. The others are sealed over the bytes under a wrapper.
+    private static let csslotsOfBlobs: Set<UInt32> = [2, 5, 7, 8, 9, 10, 11]
+    /// The slots hash mode does not judge: the Info.plist's and the resource directory's.
+    private static let csslotsLeftOut: Set<UInt32> = [1, 3]
     /// The CMS signature's slot, and the magic of the wrapper it lies under.
     static let csslotSignature: UInt32 = 0x10000
     static let csmagicBlobWrapper: UInt32 = 0xfade_0b01

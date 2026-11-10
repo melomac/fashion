@@ -124,6 +124,27 @@ final class CDHashTests: XCTestCase {
     // MARK: - Verification
 
     /**
+     The signature the linker gives an arm64 program, ad hoc and with no special slot at all, where codesign seals
+     the requirements at least: its cdhash is the one codesign reads, with no INVALID, as there is no seal for
+     Security to check.
+     */
+    func testALinkerSignedProgramWithNoSpecialSlotIsHashed() throws {
+        let dir = try self.temporaryDirectory()
+        let source = dir / "main.c"
+        try "int main(void) { return 0; }\n".write(to: source, atomically: true, encoding: .utf8)
+        let program = dir / "linker-signed"
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["clang", "-arch", "arm64", source.path, "-o", program.path]), "cannot build an arm64 program")
+        let described = try codesign(["-dvvv", program.path])
+        try XCTSkipUnless(described.contains("linker-signed"), "the linker signed nothing")
+        XCTAssertTrue(described.contains("+0 "), "no special slot: \(described)")
+
+        let results = try CDHash.hash(path: program.path)
+        XCTAssertEqual(results.map(\.adhoc), [false])
+        XCTAssertEqual(results.map(\.invalid), [false])
+        XCTAssertTrue(described.contains("CandidateCDHashFull sha256=\(results[0].hash)"), described)
+    }
+
+    /**
      A byte of code flipped after signing leaves the signature, and so the cdhash, as it was, but the code no longer
      hashes to its directory: `codesign --verify` reports "code or signature have been modified" for that slice only,
      and fashion names it on stderr, even into a pipe, without failing the run.

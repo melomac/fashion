@@ -1975,6 +1975,122 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     Hash mode's INVALID is the verdict of Security's static validation, which judges a signature by its best
+     directory, as `codesign --verify` has it for each file here, made from an ad hoc signature taken apart:
+
+     - a special slot the directory seals wants its blob there and hashing to it, up to the library constraint's,
+       slot 11: a launch constraint changed or missing is INVALID, one unsealed or sealed right is not, and a slot
+       past the last Security visits, 12, is not read;
+     - a slot sealed over what lies under a wrapper, 6, is hashed over that and not over the blob;
+     - the top directory's blob, slot 4, must lie under a wrapper, sealed or not;
+     - the signature slot's must too, behind a directory flagged ad hoc as behind any;
+     - the code limit must be the signature's offset, not past it;
+     - an alternate's own seals are never read: a wrong one beside a sound best directory is no INVALID, and a
+       wrong one in the best is, on every line.
+     */
+    func testINVALIDIsSecuritysVerdictOnTheBestDirectory() throws {
+        let directory = try self.directory("static-verdict")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        let sha256 = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+
+        /// A blob of `magic` over `payload`.
+        func blob(_ magic: UInt32, _ payload: String = "") -> Data {
+            var blob = Data()
+            [magic, UInt32(8 + payload.utf8.count)].forEach { blob.appendUInt32BE($0) }
+            return blob + Data(payload.utf8)
+        }
+
+        /// `directory`, a SHA-256 one, with each of `slots` sealed over its bytes, special slots added as needed.
+        func sealing(_ directory: Data, _ slots: [Int: Data]) -> Data {
+            var directory = directory
+            let hashOffset = Int(UInt32(bigEndian: directory.load(UInt32.self, at: 16)))
+            let had = Int(UInt32(bigEndian: directory.load(UInt32.self, at: 24)))
+            let added = max(0, (slots.keys.max() ?? 0) - had)
+            directory.insert(contentsOf: Data(count: 32 * added), at: hashOffset - 32 * had)
+            directory.store(UInt32(directory.count).bigEndian, at: 4)
+            directory.store(UInt32(hashOffset + 32 * added).bigEndian, at: 16)
+            directory.store(UInt32(had + added).bigEndian, at: 24)
+            for (slot, bytes) in slots {
+                let at = hashOffset + 32 * added - 32 * slot
+                directory.replaceSubrange(at ..< at + 32, with: Data(SHA256.hash(data: bytes)))
+            }
+            return directory
+        }
+
+        /// `program` with a signature of `blobs`, each at its slot, placed in order.
+        func embedded(_ blobs: [(slot: UInt32, blob: Data?)], in program: Data = program, at signature: MachO.Span = signature) -> Data {
+            Self.embedding(blobs, in: program, at: signature)
+        }
+
+        let wrapper = blob(0xfade_0b01)
+        let constraint = blob(0xfade_8181, "constraint")
+        let wrapped = blob(0xfade_0b01, "wrapped")
+
+        // The code limit past the signature, over the superblob's header and index, the last page hashed to there.
+        let past = signature.offset + 36
+        try XCTSkipUnless((past - 1) >> 12 == (signature.offset - 1) >> 12, "the limit would take a page more")
+        var further = sha256
+        further.store(UInt32(past).bigEndian, at: 32)
+        let slots = Int(UInt32(bigEndian: sha256.load(UInt32.self, at: 28)))
+        let last = Int(UInt32(bigEndian: sha256.load(UInt32.self, at: 16))) + 32 * (slots - 1)
+        let page = ((signature.offset - 1) >> 12) << 12
+        let head = Self.superblob([(0, further), (2, requirements), (0x10000, wrapper)]).prefix(36)
+        further.replaceSubrange(last ..< last + 32, with: Data(SHA256.hash(data: program[page ..< signature.offset] + head)))
+
+        var cases: [(name: String, file: Data, invalid: Bool)] = [
+            ("sound", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]), false),
+            ("constraint", embedded([(0, sealing(sha256, [8: constraint])), (2, requirements), (8, constraint), (0x10000, wrapper)]), false),
+            ("constraint-changed", embedded([(0, sealing(sha256, [8: blob(0xfade_8181, "another")])), (2, requirements), (8, constraint), (0x10000, wrapper)]), true),
+            ("constraint-missing", embedded([(0, sealing(sha256, [8: constraint])), (2, requirements), (0x10000, wrapper)]), true),
+            ("constraint-unsealed", embedded([(0, sha256), (2, requirements), (8, constraint), (0x10000, wrapper)]), false),
+            ("library-missing", embedded([(0, sealing(sha256, [11: constraint])), (2, requirements), (0x10000, wrapper)]), true),
+            ("twelve-missing", embedded([(0, sealing(sha256, [12: constraint])), (2, requirements), (0x10000, wrapper)]), false),
+            ("under-wrapper", embedded([(0, sealing(sha256, [6: Data("wrapped".utf8)])), (2, requirements), (6, wrapped), (0x10000, wrapper)]), false),
+            ("over-wrapper", embedded([(0, sealing(sha256, [6: wrapped])), (2, requirements), (6, wrapped), (0x10000, wrapper)]), true),
+            ("top-unwrapped", embedded([(0, sha256), (2, requirements), (4, requirements), (0x10000, wrapper)]), true),
+            ("signature-unwrapped", embedded([(0, sha256), (2, requirements), (0x10000, blob(0xfade_0b02))]), true),
+            ("limit-past", embedded([(0, further), (2, requirements), (0x10000, wrapper)]), true),
+        ]
+
+        // Two directories, SHA-256 the best: the requirements' seal wrong in one, then in the other.
+        let twice = directory / "twice"
+        try self.program("x86_64", in: directory).write(to: twice)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", "--digest-algorithm=sha1,sha256", twice.path])
+        let both = try Data(contentsOf: twice)
+        let pair = try XCTUnwrap(MachO(File(data: both)))
+        let pairSignature = try XCTUnwrap(pair.findCodeSignature())
+        let pairBlob = try pair.signingData(pairSignature)
+        let first = try Data(XCTUnwrap(MachO.component(0, of: pairBlob)))
+        let second = try Data(XCTUnwrap(MachO.component(0x1000, of: pairBlob)))
+        XCTAssertEqual([first[37], second[37]], [1, 2], "SHA-1 at slot 0, SHA-256 its alternate")
+        /// `directory` with the first byte of its requirements' seal changed.
+        func unsealed(_ directory: Data) -> Data {
+            var directory = directory
+            directory[Int(UInt32(bigEndian: directory.load(UInt32.self, at: 16))) - 2 * Int(directory[36])] ^= 0xff
+            return directory
+        }
+        cases += [
+            ("alternate-seal", embedded([(0, unsealed(first)), (2, requirements), (0x1000, second), (0x10000, wrapper)], in: both, at: pairSignature), false),
+            ("best-seal", embedded([(0, first), (2, requirements), (0x1000, unsealed(second)), (0x10000, wrapper)], in: both, at: pairSignature), true),
+        ]
+
+        for (name, data, invalid) in cases {
+            let file = directory / name
+            try data.write(to: file)
+            let results = try CDHash.hash(path: file.path)
+            XCTAssertEqual(results.map(\.invalid), results.map { _ in invalid }, name)
+            XCTAssertEqual((try? codesign(["--verify", file.path])) == nil, invalid, "\(name): codesign --verify")
+        }
+    }
+
+    /**
      The index as the kernel walks it, where Security stops at the first alternate missing: a code directory whose
      identifier offset is 0, or whose magic is not a directory's, which Security loads and the kernel refuses the
      signature for; a directory past a gap in the alternates, which Security never loads and the kernel counts, two
