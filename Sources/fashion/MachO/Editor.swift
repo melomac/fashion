@@ -149,25 +149,35 @@ enum MachOEditor {
      edit, in the order of a universal file's architectures, an image the edits leave alone with none and its `exact`
      cut alone beside, and the file the states are pieces of, `file` or its padding (`padded`), as it was opened;
      every image with none when they change nothing, the headers read all the same, so that what comes after the
-     edit reads them no second time; a file that is not Mach-O as it is, nothing opened. With
-     `unsign`, each image comes out without its code signature, as `MachO.removingSignature(end:)` leaves it; with
-     `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing, since it
-     hides what UPX left, then with `unsign` the unpacked image's own signature comes out; a universal file with its
-     architectures so is laid out again as `lipo` lays out the architectures it is given. With `exact` `always`, an
-     image is cut where it ends before its signature comes out, so appended bytes do not keep it in, the unpacked image
-     too; one the edits leave alone is left as it is, appended bytes included, since the cut alone is no edit. As
-     needed, the cut and the padding come where a stage needs them alone, the padding held back until an edit comes of
-     it. Throws for a Mach-O that does not parse, with `unsign` for a signature that does not end its image and that no
+     edit reads them no second time; a file that is not Mach-O as it is, nothing opened.
+
+     With `unsign`, each image comes out without its code signature, as `MachO.removingSignature(end:)` leaves it.
+
+     With `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing,
+     since it hides what UPX left; then with `unsign` the unpacked image's own signature comes out. Once `unpack`
+     alone has taken one image's signature out of a universal file, the other images' signatures come out too, so
+     that the file is unsigned, as its name then says. A universal file with an image edited is laid out again as
+     `lipo` lays out the architectures it is given.
+
+     With `exact` `always`, an image is cut where it ends before its signature comes out, so appended bytes do not
+     keep it in, the unpacked image too; one the edits leave alone is left as it is, appended bytes included, since
+     the cut alone is no edit. As needed, the cut and the padding come where a stage needs them alone, the padding
+     held back until an edit comes of it.
+
+     Throws for a Mach-O that does not parse, with `unsign` for a signature that does not end its image and that no
      cut frees, which `unpack` alone leaves in, the image looked at as it is, and for packed data, or the image
-     unpacked from it, that does not hold: a `SliceError` naming the architecture, in a universal file. `caveat` hears
-     what an edit has to say about an image, named after its architecture in a universal file: that a modified UPX
-     packed it, and how. Each edit done is noted in the unified log, under the edit category, after the image's path
-     and architecture: the bytes a cut dropped, the signature removed, and how UPX packed what is unpacked, with where
-     its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand. `keep`, when given,
-     gets what decompressed of an image that fails a check after, a sum or its headers, with the edits done before it
-     and `decompressed` for it, and the architecture: the refusal is thrown all the same. The images unpacked of
-     one file take `unpackLimit` bytes together, the unpacker's limit for one image: they are held together until
-     the file is digested or written, and a slice whose image no longer fits is refused as one too large is.
+     unpacked from it, that does not hold: a `SliceError` naming the architecture, in a universal file.
+
+     `caveat` hears what an edit has to say about an image, named after its architecture in a universal file: that
+     a modified UPX packed it, and how. Each edit done is noted in the unified log, under the edit category, after
+     the image's path and architecture: the bytes a cut dropped, the signature removed, and how UPX packed what is
+     unpacked, with where its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand.
+     `keep`, when given, gets what decompressed of an image that fails a check after, a sum or its headers, with
+     the edits done before it and `decompressed` for it, and the architecture: the refusal is thrown all the same.
+
+     `unpackLimit` bounds the unpacked images of one file together: by default, the unpacker's limit for one
+     image. They are held in memory until the file is digested or written. A slice whose image no longer fits is
+     refused as an image too large is.
      */
     static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, unpackLimit: Int = PackMach.maxSize, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit {
         let read = file
@@ -214,7 +224,7 @@ enum MachOEditor {
             // share one image's limit: a table of sixteen entries over one packed image would hold it sixteen
             // times.
             var room = unpackLimit
-            let slices = try Universal.named(table.archs).map { named -> Slice in
+            var slices = try Universal.named(table.archs).map { named -> Slice in
                 let (arch, name) = (named.arch, named.name)
                 let whole: [File.Piece] = [.range(arch.offset ..< arch.offset + arch.length)]
                 do {
@@ -231,6 +241,25 @@ enum MachOEditor {
                     throw SliceError(arch: name, error: error)
                 }
             }
+
+            // unpack alone takes a signature out only where UPX lies behind it. Once it has, the whole file is
+            // named unsigned, so it must be: the signatures of the slices unpack left alone come out too. The
+            // file is then the one unsign followed by unpack makes, the same bytes under the same name. A
+            // signature that cannot come out is left in, as unpack alone leaves it.
+            if unpack, !unsign, slices.contains(where: { $0.states.contains { $0.edits.contains(.unsigned) } }) {
+                slices = zip(Universal.named(table.archs), slices).map { named, slice in
+                    guard
+                        slice.states.isEmpty,
+                        let image = try? MachO(file, offset: named.arch.offset, length: named.arch.length),
+                        let edit = try? self.edit(image, of: file, subject: "\(file.path) (\(named.name))", exact: exact, unsign: true, unpack: false, padded: false, room: &room, caveat: { _ in }, keep: nil),
+                        let last = edit.states.last
+                    else {
+                        return slice
+                    }
+                    return Slice(arch: slice.arch, pieces: last.pieces, align: edit.align, states: edit.states)
+                }
+            }
+
             guard slices.contains(where: { !$0.states.isEmpty }) else {
                 return Edit(file: file, states: slices.map(\.states), cuts: slices.map(\.cut), source: file, opened: opened)
             }

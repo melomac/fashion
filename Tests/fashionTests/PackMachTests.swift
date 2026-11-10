@@ -533,14 +533,17 @@ final class PackMachTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[0].name)_unsigned"), try Data(contentsOf: packed))
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[0].name)_unsigned_unpacked"), slices[0].data)
         XCTAssertEqual(try Data(contentsOf: directory / "universal_resigned_\(slices[1].name)_unsigned"), slices[1].data)
-        // unpack alone leaves the other slice signed, laid out again, named for the packed slice's way; unsign over
-        // the artifact gives the originals' file.
+        // unpack alone takes a signature out where UPX lies behind it, and then the other slice's too. The file is
+        // named unsigned and is: the originals' file, the one unsign followed by unpack makes under the same name.
         let reporter = Reporter(console: Console())
         let unpacked = resigned.path + "_unsigned_unpacked"
         XCTAssertEqual(try Unpacker.lines(for: resigned.path, write: false, reporter: reporter).map(\.text), [unpacked])
-        XCTAssertEqual(try self.hashLines(unpacked, ["--unsign"]).last, try ByteHash.sha256.digest(Data(contentsOf: original)))
-        XCTAssertEqual(try Unsigner.lines(for: unpacked, write: false, reporter: reporter).map(\.text), [unpacked + "_unsigned"])
-        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked + "_unsigned")), try Data(contentsOf: original))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked)), try Data(contentsOf: original))
+        XCTAssertEqual(try Unsigner.lines(for: unpacked, write: false, reporter: reporter).map(\.text), [], "no signature left to take out")
+        XCTAssertEqual(try Unsigner.lines(for: resigned.path, write: false, reporter: reporter).map(\.text), [resigned.path + "_unsigned"])
+        try FileManager.default.removeItem(atPath: unpacked)
+        XCTAssertEqual(try Unpacker.lines(for: resigned.path + "_unsigned", write: false, reporter: reporter).map(\.text), [unpacked])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: unpacked)), try Data(contentsOf: original))
         XCTAssertEqual(reporter.errorCount, 0)
     }
 
