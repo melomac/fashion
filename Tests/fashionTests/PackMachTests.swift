@@ -739,8 +739,9 @@ final class PackMachTests: XCTestCase {
      said, as it checks no Mach-O against the pack header's checksum of the original.
 
      A test sample, "ESE7" for marker and 0xe7 for XOR key, is made from what UPX packed with NRV2B by XORing the
-     literals of each filtered block: `unpack` finds the key by the checksum, warns with the marker and the key, and
-     gives the original back.
+     literals of each filtered block. `unpack` reads the key off the first filtered block, which starts with the
+     header padding XORed, finds that the checksum holds under it, warns with the marker and the key, and gives the
+     original back.
 
      With the key alone, the marker left as "UPX!", the warning names the key alone, and stock `upx -d`, which takes the
      file for its own, writes a wrong image of it without a word.
@@ -792,11 +793,15 @@ final class PackMachTests: XCTestCase {
 
     /**
      The pack header's `c_adler`, the packer's sum of the packed bytes, refuses nothing, as neither UPX's stub nor
-     upx -d reads it for a Mach-O: a literal of an NRV2B block XORed with 0x01 decompresses to another image, under
-     which the key search finds 0x01 and gives the original back, the key and the sums said in a warning; a `c_adler`
-     that is not the packer's leaves the original as it is, the sums said. Hash mode hashes the image unpacked, the
-     warning on stderr, exit 0. Under --keep, what decoded under no key is written as it is, `_decompressed`, where a
-     key was applied: the other image for the changed literals, nothing for the header that lies.
+     upx -d reads it for a Mach-O. Two files:
+
+     - a literal of an NRV2B block XORed with 0x01 decompresses to another image. Its filtered block shows 0x01 for
+       its key, which gives the original back, the key and the sums named in a warning;
+     - a `c_adler` that is not the packer's leaves the original as it is, the sums named.
+
+     Hash mode hashes the image unpacked, the warning on stderr, exit 0. Under --keep, what decoded under no key is
+     written as it is, `_decompressed`, where a key was applied: the other image for the changed literals, nothing
+     for the header that lies.
      */
     func testPackedBytesThatFailTheirChecksumAreUnpackedAllTheSame() throws {
         let directory = try self.directory("c-adler")
@@ -844,9 +849,11 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
-     The pack header's `u_adler`, the Adler-32 of the original, is the packer's word on an unpacked image, which upx -d
-     does not check for a Mach-O: one that fails it under every key is unpacked as UPX unpacks it, both sums said in a
-     warning, with the keys tried where the blocks were filtered; it is the original here, since only the header lies.
+     The pack header's `u_adler`, the Adler-32 of the original, is the packer's word on an unpacked image, which
+     upx -d does not check for a Mach-O. An image that fails it, under the keys read off its filtered blocks too,
+     is unpacked as UPX unpacks it. The warning names both sums and, where blocks were filtered, that no key was
+     found. The image is the original here, since only the header lies.
+
      Hash mode hashes it unpacked, the warning on stderr, exit 0. --keep writes nothing of it, no key having been
      applied.
      */
@@ -863,7 +870,7 @@ final class PackMachTests: XCTestCase {
             saveFixture(path: file.path)
 
             let filtered = try self.blocks(of: packed).contains { $0.filter != 0 && $0.compressed < $0.uncompressed }
-            let warning = "fashion: \(file.path): checksums neither UPX nor its stub reads: the image sums to \(sum.hex), the pack header says \((sum ^ 0xff).hex)\(filtered ? ", under no XOR key" : "")"
+            let warning = "fashion: \(file.path): checksums neither UPX nor its stub reads: the image sums to \(sum.hex), the pack header says \((sum ^ 0xff).hex)\(filtered ? Self.noKey : "")"
             let original = try Data(contentsOf: unsigned)
             let (status, errors) = try runFashion(["--unpack", file.path])
             XCTAssertEqual(status, 0, name)
@@ -1034,8 +1041,11 @@ final class PackMachTests: XCTestCase {
      `data` as an NRV2B stream read 32 bits at a time, as UCL's `n2b_d.c` reads it: each byte a literal, a run of one
      byte a literal and a match of the run at distance 1, then UPX's end marker; the bit words, top bit first, lie
      where the decoder reads them, before the bytes they tell of. For packed files made by hand.
+
+     With `within` past 1, a stretch that repeats at any distance up to it is a match too, the longest there is:
+     what a run becomes once XORed with a key of that many bytes.
      */
-    private static func nrv2b(_ data: Data) -> Data {
+    private static func nrv2b(_ data: Data, within: Int = 1) -> Data {
         var stream = Data()
         var bits: UInt32 = 0
         var count = 0
@@ -1061,22 +1071,28 @@ final class PackMachTests: XCTestCase {
         }
         var index = data.startIndex
         while index < data.endIndex {
-            let byte = data[index]
-            var run = 1
-            while index + run < data.endIndex, data[index + run] == byte {
-                run += 1
+            // The longest stretch from here that repeats what lies `distance` bytes back, the nearest first.
+            var (copied, distance) = (0, 0)
+            for back in 1 ... within where index - back >= data.startIndex {
+                var count = 0
+                while index + count < data.endIndex, data[index + count] == data[index + count - back] {
+                    count += 1
+                }
+                if count > copied {
+                    (copied, distance) = (count, back)
+                }
             }
-            put(1)
-            stream.append(byte)
-            guard run >= 3 else {
+            guard copied >= 2 else {
+                put(1)
+                stream.append(data[index])
                 index += 1
                 continue
             }
-            // A match at distance 1 of the rest of the run: m_off 3 and the byte 0 make 1, then m_len, the count less 1.
+            // A match: m_off 3 and the byte after it make the distance, less 1, then m_len, the count less 1.
             put(0)
             putVarying(3)
-            stream.append(0)
-            let length = run - 2
+            stream.append(UInt8(distance - 1))
+            let length = copied - 1
             if length <= 3 {
                 put(length >> 1)
                 put(length & 1)
@@ -1085,7 +1101,7 @@ final class PackMachTests: XCTestCase {
                 put(0)
                 putVarying(length - 2)
             }
-            index += run
+            index += copied
         }
         put(0)
         putVarying(0x0100_0002) // then 0xff: an offset of 0xffffffff, the end
@@ -1096,14 +1112,21 @@ final class PackMachTests: XCTestCase {
         return stream
     }
 
+    /// What the warning adds for an image with filtered blocks that matches the packer's sum under no key read
+    /// off them.
+    private static let noKey = ", under no filtered XOR key"
+
     /**
      A file UPX packed, made by hand as UPX 5 lays one out: an `x86_64` executable of a page, one `__TEXT` segment over
      it, its headers in an NRV2B block and the rest stored; with `overlapping` more segments in its headers laid
      over the same page, each wanting the page's worth of blocks again, stored, where UPX writes each byte of an
      original once. The pack header's sums are the packer's. `editing` rewrites the original's headers before they
-     are packed, for a test of what the unpacker makes of them.
+     are packed, for a test of what the unpacker makes of them. With `filtered`, the rest of the page is `body`,
+     which must hold runs for the encoder to pack and no call or jump for the filter to rewrite, in an NRV2B block
+     under filter 0x49, its bytes XORed with `key`, repeated from the block's start, before it is packed, as a
+     modified UPX does.
      */
-    private func packedByHand(overlapping: Int, editing: (inout Data) -> Void = { _ in }) throws -> (packed: Data, original: Data) {
+    private func packedByHand(overlapping: Int, filtered: (body: Data, key: [UInt8])? = nil, editing: (inout Data) -> Void = { _ in }) throws -> (packed: Data, original: Data) {
         let size = 0x1000
         var original = Data()
         [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_EXECUTE), UInt32(1 + overlapping), UInt32(72 * (1 + overlapping)), 0, 0].forEach { original.appendUInt32($0) }
@@ -1114,19 +1137,32 @@ final class PackMachTests: XCTestCase {
             [5, 5, 0, 0].forEach { original.appendUInt32(UInt32($0)) }
         }
         let headers = original.count
-        original.append(Data((headers ..< size).map { UInt8(truncatingIfNeeded: $0 * 7 + 1) }))
+        if let filtered {
+            XCTAssertEqual(filtered.body.count, size - headers, "the body fills the page after the headers")
+            original.append(filtered.body)
+        } else {
+            original.append(Data((headers ..< size).map { UInt8(truncatingIfNeeded: $0 * 7 + 1) }))
+        }
         editing(&original)
 
         var blocks = Data()
-        func block(_ unpacked: Data, as packed: Data) {
-            blocks.appendUInt32(UInt32(unpacked.count)); blocks.appendUInt32(UInt32(packed.count)); blocks.append(contentsOf: [2, 0, 0, 0]) // sz_unc, sz_cpr, NRV2B_LE32, no filter
+        func block(_ unpacked: Data, as packed: Data, filter: UInt8 = 0) {
+            blocks.appendUInt32(UInt32(unpacked.count)); blocks.appendUInt32(UInt32(packed.count)); blocks.append(contentsOf: [2, filter, 0, 0]) // sz_unc, sz_cpr, NRV2B_LE32, b_ftid, b_cto8
             blocks += packed
         }
         let first = Self.nrv2b(original.prefix(headers))
         XCTAssertEqual(self.decompressed(first, count: headers), original.prefix(headers), "the headers, as the encoder packs them, decode back")
         XCTAssertLessThan(first.count, headers)
         block(original.prefix(headers), as: first)
-        block(original[headers...], as: original[headers...])
+        if let filtered {
+            let xored = Data(original[headers...].enumerated().map { $1 ^ filtered.key[$0 % filtered.key.count] })
+            let stream = Self.nrv2b(xored, within: filtered.key.count)
+            XCTAssertEqual(self.decompressed(stream, count: xored.count), xored, "the body, as the encoder packs it, decodes back")
+            XCTAssertLessThan(stream.count, xored.count, "a block that does not pack is stored, and UPX filters none it stores")
+            block(original[headers...], as: stream, filter: 0x49)
+        } else {
+            block(original[headers...], as: original[headers...])
+        }
         for _ in 0 ..< overlapping {
             block(original, as: original)
         }
@@ -1152,6 +1188,91 @@ final class PackMachTests: XCTestCase {
         packed.appendUInt32(UInt32(overlay)) // overlay_offset
         packed.append(Data(count: 16)) // __LINKEDIT
         return try (self.resummed(packed), original)
+    }
+
+    /**
+     The byte a modified UPX XORs its filtered blocks with is read off the blocks as they decompress, with no
+     search. Three files made by hand, the key 0x5a:
+
+     - a filtered block that starts in the header padding, zeros, starts with the key, repeated, whatever else it
+       holds: the key is its lead byte;
+     - one that does not, and holds more zeros than anything else, holds the key more than anything else: the key
+       is its commonest byte;
+     - one with neither, no run at its start and another byte its commonest, gives no key that holds.
+
+     The first two give the original back, the key named. The third comes out as UPX unpacks it, its blocks
+     unfiltered as they are, the warning naming the sums and that no key was found.
+     */
+    func testTheXORKeyIsReadFromTheFilteredBlocksWithoutASearch() throws {
+        let directory = try self.directory("key")
+        let key: UInt8 = 0x5a
+        let count = 0x1000 - 104
+        /// Runs of seven `byte`, a byte that varies after each, behind `lead`: what the encoder packs.
+        func body(lead: Data, of byte: UInt8) -> Data {
+            Data((lead + Data((0 ..< count).map { $0 % 8 == 7 ? UInt8(0x10 + $0 / 8 % 32) : byte })).prefix(count))
+        }
+
+        let distinct = Data((0x10 ..< 0x20).map { UInt8($0) })
+        for (name, body, found) in [
+            ("padded", body(lead: Data(count: 64), of: 0x41), true),
+            ("common", body(lead: distinct, of: 0x00), true),
+            ("neither", body(lead: distinct, of: 0x41), false),
+        ] {
+            let (packed, original) = try self.packedByHand(overlapping: 0, filtered: (body, [key]))
+            let file = directory / name
+            try packed.write(to: file)
+
+            let lines = try self.hashLines(file.path, ["--unpack"])
+            let keyed = "fashion: \(file.path): packed by a modified UPX, its filtered blocks XORed with 0x5a before they are unfiltered"
+            if found {
+                XCTAssertEqual(lines.first, keyed, name)
+                XCTAssertEqual(lines.last, try XCTUnwrap(ByteHash.sha256.digest(original)), name)
+            } else {
+                let unpacked = original.prefix(104) + Data(body.map { $0 ^ key })
+                XCTAssertEqual(lines.first?.hasPrefix("fashion: \(file.path): checksums neither UPX nor its stub reads: the image sums to "), true, name)
+                XCTAssertEqual(lines.first?.hasSuffix(Self.noKey), true, name)
+                XCTAssertEqual(lines.last, try XCTUnwrap(ByteHash.sha256.digest(unpacked)), name)
+            }
+            let (status, _) = try runFashion(["--unpack", file.path])
+            XCTAssertEqual(status, 0, name)
+        }
+    }
+
+    /**
+     A key of several bytes is read off the first filtered block as a key of one byte is. The block starts in the
+     header padding, zeros, so it starts with the key, repeated, and the key is the shortest stretch of it that
+     repeats. Three files made by hand, their filtered block XORed with the key from its start, behind 64 bytes
+     of padding:
+
+     - "Hello" and "Hello, World!" give the original back, the key named;
+     - a key of 40 bytes does not show twice in the padding, so no key is read: the image comes out as UPX unpacks
+       it, its block unfiltered as it is, the warning naming the sums and that no key was found.
+     */
+    func testAKeyOfSeveralBytesIsReadFromTheHeaderPadding() throws {
+        let directory = try self.directory("long-key")
+        let count = 0x1000 - 104 - 64
+        // Runs of 255 bytes, a byte that varies after each, behind the padding: under a key, a run repeats with it.
+        let body = Data(count: 64) + Data((0 ..< count).map { $0 % 256 == 255 ? UInt8(0x10 + $0 / 256 % 32) : 0x41 })
+
+        for (name, key, said) in [("hello", Array("Hello".utf8), "\"Hello\""), ("hello-world", Array("Hello, World!".utf8), "\"Hello, World!\""), ("long", (1 ... 40).map { UInt8($0) }, nil)] {
+            let (packed, original) = try self.packedByHand(overlapping: 0, filtered: (body, key))
+            let file = directory / name
+            try packed.write(to: file)
+
+            let lines = try self.hashLines(file.path, ["--unpack"])
+            if let said {
+                XCTAssertEqual(lines.first, "fashion: \(file.path): packed by a modified UPX, its filtered blocks XORed with \(said) before they are unfiltered", name)
+                XCTAssertEqual(lines.last, try XCTUnwrap(ByteHash.sha256.digest(original)), name)
+            } else {
+                let unpacked = original.prefix(104) + Data(body.enumerated().map { $1 ^ key[$0 % key.count] })
+                XCTAssertEqual(lines.first?.hasPrefix("fashion: \(file.path): checksums neither UPX nor its stub reads: the image sums to "), true, name)
+                XCTAssertEqual(lines.first?.hasSuffix(Self.noKey), true, name)
+                XCTAssertEqual(lines.last, try XCTUnwrap(ByteHash.sha256.digest(unpacked)), name)
+            }
+
+            let (status, _) = try runFashion(["--unpack", file.path])
+            XCTAssertEqual(status, 0, name)
+        }
     }
 
     /**

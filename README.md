@@ -251,7 +251,7 @@ With `--unsign`, the signature the code carried before packing comes out too.
 
 When the marker `UPX!` was modified, or the usual section/segment was renamed, heuristics look for the `PackHeader` structure and checksum to unpack the file anyway, and report the marker we found in place.
 
-When the packer also XORed the decompressed code before unfiltering, like [OSX/Keydnap][UPX Keydnap], the image fails its checksum: we brute-force a single byte key until it matches, and report the key.
+When the packer also XORed the decompressed code before unfiltering, like [OSX/Keydnap][UPX Keydnap], the image fails its checksum: we read the XOR key off the filtered blocks.
 When no key fits, the image is unpacked under none, and the sums are reported.
 
 Unlike `upx`, we compare what comes out of the decompressor with the two Adler-32 sums the `PackHeader` carries — packed and unpacked bytes — which neither `upx -d` nor the stub reads: a sum that doesn't match is reported to standard error, and the file is unpacked all the same.
