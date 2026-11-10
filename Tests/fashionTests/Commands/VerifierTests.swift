@@ -1868,6 +1868,45 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     A directory of truncated SHA-256 page hashes is bound under SHA-256's name: Security names a directory in the
+     v2 attribute by its digest algorithm's OID (`SECOidTagForAlgorithm`), and the truncation is of the page
+     hashes, not of the algorithm.
+
+     A CMS is built here over such a directory. With a v2 attribute naming SHA-256 and the directory's cdhash of
+     20 bytes, it is valid to codesign, whose only word is then the self-signed chain, and bears no INVALID here.
+     With the 32 bytes of the whole digest, it is an invalid signature to both.
+     */
+    func testATruncatedSHA256DirectoryIsBoundUnderSHA256sName() throws {
+        let directory = try self.directory("agility-truncated")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", "--digest-algorithm=sha256T", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        var truncated = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        XCTAssertEqual(truncated[37], 3, "truncated SHA-256")
+        truncated.store((UInt32(bigEndian: truncated.load(UInt32.self, at: 12)) & ~UInt32(2)).bigEndian, at: 12)
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+        let (certificate, key) = try Self.identity("Fashion Self", in: directory)
+        let digest = Data(SHA256.hash(data: truncated))
+
+        for (name, cdhash, bound) in [("whole", digest, false), ("cut", Data(digest.prefix(20)), true)] {
+            let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>cdhashes</key><array><data>\(digest.prefix(20).base64EncodedString())</data></array></dict></plist>\n"
+            let v2 = DER.encode(0x30, Self.oid([0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]) + DER.encode(0x04, cdhash))
+            let attributes = Self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x01], DER.encode(0x04, Data(plist.utf8))) + Self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x02], v2)
+            let cms = try Self.cms(over: truncated, certificate: certificate, key: key, attributes: attributes, in: directory, name)
+            let file = Self.embedding(truncated, requirements, cms, in: program, at: signature)
+            let path = directory / name
+            try file.write(to: path)
+            XCTAssertEqual(try execute("/usr/bin/codesign", ["--verify", path.path]), bound, "\(name): codesign --verify")
+            XCTAssertEqual(try CDHash.hash(path: path.path).map(\.invalid), [!bound], name)
+            XCTAssertEqual(self.verify(path.path).lines, ["\(path.path): " + (bound ? "signed outside Apple's chains by Fashion Self, which Gatekeeper refuses" : "the CMS signature does not bind the code directories as Security requires: its hash agility names other code directories than the signature holds, an invalid signature to it")], name)
+        }
+    }
+
+    /**
      Security cuts the pages of every code directory by one directory's geometry, the lowest hash type's, and checks
      each directory's slots at those pages: a SHA-1 directory covering two whole pages beside a SHA-256 one covering
      three, the third slot of which is wrong, is valid to codesign, which never cuts a third page, where the third

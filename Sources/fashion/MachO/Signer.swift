@@ -113,8 +113,9 @@ struct Signer {
      detached content and the Apple code-signing policy, then the signer's hash-agility attributes must bind every
      directory the signature holds, `binding`, each with its full cdhash: the cdhashes plist lists their cdhashes
      truncated to 20 bytes, in the order of their hash types, and the v2 attribute names each by its digest
-     algorithm with its cdhash, as many as there are directories, the `best` among them; a signer that wrote
-     neither binds nothing, which Security lets pass. Then trustd builds the chain with no network, every
+     algorithm with its cdhash, as many as there are directories, the `best` among them. A directory of truncated
+     SHA-256 page hashes is named there as SHA-256, with its cdhash of 20 bytes. A signer that wrote neither
+     attribute binds nothing, which Security lets pass. Then trustd builds the chain with no network, every
      self-signed certificate an anchor, as of the secure timestamp, else the date the signer claims: a chain expired
      or not yet valid then is tried again with expiry allowed, as Security tries it, only without a secure timestamp,
      and not when `enforcingExpiration`, the directory's `CS_ENFORCE_EXPIRATION` flag. A signer anchored at Apple
@@ -172,7 +173,13 @@ struct Signer {
                 throw .agility("its cdhashes plist lists other code directories than the signature holds")
             }
             if let v2 = agility.v2 {
-                guard v2.count == bound.count, bound.allSatisfy({ v2[$0.hashType] == $0.cdhash }), best.map({ v2[$0] != nil }) ?? true else {
+                /// The hash type the attribute names a directory of `type` under: its digest algorithm
+                /// (`SECOidTagForAlgorithm`). Truncated SHA-256 goes under SHA-256: the truncation is of the page
+                /// hashes, not of the algorithm.
+                func named(_ type: HashType) -> HashType {
+                    type == .sha256Truncated ? .sha256 : type
+                }
+                guard v2.count == bound.count, bound.allSatisfy({ v2[named($0.hashType)] == $0.cdhash }), best.map({ v2[named($0)] != nil }) ?? true else {
                     throw .agility("its hash agility names other code directories than the signature holds")
                 }
             }
