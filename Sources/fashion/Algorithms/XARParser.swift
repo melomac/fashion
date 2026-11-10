@@ -182,6 +182,13 @@ enum XARParser {
                         stream.avail_out = uInt(buffer.count - produced)
                         return zlib.inflate(&stream, Z_NO_FLUSH)
                     }
+                    // The chunk of input filled the room to the byte. The call made once the room grew has
+                    // nothing to read and nothing left to write, and zlib answers Z_BUF_ERROR: no progress. That
+                    // is no end of the stream: the next chunk is read.
+                    if status == Z_BUF_ERROR, stream.avail_in == 0 {
+                        status = Z_OK
+                        break
+                    }
                 } while status == Z_OK && (stream.avail_in > 0 || stream.avail_out == 0)
             }
         }

@@ -186,6 +186,71 @@ final class XARParserTests: XCTestCase {
     }
 
     /**
+     A table whose first chunk of input inflates to a chunk of output exactly is read on. The input and the room
+     for what it makes then run out together: the call made once there is room again has nothing to read and
+     nothing to write, which zlib reports as no progress. That is no end of the stream, and the next chunk is read.
+
+     The stream is made by hand: a run of spaces packed and flushed, then stored blocks sized to fill the first
+     chunk of each side to the byte, then a last stored block.
+     */
+    func testDecompressGoesOnWhenInputAndRoomRunOutTogether() throws {
+        let chunk = File.chunkSize
+        /// `data` as stored blocks, none of them the stream's last, each of `size` bytes at most.
+        func stored(_ data: Data, size: Int, final: Bool = false) -> Data {
+            var blocks = Data()
+            var rest = data[...]
+            repeat {
+                let block = rest.prefix(size)
+                rest = rest.dropFirst(block.count)
+                blocks.append(final && rest.isEmpty ? 1 : 0)
+                blocks.append(contentsOf: [UInt8(block.count & 0xff), UInt8(block.count >> 8), UInt8(~block.count & 0xff), UInt8((~block.count >> 8) & 0xff)])
+                blocks += block
+            } while !rest.isEmpty
+            return blocks
+        }
+        /// `data` packed as a raw deflate stream, flushed to a byte and not ended.
+        func packed(_ data: Data) -> Data {
+            var stream = z_stream()
+            XCTAssertEqual(deflateInit2_(&stream, 9, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)), Z_OK)
+            defer {
+                deflateEnd(&stream)
+            }
+            var output = Data(count: Int(deflateBound(&stream, uLong(data.count))) + 16)
+            let count = output.count
+            data.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { destination in
+                    stream.next_in = UnsafeMutablePointer(mutating: source.baseAddress!.assumingMemoryBound(to: Bytef.self))
+                    stream.avail_in = uInt(data.count)
+                    stream.next_out = destination.baseAddress!.assumingMemoryBound(to: Bytef.self)
+                    stream.avail_out = uInt(count)
+                    XCTAssertEqual(deflate(&stream, Z_SYNC_FLUSH), Z_OK)
+                }
+            }
+            return output.prefix(Int(stream.total_out))
+        }
+
+        // The spaces pack to a few bytes: stored blocks of their length less what they packed to, five bytes of
+        // header each, bring the input and the output to the chunk's end together.
+        var spaces = 4096
+        var head = packed(Data(repeating: 0x20, count: spaces))
+        while (spaces - 2 - head.count) % 5 != 0 {
+            spaces += 1
+            head = packed(Data(repeating: 0x20, count: spaces))
+        }
+        let blocks = (spaces - 2 - head.count) / 5
+        let filler = Data(repeating: UInt8(ascii: "x"), count: chunk - spaces)
+        let fill = stored(filler, size: (filler.count + blocks - 1) / blocks)
+        XCTAssertEqual(2 + head.count + fill.count, chunk, "the first chunk of input")
+        let tail = Data(repeating: UInt8(ascii: "y"), count: 1000)
+        let plain = Data(repeating: 0x20, count: spaces) + filler + tail
+        var toc = Data([0x78, 0x01]) + head + fill + stored(tail, size: 0xffff, final: true)
+        toc.appendUInt32BE(plain.withUnsafeBytes { UInt32(adler32(1, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt(plain.count))) })
+
+        let file = try File(data: xarArchive(toc: toc, size: plain.count))
+        XCTAssertEqual(try XARParser.hashToc(file, algorithm: .sha256, decompress: true), try ByteHash.sha256.digest(plain))
+    }
+
+    /**
      The declared range runs two chunks past the stream, which ends in the first: the rest is not read, so the
      table still decompresses once the file no longer holds it.
      */
