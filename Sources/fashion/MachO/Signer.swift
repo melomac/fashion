@@ -126,8 +126,8 @@ struct Signer {
      */
     init(cms: Data, over directory: Data, binding: [Binding] = [], best: HashType? = nil, enforcingExpiration: Bool = false, evaluatingChain: Bool = true) throws(Failure) {
         // The blob is read first for the one thing the decoder cannot be handed: a length it does not check
-        // (`DER.fault`). Security's decoder checks a length only against a definite parent
-        // (sec_asn1d_check_and_subtract_length). Under an indefinite one it allocates what the length says and
+        // (`DER.fault`). Security's decoder checks a length against the first definite length around the element
+        // (sec_asn1d_check_and_subtract_length). With none around it, it allocates what the length says and
         // fills it: 680 MiB for a 4 KiB blob of the signer fuzz harness, which made an OID's length byte
         // long-form, so that the OID's own bytes read as its length.
         // Anything else is the decoder's to judge, as codesign has it judge: a byte changed inside a certificate,

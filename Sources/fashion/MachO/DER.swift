@@ -74,7 +74,9 @@ enum DER {
                     guard let element = inner.next() else {
                         return refused(inner.fault ?? "an indefinite length at \(start.hex) with no end")
                     }
-                    if element.tag == 0, element.content.isEmpty {
+                    // sec_asn1d_parse_end_of_contents: the end is two zero bytes, and no other empty element of
+                    // tag 0, which is read on as an element.
+                    if element.tag == 0, element.raw.count == 2 {
                         self.offset = element.raw.endIndex
                         return Element(tag: tag, content: self.data[at ..< element.raw.startIndex], raw: self.data[start ..< self.offset])
                     }
@@ -175,14 +177,17 @@ enum DER {
      Why `blob`, a CMS message, cannot be handed to Security's decoder; nil when it can, whatever the decoder then
      makes of it.
 
-     The decoder checks an element's length only against a definite parent (`sec_asn1d_check_and_subtract_length`):
+     The decoder checks an element's length against the first definite length around it, its parent's or one
+     further out (`sec_asn1d_prepare_for_contents`, `sec_asn1d_check_and_subtract_length`):
 
      ```
-     the element                           its length
-     ------------------------------------  -----------------------------------------------------------
-     under a definite length               checked against the parent's, refused when it does not fit
-     the message itself, with no parent    not checked
-     under an indefinite length (0x80)     not checked: the parent has no length to check against
+     the element                                 its length
+     ------------------------------------------  -----------------------------------------------------------
+     under a definite length                     checked against the parent's, refused when it does not fit
+     under indefinite lengths (0x80) inside a    checked against what is left of the definite one
+       definite one
+     the message itself, or under indefinite     not checked: there is no length to check it against
+       lengths all the way up
      ```
 
      The decoder takes an unchecked length at its word. For a string, it allocates that many bytes, anything under
@@ -190,12 +195,17 @@ enum DER {
      them for a signature's outer sequences.
 
      So the one fault is an unchecked length that declares more than the bytes left. It is looked for in the
-     message itself and in every element under an indefinite length, however deep, down to `maxDepth`.
+     message itself and in every element no definite length encloses, however deep, down to `maxDepth`.
+
+     An indefinite length ends at an end-of-contents: two zero bytes, and nothing else
+     (`sec_asn1d_parse_end_of_contents`). Where the decoder expects a field and no end, it reads a tag of 0 as an
+     element like any other, and takes its length at its word when unchecked. So any other element of tag 0 is
+     read on as an element here.
 
      Anything else is left to the decoder, to take or refuse:
 
      - bytes cut short, and forms it refuses;
-     - a length that passes a definite parent's, which it checks itself;
+     - a length that passes a definite length around it, which the decoder checks itself;
      - content of a definite length that does not read as elements: the decoder may not read it as elements at
        all, as with a certificate, whose bytes it keeps as it finds them;
      - what follows the message, the first element of `blob`: it never reads that.
@@ -210,7 +220,7 @@ enum DER {
     }
 
     /// Read the element at `start` of `data` and every element nested in it, in the order the decoder meets them.
-    /// `unchecked` says the decoder does not check this element's length: it has no parent, or an indefinite one.
+    /// `unchecked` says the decoder does not check this element's length: no element around it has a definite one.
     private static func read(_ data: Data, at start: Int, unchecked: Bool, depth: Int) -> Read {
         guard let header = try? self.header(in: data, at: start) else {
             return .refused
@@ -226,10 +236,13 @@ enum DER {
                 guard let child = try? self.header(in: data, at: at) else {
                     return .refused
                 }
-                if child.tag == 0, child.length == 0 {
+                // The end-of-contents: two zero bytes, no other empty element of tag 0.
+                if child.tag == 0, child.length == 0, child.content == at + 2 {
                     return .end(child.content)
                 }
-                switch self.read(data, at: at, unchecked: true, depth: depth + 1) {
+                // A child is checked against the first definite length around it, which is this element's too:
+                // an indefinite length has none of its own to check against.
+                switch self.read(data, at: at, unchecked: unchecked, depth: depth + 1) {
                 case let .end(next):
                     at = next
                 case .refused:

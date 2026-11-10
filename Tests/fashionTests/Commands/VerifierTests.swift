@@ -1696,21 +1696,30 @@ final class VerifierTests: XCTestCase {
 
     /**
      One fault is looked for in a CMS blob before Security's decoder is handed it: a length the decoder does not
-     check that declares more than the bytes left. The decoder checks no length of the message itself, which has
-     no parent, nor of an element under an indefinite length, however deep the message nests one. The fault
-     reported is the first in the order the decoder reads.
+     check that declares more than the bytes left. The decoder checks a length against the first definite length
+     around the element. So it checks none of the message itself, nor of an element under indefinite lengths all
+     the way up, however deep. The fault reported is the first in the order the decoder reads.
 
-     None of these is a fault: a length past a definite parent's, which the decoder refuses itself; bytes cut
-     short and forms it does not take, which it refuses too; and what follows the message, which it never reads.
-     The message is handed over without what follows it.
+     None of these is a fault: a length past a definite length around it, its parent's or one further out, which
+     the decoder refuses itself; bytes cut short and forms it does not take, which it refuses too; and what
+     follows the message, which it never reads. The message is handed over without what follows it.
+
+     An indefinite length ends at two zero bytes, and at no other empty element of tag 0, which is read on as an
+     element: its length is one more the decoder may take at its word.
      */
     func testOnlyALengthTheDecoderTakesAtItsWordIsAFault() {
         let oid: [UInt8] = [0x06, 0x84, 0x2a, 0x86, 0x48, 0x86]
         XCTAssertEqual(DER.fault(in: Data([0x30, 0x80] + oid + [0x00, 0x00])), "tag 0x06 at 0x2 declares 713443462 bytes, 2 left")
         XCTAssertEqual(DER.fault(in: Data([0x30, 0x84, 0x7f, 0xff, 0xff, 0xff, 0x06, 0x01, 0x2a])), "tag 0x30 at 0x0 declares 2147483647 bytes, 3 left")
-        // Under an indefinite length inside a definite one, and before bytes that do not read.
-        XCTAssertEqual(DER.fault(in: Data([0x30, 0x0a, 0xa0, 0x80] + oid + [0x00, 0x00])), "tag 0x06 at 0x4 declares 713443462 bytes, 2 left")
-        XCTAssertEqual(DER.fault(in: Data([0x30, 0x80, 0x30, 0x08, 0xa0, 0x80] + oid + [0x04])), "tag 0x06 at 0x6 declares 713443462 bytes, 0 left")
+        // Under indefinite lengths all the way up, however deep.
+        XCTAssertEqual(DER.fault(in: Data([0x30, 0x80, 0xa0, 0x80] + oid + [0x00, 0x00, 0x00, 0x00])), "tag 0x06 at 0x4 declares 713443462 bytes, 4 left")
+        // A tag of 0 that is not the two zero bytes of an end is an element, its length taken at its word.
+        XCTAssertEqual(DER.fault(in: Data([0x30, 0x80, 0x00, 0x84, 0x20, 0x00, 0x00, 0x00])), "tag 0x00 at 0x2 declares 536870912 bytes, 0 left")
+
+        // Under an indefinite length inside a definite one: the decoder checks it against the definite one, and
+        // refuses.
+        XCTAssertNil(DER.fault(in: Data([0x30, 0x0a, 0xa0, 0x80] + oid + [0x00, 0x00])))
+        XCTAssertNil(DER.fault(in: Data([0x30, 0x80, 0x30, 0x08, 0xa0, 0x80] + oid + [0x04])))
 
         XCTAssertNil(DER.fault(in: Data([0x30, 0x80, 0x04, 0x01, 0x41, 0x00, 0x00])))
         // Past a definite parent's length: the decoder checks it, and refuses.
@@ -1726,6 +1735,78 @@ final class VerifierTests: XCTestCase {
         XCTAssertNil(DER.fault(in: message + Data(oid)))
         XCTAssertEqual(DER.message(of: message + Data([0x41, 0x41, 0x41])), message)
         XCTAssertEqual(DER.message(of: Data([0x30, 0x80, 0x04])), Data([0x30, 0x80, 0x04]))
+
+        // The message ends at two zero bytes, not at an empty element of tag 0 written otherwise.
+        for element in [[0x00, 0x80, 0x00, 0x00], [0x00, 0x81, 0x00]] as [[UInt8]] {
+            let nested = Data([0x30, 0x80] + element + [0x00, 0x00])
+            XCTAssertNil(DER.fault(in: nested))
+            XCTAssertEqual(DER.message(of: nested + Data([0x41])), nested)
+        }
+    }
+
+    /**
+     Security's decoder checks a length against the first definite length around the element, and takes at its
+     word one that no definite length encloses. `/bin/ls`'s `x86_64` message is DER. Given indefinite lengths for
+     its two outer elements, as Security's own encoder writes them, it decodes and verifies as it did. CMSDecoder
+     is asked directly of each form made from it:
+
+     - an end-of-contents is two zero bytes: with any other element of tag 0 in its place, the decoder refuses the
+       message, and so does fashion;
+     - a SignedData that claims 512 MiB under an indefinite `[0]` inside a definite message is checked against the
+       message's length: no fault, and the decoder, handed it, refuses it;
+     - the same under an indefinite message is a length taken at its word: a fault, and the decoder is not handed
+       it.
+     */
+    func testALengthIsCheckedAgainstTheFirstDefiniteLengthAroundIt() throws {
+        let program = try self.lsX86()
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let superblob = try Data(image.signingData(XCTUnwrap(image.findCodeSignature())))
+        let code = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        let cms = try Data(XCTUnwrap(MachO.component(0x10000, of: superblob)).dropFirst(8))
+
+        // The message: a SEQUENCE of the content type's OID and the SignedData under [0], their lengths definite.
+        let laidOut = cms.count > 19 && Array(cms.prefix(2)) == [0x30, 0x82] && Array(cms[4 ..< 6]) == [0x06, 0x09] && Array(cms[15 ..< 17]) == [0xa0, 0x82]
+        try XCTSkipUnless(laidOut, "/bin/ls's CMS is not laid out as expected")
+        let oid = Data(cms[4 ..< 15])
+        let signed = Data(cms[19...])
+        let end = Data([0x00, 0x00])
+
+        /// Whether Security's decoder takes `message`, asked directly.
+        func decodes(_ message: Data) -> Bool {
+            var created: CMSDecoder?
+            guard CMSDecoderCreate(&created) == errSecSuccess, let decoder = created else {
+                return false
+            }
+            let updated = message.withUnsafeBytes { $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, message.count) } ?? errSecParam }
+            return updated == errSecSuccess && CMSDecoderFinalizeMessage(decoder) == errSecSuccess
+        }
+
+        let indefinite = Data([0x30, 0x80]) + oid + Data([0xa0, 0x80]) + signed + end + end
+        XCTAssertTrue(decodes(cms))
+        XCTAssertTrue(decodes(indefinite))
+        XCTAssertNil(DER.fault(in: indefinite))
+        XCTAssertNoThrow(try Signer(cms: indefinite, over: code, evaluatingChain: false))
+
+        // Either end written as another element of tag 0: the last one, the message's, then the [0]'s.
+        for other in [[0x00, 0x7f], [0x00, 0x80, 0x00, 0x00], [0x00, 0x81, 0x00], [0x00, 0x84, 0x7f, 0xff, 0xff, 0xff]] as [[UInt8]] {
+            for message in [Data(indefinite.dropLast(2)) + Data(other), Data(indefinite.dropLast(4)) + Data(other) + end] {
+                XCTAssertFalse(decodes(message), "\(other)")
+                XCTAssertThrowsError(try Signer(cms: message, over: code, evaluatingChain: false), "\(other)")
+            }
+        }
+
+        // A SignedData of 512 MiB under an indefinite [0], inside a definite message, then inside an indefinite one.
+        let huge = Data([0xa0, 0x80, 0x30, 0x84, 0x20, 0x00, 0x00, 0x00])
+        let checked = Data([0x30, UInt8(oid.count + huge.count)]) + oid + huge
+        XCTAssertNil(DER.fault(in: checked))
+        XCTAssertFalse(decodes(checked))
+        XCTAssertThrowsError(try Signer(cms: checked, over: code, evaluatingChain: false)) {
+            XCTAssertEqual($0 as? Signer.Failure, .undecodable)
+        }
+        let unchecked = Data([0x30, 0x80]) + oid + huge
+        XCTAssertThrowsError(try Signer(cms: unchecked, over: code, evaluatingChain: false)) {
+            XCTAssertEqual($0 as? Signer.Failure, .malformed("tag 0x30 at 0xf declares 536870912 bytes, 0 left"))
+        }
     }
 
     /**
