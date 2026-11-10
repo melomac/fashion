@@ -294,6 +294,12 @@ struct Signer {
      is the signers, each a SignerInfo of a version, the signer's identifier, a digest algorithm, signed attributes,
      a signature algorithm, the signature, an OCTET STRING, and unsigned attributes, when it has them, last in a
      context tag 1. Nil for anything else.
+
+     The message is one Security's decoder took, and Security verifies the signature over the signed attributes
+     as it encodes them again, not as the bytes have them. So the bytes may be written in any form the decoder
+     takes without the signature failing: a tag in the high-tag-number form, an OCTET STRING in pieces. They are
+     read here as the decoder reads them (`DER.Element`, `DER.octets(of:)`). Read otherwise, an attribute would go
+     unread here that Security enforces.
      */
     private static func signerInfo(in cms: Data) -> [DER.Element]? {
         var reader = DER.Reader(cms)
@@ -331,14 +337,14 @@ struct Signer {
             guard let parts = DER.elements(of: attribute.content), parts.count == 2, parts[0].tag == 0x06, parts[1].tag == 0x31, let values = DER.elements(of: parts[1].content) else {
                 continue
             }
-            if parts[0].content == Self.hashAgilityType, let plist = values.first, plist.tag == 0x04 {
-                let hashes = (try? PropertyListSerialization.propertyList(from: Data(plist.content), format: nil) as? [String: Any])?["cdhashes"] as? [Data]
+            if parts[0].content == Self.hashAgilityType, let plist = values.first.flatMap(DER.octets(of:)) {
+                let hashes = (try? PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any])?["cdhashes"] as? [Data]
                 cdhashes = hashes ?? []
             } else if parts[0].content == Self.hashAgilityV2Type {
                 var named: [HashType: Data] = [:]
                 for value in values where value.tag == 0x30 {
-                    if let pair = DER.elements(of: value.content), pair.count == 2, pair[0].tag == 0x06, pair[1].tag == 0x04, let hashType = Self.imprintDigests[Data(pair[0].content)] {
-                        named[hashType] = Data(pair[1].content)
+                    if let pair = DER.elements(of: value.content), pair.count == 2, pair[0].tag == 0x06, let cdhash = DER.octets(of: pair[1]), let hashType = Self.imprintDigests[Data(pair[0].content)] {
+                        named[hashType] = cdhash
                     }
                 }
                 v2 = named
@@ -349,7 +355,7 @@ struct Signer {
 
     /// The first signer's signature in `cms`, what a timestamp token is taken over; nil for anything else.
     static func signature(in cms: Data) -> Data? {
-        self.signerInfo(in: cms)?.last(where: { $0.tag == 0x04 }).map { Data($0.content) }
+        self.signerInfo(in: cms)?.compactMap(DER.octets(of:)).last
     }
 
     /**
@@ -360,7 +366,7 @@ struct Signer {
         guard
             let fields = signerInfo(in: cms),
             let unsigned = fields.last, unsigned.tag == 0xa1,
-            let signature = fields.last(where: { $0.tag == 0x04 }),
+            let signature = fields.compactMap(DER.octets(of:)).last,
             let attributes = DER.elements(of: unsigned.content)
         else {
             return nil
@@ -373,7 +379,7 @@ struct Signer {
             else {
                 continue
             }
-            return SignatureAndToken(signature: Data(signature.content), token: Data(token.raw))
+            return SignatureAndToken(signature: signature, token: Data(token.raw))
         }
         return nil
     }
@@ -388,14 +394,14 @@ struct Signer {
             let info = reader.next(), info.tag == 0x30,
             let fields = DER.elements(of: info.content), fields.count >= 5,
             fields[0].tag == 0x02, fields[1].tag == 0x06, fields[2].tag == 0x30, fields[3].tag == 0x02, fields[4].tag == 0x18,
-            let imprint = DER.elements(of: fields[2].content), imprint.count == 2, imprint[0].tag == 0x30, imprint[1].tag == 0x04,
+            let imprint = DER.elements(of: fields[2].content), imprint.count == 2, imprint[0].tag == 0x30, let hashed = DER.octets(of: imprint[1]),
             let algorithm = DER.elements(of: imprint[0].content)?.first, algorithm.tag == 0x06,
             let digest = Self.imprintDigests[Data(algorithm.content)],
             let date = DER.generalizedTime(fields[4].content)
         else {
             return nil
         }
-        return TSTInfo(date: date, digest: digest, imprint: Data(imprint[1].content))
+        return TSTInfo(date: date, digest: digest, imprint: hashed)
     }
 
     /// A code directory the signature binds, as `init` checks it against the signer's attributes: its hash type, and

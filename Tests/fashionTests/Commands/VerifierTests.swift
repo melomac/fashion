@@ -2187,6 +2187,151 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     Security verifies a signature over the signed attributes as it encodes them again, not as the bytes have
+     them. So a message may be written in any form its decoder takes, and the signature still verifies. Two such
+     forms kept the signer's hash-agility attributes, which Security enforces, from being read here:
+
+     - a tag in the high-tag-number form where one byte would do: `3f 10` for a SEQUENCE's `30`;
+     - an OCTET STRING in pieces: `24 ..` around its substrings, which are strings again.
+
+     Three signatures are made over a truncated SHA-256 directory, as the test before this one makes them: one
+     bound right, one whose v2 attribute names another cdhash, one whose cdhashes plist lists another. Each is
+     written again in each form, and `codesign --verify` is asked:
+
+     - a form the decoder takes leaves the verdict as it was: valid for the right binding, invalid for a wrong one;
+     - a change inside the v2 attribute's value, which the signature covers as it is written, is invalid whatever
+       the binding, and so is a string made of anything but strings.
+
+     Hash mode's INVALID is codesign's verdict for every one of them.
+     */
+    func testTheSignersAttributesAreReadInEveryFormTheDecoderTakes() throws {
+        // The reader's part: a tag by its number, however written, and a string's bytes, in one piece or more.
+        var padded = DER.Reader(Data([0x3f, 0x80, 0x10, 0x00]))
+        let sequence = try XCTUnwrap(padded.next())
+        XCTAssertEqual([sequence.tag, sequence.identifier], [0x30, 0x3f])
+        var high = DER.Reader(Data([0xbf, 0x1f, 0x00]))
+        XCTAssertEqual(high.next()?.tag, 0xbf)
+        /// The bytes of the OCTET STRING that `bytes` encode.
+        func octets(_ bytes: [UInt8]) -> Data? {
+            var reader = DER.Reader(Data(bytes))
+            return reader.next().flatMap(DER.octets(of:))
+        }
+        XCTAssertEqual(octets([0x04, 0x03, 0x61, 0x62, 0x63]), Data("abc".utf8))
+        XCTAssertEqual(octets([0x24, 0x07, 0x04, 0x01, 0x61, 0x04, 0x02, 0x62, 0x63]), Data("abc".utf8))
+        XCTAssertEqual(octets([0x24, 0x80, 0x3f, 0x04, 0x04, 0x1f, 0x04, 0x01, 0x61, 0x04, 0x02, 0x62, 0x63, 0x00, 0x00]), Data("abc".utf8))
+        XCTAssertEqual(octets([0x24, 0x00]), Data())
+        XCTAssertNil(octets([0x24, 0x03, 0x0c, 0x01, 0x61]))
+        XCTAssertNil(octets([0x0c, 0x01, 0x61]))
+
+        let directory = try self.directory("agility-forms")
+        let signed = directory / "signed"
+        try self.program("x86_64", in: directory).write(to: signed)
+        _ = try codesign(["-s", "-", "--signature-size", "12000", "--digest-algorithm=sha256T", signed.path])
+        let program = try Data(contentsOf: signed)
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try image.signingData(signature)
+        var truncated = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        truncated.store((UInt32(bigEndian: truncated.load(UInt32.self, at: 12)) & ~UInt32(2)).bigEndian, at: 12)
+        let requirements = try Data(XCTUnwrap(MachO.component(2, of: superblob)))
+        let (certificate, key) = try Self.identity("Fashion Self", in: directory)
+        let cdhash = Data(SHA256.hash(data: truncated).prefix(20))
+        var another = cdhash
+        another[0] ^= 0xff
+
+        /// `der` with the element at `path`, an index among the elements at each level, written again by
+        /// `rewrite`, and the elements around it encoded again to hold it.
+        func written(_ der: Data, at path: [Int], _ rewrite: (DER.Element) -> Data) throws -> Data {
+            var reader = DER.Reader(der)
+            let element = try XCTUnwrap(reader.next())
+            guard let index = path.first else {
+                return rewrite(element)
+            }
+            var children = try XCTUnwrap(DER.elements(of: element.content)).map { Data($0.raw) }
+            children[index] = try written(children[index], at: Array(path.dropFirst()), rewrite)
+            return DER.encode(element.tag, children.reduce(Data(), +))
+        }
+        /// The element with `tag`, its number apart, in place of its one byte.
+        func long(_ tag: [UInt8]) -> (DER.Element) -> Data {
+            { Data(tag) + Data($0.raw.dropFirst()) }
+        }
+        /// The string constructed, around itself.
+        func constructed(_ element: DER.Element) -> Data {
+            DER.encode(0x24, Data(element.raw))
+        }
+        /// The string constructed, around its two halves.
+        func halves(_ element: DER.Element) -> Data {
+            let content = Data(element.content)
+            return DER.encode(0x24, DER.encode(0x04, content.prefix(content.count / 2)) + DER.encode(0x04, content.suffix(content.count - content.count / 2)))
+        }
+
+        for (name, listed, named, bound) in [("bound", cdhash, cdhash, true), ("v2-other", cdhash, another, false), ("plist-other", another, cdhash, false)] {
+            let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>cdhashes</key><array><data>\(listed.base64EncodedString())</data></array></dict></plist>\n"
+            let v2 = DER.encode(0x30, Self.oid([0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]) + DER.encode(0x04, named))
+            let attributes = Self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x01], DER.encode(0x04, Data(plist.utf8))) + Self.attribute([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09, 0x02], v2)
+            let cms = try Self.cms(over: truncated, certificate: certificate, key: key, attributes: attributes, in: directory, name)
+
+            // Where the message keeps its parts: the signers last in the SignedData, then the first signer's
+            // signed attributes, its signature, and the two attributes among the signed ones.
+            var reader = DER.Reader(cms)
+            let parts = try XCTUnwrap(DER.elements(of: XCTUnwrap(reader.next()).content))
+            let fields = try XCTUnwrap(DER.elements(of: XCTUnwrap(DER.elements(of: parts[1].content)?.first).content))
+            let signer = [1, 0, fields.count - 1, 0]
+            let signerFields = try XCTUnwrap(DER.elements(of: XCTUnwrap(DER.elements(of: XCTUnwrap(fields.last).content)?.first).content))
+            let signedAttributes = try signer + [XCTUnwrap(signerFields.firstIndex { $0.tag == 0xa0 })]
+            let signatureField = try signer + [XCTUnwrap(signerFields.lastIndex { $0.tag == 0x04 })]
+            let signedOnes = try XCTUnwrap(DER.elements(of: XCTUnwrap(signerFields.first { $0.tag == 0xa0 }).content))
+            /// The attribute whose type ends in `last`, among the signed ones.
+            func attribute(_ last: UInt8) throws -> [Int] {
+                try signedAttributes + [XCTUnwrap(signedOnes.firstIndex { DER.elements(of: $0.content)?.first?.content.last == last && DER.elements(of: $0.content)?.first?.content.count == 9 && DER.elements(of: $0.content)?.first?.content.starts(with: [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x09]) == true })]
+            }
+            let (listing, naming) = try (attribute(1), attribute(2))
+
+            // Each form, where it is written, and whether Security's decoder takes it with the signature holding.
+            let forms: [(name: String, path: [Int], rewrite: (DER.Element) -> Data, taken: Bool)] = [
+                ("as it is", [], { Data($0.raw) }, true),
+                ("message 3f 10", [], long([0x3f, 0x10]), true),
+                ("message 3f 80 10", [], long([0x3f, 0x80, 0x10]), true),
+                ("content bf 00", [1], long([0xbf, 0x00]), true),
+                ("SignedData 3f 10", [1, 0], long([0x3f, 0x10]), true),
+                ("signers 3f 11", Array(signer.dropLast()), long([0x3f, 0x11]), true),
+                ("signer 3f 10", signer, long([0x3f, 0x10]), true),
+                ("signed attributes bf 00", signedAttributes, long([0xbf, 0x00]), true),
+                ("v2 attribute 3f 10", naming, long([0x3f, 0x10]), true),
+                ("v2 type 1f 06", naming + [0], long([0x1f, 0x06]), true),
+                ("v2 values 3f 11", naming + [1], long([0x3f, 0x11]), true),
+                ("plist values 3f 11", listing + [1], long([0x3f, 0x11]), true),
+                ("plist 1f 04", listing + [1, 0], long([0x1f, 0x04]), true),
+                ("plist constructed", listing + [1, 0], constructed, true),
+                ("plist in halves", listing + [1, 0], halves, true),
+                ("plist constructed twice", listing + [1, 0], { DER.encode(0x24, constructed($0)) }, true),
+                ("plist constructed, indefinite", listing + [1, 0], { Data([0x24, 0x80]) + Data($0.raw) + Data([0x00, 0x00]) }, true),
+                ("plist constructed 3f 04", listing + [1, 0], { Data([0x3f, 0x04]) + constructed($0).dropFirst() }, true),
+                ("plist constructed of 1f 04", listing + [1, 0], { DER.encode(0x24, long([0x1f, 0x04])($0)) }, true),
+                ("signature constructed", signatureField, constructed, true),
+                ("signature in halves", signatureField, halves, true),
+                ("signature 1f 04", signatureField, long([0x1f, 0x04]), true),
+                // Inside the v2 attribute's value, the bytes are signed as they are written.
+                ("v2 value 3f 10", naming + [1, 0], long([0x3f, 0x10]), false),
+                ("v2 cdhash 1f 04", naming + [1, 0, 1], long([0x1f, 0x04]), false),
+                ("v2 cdhash constructed", naming + [1, 0, 1], constructed, false),
+                // A string is made of strings of its type, and of nothing else.
+                ("plist constructed of a UTF8String", listing + [1, 0], { DER.encode(0x24, DER.encode(0x0c, Data($0.content))) }, false),
+                ("plist constructed of a string and a NULL", listing + [1, 0], { DER.encode(0x24, Data($0.raw) + DER.encode(0x05, Data())) }, false),
+                ("plist constructed of nothing", listing + [1, 0], { _ in DER.encode(0x24, Data()) }, false),
+            ]
+            for form in forms {
+                let file = try Self.embedding(truncated, requirements, written(cms, at: form.path, form.rewrite), in: program, at: signature)
+                let path = directory / "\(name)-\(form.name.replacingOccurrences(of: " ", with: "-"))"
+                try file.write(to: path)
+                let verifies = try execute("/usr/bin/codesign", ["--verify", path.path])
+                XCTAssertEqual(verifies, bound && form.taken, "\(name), \(form.name): codesign --verify")
+                XCTAssertEqual(try CDHash.hash(path: path.path).map(\.invalid), [!verifies], "\(name), \(form.name)")
+            }
+        }
+    }
+
+    /**
      Hash mode's INVALID is the verdict of Security's static validation, which judges a signature by its best
      directory, as `codesign --verify` has it for each file here, made from an ad hoc signature taken apart:
 

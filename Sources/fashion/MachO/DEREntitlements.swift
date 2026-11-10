@@ -34,16 +34,16 @@ enum DEREntitlements {
         guard let first = outer.next() else {
             throw Refusal("no element to read")
         }
-        switch first.tag {
+        switch first.identifier {
         case 0x70:
             var inner = DER.Reader(first.content)
-            guard let version = inner.next(), version.tag == 0x02, let number = Self.integer(version.content) else {
+            guard let version = inner.next(), version.identifier == 0x02, let number = Self.integer(version.content) else {
                 throw Refusal("no version under the wrapper")
             }
             guard number == 1 else {
                 throw Refusal("version \(number) where 1 is expected")
             }
-            guard let root = inner.next(), root.tag == 0xb0 else {
+            guard let root = inner.next(), root.identifier == 0xb0 else {
                 throw Refusal("no dictionary after the version")
             }
             guard inner.atEnd else {
@@ -68,11 +68,11 @@ enum DEREntitlements {
         var dictionary: [String: Any] = [:]
         var previous: Data?
         for pair in pairs {
-            guard pair.tag == 0x30, let entry = DER.elements(of: pair.content), entry.count == 2 else {
+            guard pair.identifier == 0x30, let entry = DER.elements(of: pair.content), entry.count == 2 else {
                 throw Refusal("a pair that is not a key and one value")
             }
             let bytes = Data(entry[0].content)
-            guard entry[0].tag == 0x0c, !bytes.isEmpty, !bytes.contains(0), let key = String(data: bytes, encoding: .utf8) else {
+            guard entry[0].identifier == 0x0c, !bytes.isEmpty, !bytes.contains(0), let key = String(data: bytes, encoding: .utf8) else {
                 throw Refusal("a key that is not a string")
             }
             if ordered, let previous, !previous.lexicographicallyPrecedes(bytes) {
@@ -93,7 +93,7 @@ enum DEREntitlements {
         guard depth <= self.maxDepth else {
             throw Refusal("values nested past \(self.maxDepth) levels")
         }
-        switch element.tag {
+        switch element.identifier {
         case tag:
             return try self.dictionary(element.content, tag: tag, ordered: ordered, depth: depth)
         case 0x01: // BOOLEAN
@@ -129,9 +129,9 @@ enum DEREntitlements {
         case 0x18:
             throw Refusal("a GeneralizedTime value")
         case 0x31, 0x70:
-            throw Refusal("a dictionary tagged \(element.tag.hex) under a root tagged \(tag.hex)")
+            throw Refusal("a dictionary tagged \(element.identifier.hex) under a root tagged \(tag.hex)")
         default:
-            throw Refusal("a value tagged \(element.tag.hex), which CoreEntitlements has no type for")
+            throw Refusal("a value tagged \(element.identifier.hex), which CoreEntitlements has no type for")
         }
     }
 

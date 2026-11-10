@@ -14,11 +14,26 @@ enum DER {
     /// frame: Security's CMS and CoreFoundation's plists nest a dozen deep at most.
     static let maxDepth = 32
 
-    /// An element: its tag, its content, and the bytes of the whole, tag and length included. A tag in the
-    /// high-tag-number form keeps its first byte here, class and constructed bit with the low five bits set, its
-    /// number read past it and dropped: nothing read here matches one.
+    /**
+     An element: its tag, its content, and the bytes of the whole, tag and length included.
+
+     `tag` is the tag as Security's decoder matches it against the one it expects: the class and constructed bits
+     of the first byte, with the tag's number (`sec_asn1d_confirm_identifier`). The decoder takes a number under
+     31 in the high-tag-number form as it takes it in one byte:
+
+     ```
+     30 ..          a SEQUENCE                     tag 0x30
+     3f 10 ..       the same, its number apart     tag 0x30
+     3f 80 10 ..    the same, the number padded    tag 0x30
+     bf 1f ..       context tag 31                 tag 0xbf, which matches nothing read here
+     ```
+
+     `identifier` is the first byte as the bytes have it, for a reader that takes no such form, and for the
+     end-of-contents, which is a first byte of 0.
+     */
     struct Element {
         let tag: UInt8
+        let identifier: UInt8
         let content: Data
         let raw: Data
     }
@@ -63,7 +78,7 @@ enum DER {
             } catch {
                 return refused(error.why)
             }
-            let (tag, at) = (header.tag, header.content)
+            let (tag, identifier, at) = (header.tag, header.identifier, header.content)
             guard let length = header.length else {
                 // sec_asn1d_push_state: nested past SEC_ASN1D_MAX_DEPTH, the decoder refuses.
                 guard self.depth < DER.maxDepth else {
@@ -76,9 +91,9 @@ enum DER {
                     }
                     // sec_asn1d_parse_end_of_contents: the end is two zero bytes, and no other empty element of
                     // tag 0, which is read on as an element.
-                    if element.tag == 0, element.raw.count == 2 {
+                    if element.identifier == 0, element.raw.count == 2 {
                         self.offset = element.raw.endIndex
-                        return Element(tag: tag, content: self.data[at ..< element.raw.startIndex], raw: self.data[start ..< self.offset])
+                        return Element(tag: tag, identifier: identifier, content: self.data[at ..< element.raw.startIndex], raw: self.data[start ..< self.offset])
                     }
                 }
             }
@@ -86,13 +101,15 @@ enum DER {
                 return refused(DER.overrun(header, at: start, left: self.data.endIndex - at))
             }
             self.offset = at + length
-            return Element(tag: tag, content: self.data[at ..< at + length], raw: self.data[start ..< at + length])
+            return Element(tag: tag, identifier: identifier, content: self.data[at ..< at + length], raw: self.data[start ..< at + length])
         }
     }
 
-    /// An element's tag and length: where its content starts, and the length it declares, nil when indefinite.
+    /// An element's tag and length: the tag as the decoder matches it and its first byte as written
+    /// (`Element`), where its content starts, and the length it declares, nil when indefinite.
     private struct Header {
         let tag: UInt8
+        let identifier: UInt8
         let content: Int
         let length: Int?
     }
@@ -111,9 +128,10 @@ enum DER {
 
         // sec_asn1d_parse_identifier: the low five bits all set, the number follows in seven-bit bytes until one
         // without the high bit, and may not pass 57 bits (sec_asn1d_parse_more_identifier).
-        let tag = data[start]
+        let identifier = data[start]
+        var tag = identifier
         var at = start + 1
-        if tag & 0x1f == 0x1f {
+        if identifier & 0x1f == 0x1f {
             var number = 0
             while true {
                 guard at < data.endIndex else {
@@ -128,6 +146,10 @@ enum DER {
                     break
                 }
             }
+            // sec_asn1d_confirm_identifier: the number is matched, however it was written.
+            if number < 0x1f {
+                tag = identifier & 0xe0 | UInt8(number)
+            }
         }
 
         // sec_asn1d_parse_length: the high bit set, the low seven count the bytes of the length, none meaning
@@ -138,7 +160,7 @@ enum DER {
         var length = Int(data[at])
         at += 1
         if length == 0x80 {
-            return Header(tag: tag, content: at, length: nil)
+            return Header(tag: tag, identifier: identifier, content: at, length: nil)
         }
 
         if length & 0x80 != 0 {
@@ -155,12 +177,12 @@ enum DER {
             }
             at += count
         }
-        return Header(tag: tag, content: at, length: length)
+        return Header(tag: tag, identifier: identifier, content: at, length: length)
     }
 
     /// The message for the element at `start`, whose length declares more than the `left` bytes after it.
     private static func overrun(_ header: Header, at start: Int, left: Int) -> String {
-        "tag \(String(format: "0x%02x", header.tag)) at \(start.hex) declares \(header.length ?? 0) bytes, \(left) left"
+        "tag \(String(format: "0x%02x", header.identifier)) at \(start.hex) declares \(header.length ?? 0) bytes, \(left) left"
     }
 
     /// The outcome of reading one element for `fault(in:)`.
@@ -237,7 +259,7 @@ enum DER {
                     return .refused
                 }
                 // The end-of-contents: two zero bytes, no other empty element of tag 0.
-                if child.tag == 0, child.length == 0, child.content == at + 2 {
+                if child.identifier == 0, child.length == 0, child.content == at + 2 {
                     return .end(child.content)
                 }
                 // A child is checked against the first definite length around it, which is this element's too:
@@ -283,6 +305,42 @@ enum DER {
     static func message(of blob: Data) -> Data {
         var reader = Reader(blob)
         return reader.next()?.raw ?? blob
+    }
+
+    /**
+     The bytes of an OCTET STRING as Security's decoder gives them, nil for any other element. The decoder takes a
+     string in one piece or constructed, its substrings strings of the same type, constructed again or not, and
+     gives their bytes in turn (`sec_asn1d_concat_substrings`):
+
+     ```
+     04 03 61 62 63                             "abc"
+     24 07 { 04 01 61, 04 02 62 63 }            "abc"
+     24 80 { 24 03 { 04 01 61 }, .. } 00 00     "a.."
+     ```
+     */
+    static func octets(of element: Element) -> Data? {
+        self.octets(of: element, depth: 0)
+    }
+
+    private static func octets(of element: Element, depth: Int) -> Data? {
+        switch element.tag {
+        case 0x04:
+            return Data(element.content)
+        case 0x24:
+            guard depth < self.maxDepth, let substrings = self.elements(of: element.content) else {
+                return nil
+            }
+            var bytes = Data()
+            for substring in substrings {
+                guard let part = self.octets(of: substring, depth: depth + 1) else {
+                    return nil
+                }
+                bytes += part
+            }
+            return bytes
+        default:
+            return nil
+        }
     }
 
     /// Every element of `content`, nil when it does not parse as elements to its end.
