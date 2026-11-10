@@ -2211,6 +2211,12 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual([sequence.tag, sequence.identifier], [0x30, 0x3f])
         var high = DER.Reader(Data([0xbf, 0x1f, 0x00]))
         XCTAssertEqual(high.next()?.tag, 0xbf)
+        // A number that fills the decoder's 64 bits is no number under 31, and the tag is its first byte: the tag
+        // the signer fuzz harness wrote, then its shortest form.
+        var filled = DER.Reader(Data([0x3f, 0x80, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x88, 0x37, 0x00]))
+        XCTAssertEqual(filled.next()?.tag, 0x3f)
+        var shortest = DER.Reader(Data([0x1f, 0x81] + [UInt8](repeating: 0x80, count: 8) + [0x00, 0x00]))
+        XCTAssertEqual(shortest.next()?.tag, 0x1f)
         /// The bytes of the OCTET STRING that `bytes` encode.
         func octets(_ bytes: [UInt8]) -> Data? {
             var reader = DER.Reader(Data(bytes))

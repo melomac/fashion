@@ -132,7 +132,8 @@ enum DER {
         var tag = identifier
         var at = start + 1
         if identifier & 0x1f == 0x1f {
-            var number = 0
+            // The decoder's `unsigned long`: the last byte may fill its top bit, which makes no small number.
+            var number: UInt = 0
             while true {
                 guard at < data.endIndex else {
                     throw Unread(why: "the tag at \(start.hex) cut short")
@@ -140,7 +141,7 @@ enum DER {
                 guard number >> 57 == 0 else {
                     throw Unread(why: "the tag at \(start.hex) past 57 bits")
                 }
-                number = number << 7 | Int(data[at] & 0x7f)
+                number = number << 7 | UInt(data[at] & 0x7f)
                 at += 1
                 if data[at - 1] & 0x80 == 0 {
                     break
