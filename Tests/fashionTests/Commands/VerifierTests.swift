@@ -1648,10 +1648,90 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(tagged.map { Array($0.content) }, [[0x41]])
         let padded = try XCTUnwrap(DER.elements(of: Data([0x04, 0x85, 0x00, 0x00, 0x00, 0x00, 0x01, 0x41])))
         XCTAssertEqual(padded.map { Array($0.content) }, [[0x41]])
-        XCTAssertEqual(DER.fault(in: Data([0x1f] + [UInt8](repeating: 0xff, count: 9) + [0x7f])), "the tag at 0x0 past 57 bits")
-        XCTAssertEqual(DER.fault(in: Data([0x04, 0x88] + [UInt8](repeating: 0xff, count: 8))), "the length at 0x0 past 55 bits")
-        XCTAssertEqual(DER.fault(in: Data([0x30, 0x80, 0x06, 0x84, 0x2a, 0x86, 0x48, 0x86, 0x00, 0x00])), "tag 0x06 at 0x2 declares 713443462 bytes, 2 left")
+        var tag = DER.Reader(Data([0x1f] + [UInt8](repeating: 0xff, count: 9) + [0x7f]))
+        XCTAssertNil(tag.next())
+        XCTAssertEqual(tag.fault, "the tag at 0x0 past 57 bits")
+        var length = DER.Reader(Data([0x04, 0x88] + [UInt8](repeating: 0xff, count: 8)))
+        XCTAssertNil(length.next())
+        XCTAssertEqual(length.fault, "the length at 0x0 past 55 bits")
+    }
+
+    /**
+     One fault is looked for in a CMS blob before Security's decoder is handed it: a length the decoder does not
+     check that declares more than the bytes left. The decoder checks no length of the message itself, which has
+     no parent, nor of an element under an indefinite length, however deep the message nests one. The fault
+     reported is the first in the order the decoder reads.
+
+     None of these is a fault: a length past a definite parent's, which the decoder refuses itself; bytes cut
+     short and forms it does not take, which it refuses too; and what follows the message, which it never reads.
+     The message is handed over without what follows it.
+     */
+    func testOnlyALengthTheDecoderTakesAtItsWordIsAFault() {
+        let oid: [UInt8] = [0x06, 0x84, 0x2a, 0x86, 0x48, 0x86]
+        XCTAssertEqual(DER.fault(in: Data([0x30, 0x80] + oid + [0x00, 0x00])), "tag 0x06 at 0x2 declares 713443462 bytes, 2 left")
+        XCTAssertEqual(DER.fault(in: Data([0x30, 0x84, 0x7f, 0xff, 0xff, 0xff, 0x06, 0x01, 0x2a])), "tag 0x30 at 0x0 declares 2147483647 bytes, 3 left")
+        // Under an indefinite length inside a definite one, and before bytes that do not read.
+        XCTAssertEqual(DER.fault(in: Data([0x30, 0x0a, 0xa0, 0x80] + oid + [0x00, 0x00])), "tag 0x06 at 0x4 declares 713443462 bytes, 2 left")
+        XCTAssertEqual(DER.fault(in: Data([0x30, 0x80, 0x30, 0x08, 0xa0, 0x80] + oid + [0x04])), "tag 0x06 at 0x6 declares 713443462 bytes, 0 left")
+
         XCTAssertNil(DER.fault(in: Data([0x30, 0x80, 0x04, 0x01, 0x41, 0x00, 0x00])))
+        // Past a definite parent's length: the decoder checks it, and refuses.
+        XCTAssertNil(DER.fault(in: Data([0x30, 0x03, 0x04, 0x7f, 0x41])))
+        XCTAssertNil(DER.fault(in: Data([0x30, 0x08] + oid + [0x00, 0x00])))
+        // Cut short, or a form the decoder refuses, before any length it would take at its word.
+        XCTAssertNil(DER.fault(in: Data([0x30, 0x80, 0x04])))
+        XCTAssertNil(DER.fault(in: Data([0x30, 0x80, 0x1f] + [UInt8](repeating: 0xff, count: 9) + [0x7f] + oid)))
+        XCTAssertNil(DER.fault(in: Data([0x1f] + [UInt8](repeating: 0xff, count: 9) + [0x7f])))
+        // What follows the message is not read, whatever it says.
+        let message = Data([0x30, 0x80, 0x04, 0x01, 0x41, 0x00, 0x00])
+        XCTAssertNil(DER.fault(in: message + Data([0x41, 0x41, 0x41])))
+        XCTAssertNil(DER.fault(in: message + Data(oid)))
+        XCTAssertEqual(DER.message(of: message + Data([0x41, 0x41, 0x41])), message)
+        XCTAssertEqual(DER.message(of: Data([0x30, 0x80, 0x04])), Data([0x30, 0x80, 0x04]))
+    }
+
+    /**
+     A CMS blob is Security's to judge past the lengths its decoder takes at its word, as codesign has it judged:
+     `/bin/ls`'s `x86_64` signature holds with a byte after the message, with three, and with the root
+     certificate it carries bent, an OID in its issuer's name cut to no bytes so that what follows reads past the
+     sequence around it, since the decoder keeps a certificate's bytes as it finds them and reads no elements
+     there. Each is valid to `codesign --verify`, bears no INVALID in hash mode and has nothing said of it by
+     verify, where each was refused as not DER to its end.
+     */
+    func testACMSBlobIsSecuritysToJudgePastTheLengthsItTakesAtItsWord() throws {
+        let directory = try self.directory("cms-lenient")
+        let program = try self.lsX86()
+        let image = try XCTUnwrap(MachO(File(data: program)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        let superblob = try Data(image.signingData(signature))
+        let blobs = Self.blobs(of: superblob)
+        let code = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
+        let cms = try Data(XCTUnwrap(MachO.component(0x10000, of: superblob)).dropFirst(8))
+
+        /// The slice signed by `cms` in place of its own, the other blobs as they were.
+        func signed(by cms: Data) -> Data {
+            var wrapper = Data()
+            [0xfade_0b01, UInt32(8 + cms.count)].forEach { wrapper.appendUInt32BE($0) }
+            wrapper += cms
+            return Self.embedding(blobs.map { $0.slot == 0x10000 ? ($0.slot, wrapper) : $0 }, in: program, at: signature)
+        }
+
+        // The root certificate the message carries, the first attribute type of its issuer's name, an OID of three
+        // bytes, given a length of none: its bytes then read as an element past the sequence that holds them.
+        let root = try XCTUnwrap(Signer(cms: cms, over: code).chain.last.map { SecCertificateCopyData($0) as Data })
+        let type = try XCTUnwrap(cms.range(of: Data([0x06, 0x03, 0x55, 0x04]), in: XCTUnwrap(cms.range(of: root))))
+        var bent = cms
+        bent[type.lowerBound + 1] = 0
+
+        for (name, blob) in [("zero", cms + Data([0])), ("junk", cms + Data("AAA".utf8)), ("certificate", bent)] {
+            XCTAssertNil(DER.fault(in: blob), name)
+            XCTAssertNoThrow(try Signer(cms: blob, over: code, evaluatingChain: false), name)
+            let file = directory / name
+            try signed(by: blob).write(to: file)
+            XCTAssertTrue(try codesign(["--verify", "--verbose=4", file.path]).contains("valid on disk"), name)
+            XCTAssertEqual(try CDHash.hash(path: file.path).map(\.invalid), [false], name)
+            self.assertVerify(file.path, [])
+        }
     }
 
     /**
@@ -2160,6 +2240,27 @@ final class VerifierTests: XCTestCase {
         }
         blobs.forEach { blob += $0.blob ?? Data() }
         return blob
+    }
+
+    /// The blobs of `superblob` as its index places them, in the order of its entries: what `superblob(_:)` takes.
+    private static func blobs(of superblob: Data) -> [(slot: UInt32, blob: Data?)] {
+        /// The big-endian word at `offset` of the superblob.
+        func word(_ offset: Int) -> Int {
+            Int(UInt32(bigEndian: superblob.load(UInt32.self, at: offset)))
+        }
+        return (0 ..< word(8)).map { entry in
+            let offset = word(12 + 8 * entry + 4)
+            return (UInt32(word(12 + 8 * entry)), Data(superblob[offset ..< offset + word(offset + 4)]))
+        }
+    }
+
+    /// `program` with its signature replaced by a superblob of `blobs`, in the room `signature` has.
+    private static func embedding(_ blobs: [(slot: UInt32, blob: Data?)], in program: Data, at signature: MachO.Span) -> Data {
+        let blob = self.superblob(blobs)
+        XCTAssertLessThanOrEqual(blob.count, signature.size)
+        var signed = program
+        signed.replaceSubrange(signature.offset ..< signature.offset + blob.count, with: blob)
+        return signed
     }
 
     /// The first slice's code directory and CMS signature of the signed file at `path`.

@@ -57,37 +57,14 @@ enum DER {
                 self.fault = why
                 return nil
             }
-            guard start + 2 <= self.data.endIndex else {
-                return refused("an element at \(start.hex) cut short")
+            let header: Header
+            do {
+                header = try DER.header(in: self.data, at: start)
+            } catch {
+                return refused(error.why)
             }
-            // sec_asn1d_parse_identifier: the low five bits all set, the number follows in seven-bit bytes until one
-            // without the high bit, and may not pass 57 bits (sec_asn1d_parse_more_identifier).
-            let tag = self.data[start]
-            var at = start + 1
-            if tag & 0x1f == 0x1f {
-                var number = 0
-                while true {
-                    guard at < self.data.endIndex else {
-                        return refused("the tag at \(start.hex) cut short")
-                    }
-                    guard number >> 57 == 0 else {
-                        return refused("the tag at \(start.hex) past 57 bits")
-                    }
-                    number = number << 7 | Int(self.data[at] & 0x7f)
-                    at += 1
-                    if self.data[at - 1] & 0x80 == 0 {
-                        break
-                    }
-                }
-            }
-            // sec_asn1d_parse_length: the high bit set, the low seven count the bytes of the length, none meaning
-            // indefinite, each byte shifted in under 55 bits (sec_asn1d_parse_more_length).
-            guard at < self.data.endIndex else {
-                return refused("the length at \(at.hex) missing")
-            }
-            var length = Int(self.data[at])
-            at += 1
-            if length == 0x80 {
+            let (tag, at) = (header.tag, header.content)
+            guard let length = header.length else {
                 // sec_asn1d_push_state: nested past SEC_ASN1D_MAX_DEPTH, the decoder refuses.
                 guard self.depth < DER.maxDepth else {
                     return refused("nested past \(DER.maxDepth) levels at \(start.hex)")
@@ -103,54 +80,196 @@ enum DER {
                     }
                 }
             }
-            if length & 0x80 != 0 {
-                let count = length & 0x7f
-                guard count <= self.data.endIndex - at else {
-                    return refused("the length at \(start.hex) of \(count) bytes cut short")
-                }
-                length = 0
-                for byte in self.data[at ..< at + count] {
-                    guard length >> 55 == 0 else {
-                        return refused("the length at \(start.hex) past 55 bits")
-                    }
-                    length = length << 8 | Int(byte)
-                }
-                at += count
-            }
-            // sec_asn1d_check_and_subtract_length: the length within what is left, which the decoder checks only
-            // under a definite length, and allocates and fills otherwise, anything under 2 GiB (PORT_ArenaAlloc).
             guard length <= self.data.endIndex - at else {
-                return refused("tag \(String(format: "0x%02x", tag)) at \(start.hex) declares \(length) bytes, \(self.data.endIndex - at) left")
+                return refused(DER.overrun(header, at: start, left: self.data.endIndex - at))
             }
             self.offset = at + length
             return Element(tag: tag, content: self.data[at ..< at + length], raw: self.data[start ..< at + length])
         }
     }
 
+    /// An element's tag and length: where its content starts, and the length it declares, nil when indefinite.
+    private struct Header {
+        let tag: UInt8
+        let content: Int
+        let length: Int?
+    }
+
+    /// Why an element's tag and length do not read.
+    private struct Unread: Error {
+        let why: String
+    }
+
+    /// The tag and length of the element at `start` in `data`, read as Security's decoder reads them. Throws for
+    /// bytes cut short or a form the decoder refuses, saying which.
+    private static func header(in data: Data, at start: Int) throws(Unread) -> Header {
+        guard start + 2 <= data.endIndex else {
+            throw Unread(why: "an element at \(start.hex) cut short")
+        }
+
+        // sec_asn1d_parse_identifier: the low five bits all set, the number follows in seven-bit bytes until one
+        // without the high bit, and may not pass 57 bits (sec_asn1d_parse_more_identifier).
+        let tag = data[start]
+        var at = start + 1
+        if tag & 0x1f == 0x1f {
+            var number = 0
+            while true {
+                guard at < data.endIndex else {
+                    throw Unread(why: "the tag at \(start.hex) cut short")
+                }
+                guard number >> 57 == 0 else {
+                    throw Unread(why: "the tag at \(start.hex) past 57 bits")
+                }
+                number = number << 7 | Int(data[at] & 0x7f)
+                at += 1
+                if data[at - 1] & 0x80 == 0 {
+                    break
+                }
+            }
+        }
+
+        // sec_asn1d_parse_length: the high bit set, the low seven count the bytes of the length, none meaning
+        // indefinite, each byte shifted in under 55 bits (sec_asn1d_parse_more_length).
+        guard at < data.endIndex else {
+            throw Unread(why: "the length at \(at.hex) missing")
+        }
+        var length = Int(data[at])
+        at += 1
+        if length == 0x80 {
+            return Header(tag: tag, content: at, length: nil)
+        }
+
+        if length & 0x80 != 0 {
+            let count = length & 0x7f
+            guard count <= data.endIndex - at else {
+                throw Unread(why: "the length at \(start.hex) of \(count) bytes cut short")
+            }
+            length = 0
+            for byte in data[at ..< at + count] {
+                guard length >> 55 == 0 else {
+                    throw Unread(why: "the length at \(start.hex) past 55 bits")
+                }
+                length = length << 8 | Int(byte)
+            }
+            at += count
+        }
+        return Header(tag: tag, content: at, length: length)
+    }
+
+    /// The message for the element at `start`, whose length declares more than the `left` bytes after it.
+    private static func overrun(_ header: Header, at start: Int, left: Int) -> String {
+        "tag \(String(format: "0x%02x", header.tag)) at \(start.hex) declares \(header.length ?? 0) bytes, \(left) left"
+    }
+
+    /// The outcome of reading one element for `fault(in:)`.
+    private enum Read {
+        /// The element reads, and ends at this offset.
+        case end(Int)
+        /// Bytes cut short, or a form the decoder refuses. No fault: the decoder refuses them too, if it reads them.
+        case refused
+        /// The fault: a length past the bytes left, which the decoder does not check. The message for it.
+        case overrun(String)
+    }
+
     /**
-     The first fault in `content` read as elements to its end, every constructed one's content likewise, down to
-     `maxDepth`, as Security's decoder would meet it streaming; nil when there is none. Offsets are in `content`.
+     Why `blob`, a CMS message, cannot be handed to Security's decoder; nil when it can, whatever the decoder then
+     makes of it.
+
+     The decoder checks an element's length only against a definite parent (`sec_asn1d_check_and_subtract_length`):
+
+     ```
+     the element                           its length
+     ------------------------------------  -----------------------------------------------------------
+     under a definite length               checked against the parent's, refused when it does not fit
+     the message itself, with no parent    not checked
+     under an indefinite length (0x80)     not checked: the parent has no length to check against
+     ```
+
+     The decoder takes an unchecked length at its word. For a string, it allocates that many bytes, anything under
+     2 GiB (`PORT_ArenaAlloc`), and fills them. Indefinite lengths are no rarity: Security's own encoder writes
+     them for a signature's outer sequences.
+
+     So the one fault is an unchecked length that declares more than the bytes left. It is looked for in the
+     message itself and in every element under an indefinite length, however deep, down to `maxDepth`.
+
+     Anything else is left to the decoder, to take or refuse:
+
+     - bytes cut short, and forms it refuses;
+     - a length that passes a definite parent's, which it checks itself;
+     - content of a definite length that does not read as elements: the decoder may not read it as elements at
+       all, as with a certificate, whose bytes it keeps as it finds them;
+     - what follows the message, the first element of `blob`: it never reads that.
+
+     Offsets in the fault are offsets in `blob`.
      */
-    static func fault(in content: Data, depth: Int = 0) -> String? {
-        guard depth < self.maxDepth else {
-            return "nested past \(self.maxDepth) levels"
-        }
-        var reader = Reader(content)
-        var constructed: [Element] = []
-        while !reader.atEnd {
-            guard let element = reader.next() else {
-                return reader.fault ?? "not DER"
-            }
-            if element.tag & 0x20 != 0 {
-                constructed.append(element)
-            }
-        }
-        for element in constructed {
-            if let fault = self.fault(in: element.content, depth: depth + 1) {
-                return fault
-            }
+    static func fault(in blob: Data) -> String? {
+        if case let .overrun(fault) = self.read(blob, at: blob.startIndex, unchecked: true, depth: 0) {
+            return fault
         }
         return nil
+    }
+
+    /// Read the element at `start` of `data` and every element nested in it, in the order the decoder meets them.
+    /// `unchecked` says the decoder does not check this element's length: it has no parent, or an indefinite one.
+    private static func read(_ data: Data, at start: Int, unchecked: Bool, depth: Int) -> Read {
+        guard let header = try? self.header(in: data, at: start) else {
+            return .refused
+        }
+
+        guard let length = header.length else {
+            // sec_asn1d_push_state: nested past SEC_ASN1D_MAX_DEPTH, the decoder refuses.
+            guard depth < self.maxDepth else {
+                return .refused
+            }
+            var at = header.content
+            while true {
+                guard let child = try? self.header(in: data, at: at) else {
+                    return .refused
+                }
+                if child.tag == 0, child.length == 0 {
+                    return .end(child.content)
+                }
+                switch self.read(data, at: at, unchecked: true, depth: depth + 1) {
+                case let .end(next):
+                    at = next
+                case .refused:
+                    // Where it ends is unknown, so nothing after it can be read.
+                    return .refused
+                case let .overrun(fault):
+                    return .overrun(fault)
+                }
+            }
+        }
+
+        guard length <= data.endIndex - header.content else {
+            return unchecked ? .overrun(self.overrun(header, at: start, left: data.endIndex - header.content)) : .refused
+        }
+
+        let end = header.content + length
+        if header.tag & 0x20 != 0, depth < self.maxDepth {
+            let content = data[..<end]
+            var at = header.content
+            while at < end {
+                switch self.read(content, at: at, unchecked: false, depth: depth + 1) {
+                case let .end(next):
+                    at = next
+                case .refused:
+                    // The decoder refuses it there, or does not read this content as elements: no unchecked
+                    // length lies past it.
+                    at = end
+                case let .overrun(fault):
+                    return .overrun(fault)
+                }
+            }
+        }
+        return .end(end)
+    }
+
+    /// The message in `blob`: its first element, which is all Security's decoder reads. `blob` as it is when that
+    /// element does not read.
+    static func message(of blob: Data) -> Data {
+        var reader = Reader(blob)
+        return reader.next()?.raw ?? blob
     }
 
     /// Every element of `content`, nil when it does not parse as elements to its end.

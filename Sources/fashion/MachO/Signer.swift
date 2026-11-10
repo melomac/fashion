@@ -124,13 +124,19 @@ struct Signer {
      chain and the timestamp, trustd's work, are not, and the signer comes back with no chain.
      */
     init(cms: Data, over directory: Data, binding: [Binding] = [], best: HashType? = nil, enforcingExpiration: Bool = false, evaluatingChain: Bool = true) throws(Failure) {
-        // Read to its end first, every length within the bytes: Security's decoder checks a length against its
-        // parent's only when the parent's is definite (sec_asn1d_check_and_subtract_length), and under an indefinite
-        // one allocates what the length says and fills it, 680 MiB for a 4 KiB blob whose OID's length byte the
-        // signer fuzz harness made long-form, the OID's own bytes then its length.
+        // The blob is read first for the one thing the decoder cannot be handed: a length it does not check
+        // (`DER.fault`). Security's decoder checks a length only against a definite parent
+        // (sec_asn1d_check_and_subtract_length). Under an indefinite one it allocates what the length says and
+        // fills it: 680 MiB for a 4 KiB blob of the signer fuzz harness, which made an OID's length byte
+        // long-form, so that the OID's own bytes read as its length.
+        // Anything else is the decoder's to judge, as codesign has it judge: a byte changed inside a certificate,
+        // say, which the decoder keeps as it finds it.
         if let fault = DER.fault(in: cms) {
             throw .malformed(fault)
         }
+        // The decoder reads the message and nothing after it. The bytes that follow are dropped here too, so that
+        // the attributes are read from the message the decoder verified.
+        let cms = DER.message(of: cms)
         var created: CMSDecoder?
         guard CMSDecoderCreate(&created) == errSecSuccess, let decoder = created,
               cms.withUnsafeBytes({ $0.baseAddress.map { CMSDecoderUpdateMessage(decoder, $0, cms.count) } ?? errSecParam }) == errSecSuccess,
