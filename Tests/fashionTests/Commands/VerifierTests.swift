@@ -877,6 +877,10 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try nestedEncryption(cryptoff: 0x1800, cryptsize: 0x800), [": encrypted: cryptid 1 over 0x800 bytes at 0x1800"])
         XCTAssertEqual(try nestedEncryption(cryptoff: 0x2800, cryptsize: 0x1000), [": encrypted: cryptid 1 over 0x1000 bytes at 0x2800, which no one segment's file bytes hold: the kernel refuses it"])
 
+        // Ten of them: the first few are said, the rest counted.
+        let many = (0 ..< 10).reduce(program) { encryption(cryptoff: 0x1000, cryptsize: UInt32(0x100 + $1), cryptid: 1, in: $0) }
+        XCTAssertEqual(try self.verify(many, "many", in: directory).lines, [": 10 LC_ENCRYPTION_INFO_64 commands"] + (0 ..< 8).map { ": encrypted: cryptid 1 over \((0x100 + $0).hex) bytes at 0x1000" } + [": and 2 more encryption commands naming a crypter"])
+
         var flags = program
         flags.store(program.load(UInt32.self, at: 24) & ~UInt32(MH_PIE) & ~UInt32(MH_TWOLEVEL) | UInt32(MH_ALLOW_STACK_EXECUTION), at: 24)
         XCTAssertEqual(try self.verify(flags, "flags", in: directory).lines, [": flat namespace: no MH_TWOLEVEL", ": no MH_PIE: loaded without ASLR", ": MH_ALLOW_STACK_EXECUTION: an executable stack"])
@@ -1123,6 +1127,16 @@ final class VerifierTests: XCTestCase {
         let swapped = try verified(resealed(wrapped(DER.encode(0xb0, pairs[1].raw + pairs[0].raw + pairs[2].raw))), "swapped")
         XCTAssertEqual(swapped.lines, [refused("keys out of order, com.apple.security.cs.allow-jit after com.apple.security.fashion")])
         XCTAssertEqual([swapped.runs, swapped.decodes], [false, false])
+        // A key is the blob's own word: one with a newline in it is quoted, and makes no line of its own.
+        /// A pair of `key` and true.
+        func pair(_ key: String) -> Data {
+            DER.encode(0x30, DER.encode(0x0c, Data(key.utf8)) + DER.encode(0x01, Data([0xff])))
+        }
+        // A third pair is made as long as it takes for the blob to keep its length, which the reseal wants.
+        let key = "b\n/bin/ls: nothing to see"
+        let filled = try XCTUnwrap((0 ..< 120).lazy.map { wrapped(DER.encode(0xb0, pair("z") + pair(key) + pair(String(repeating: "!", count: $0)))) }.first { $0.count == bytes.count })
+        let forged = try verified(resealed(filled), "forged")
+        XCTAssertEqual(forged.lines, [refused("keys out of order, \"b\\n/bin/ls: nothing to see\" after z")])
 
         let set = try verified(resealed(wrapped(DER.encode(0x31, root.content))), "set")
         XCTAssertEqual(set.lines, [refused("no dictionary after the version")])
@@ -1456,8 +1470,10 @@ final class VerifierTests: XCTestCase {
     /**
      Segments laid over the same bytes, thousands of them with a section each as a crafted table lays them, have the
      bytes no section covers read once, not once per segment: a 4 MiB file under 4000 such segments would be 16 GiB
-     of reads. Gaps laid inside one another are each counted over the pieces they are read in, none walked once per
-     gap. And a segment laid inside another names none of the outer one's content as lying between segments.
+     of reads. Gaps laid inside one another are cut into pieces, each read once, and a gap is counted from sums
+     over the pieces, with no walk per gap. Each rule names the first few segments it finds and counts the rest,
+     so that thousands of segments make dozens of lines. And a segment laid inside another names none of the outer
+     one's content as lying between segments.
      */
     func testPaddingIsReadOnceUnderSegmentsOverTheSameBytes() throws {
         let directory = try self.directory("padding-once")
@@ -1482,13 +1498,16 @@ final class VerifierTests: XCTestCase {
         let lines = self.verify(file.path).lines
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(10), "every segment's padding read on its own")
         XCTAssertTrue(lines.contains("\(file.path): \((size - headerEnd - 1).hex) bytes of __S0 that no section covers are not zero, the first at \((headerEnd + 1).hex)"))
-        XCTAssertTrue(lines.contains("\(file.path): \((size - headerEnd - 1).hex) bytes of __S\(count - 1) that no section covers are not zero, the first at \((headerEnd + 1).hex)"))
+        // The first few segments are named, the rest counted, by each rule that finds them all.
+        XCTAssertTrue(lines.contains("\(file.path): and \(count - 8) more segments with bytes no section covers that are not zero"))
+        XCTAssertEqual(lines.count(where: { $0 == "\(file.path): and \(count - 9) more such pairs" }), 2, "overlapping in the file, and in memory")
+        XCTAssertLessThan(lines.count, 100)
 
-        // Gaps laid inside one another: 64 segments over the same bytes, each with one section from 64 bytes further
+        // Gaps laid inside one another: 9 segments over the same bytes, each with one section from 64 bytes further
         // to the end, so each one's gap runs from the headers to its section, over every gap before it; a byte
         // that is not zero where each section starts lies in the gap of every segment after it, and is counted
         // there, the first of them the first.
-        let staggered = 64
+        let staggered = 9
         let top = 32 + staggered * 152
         var stairs = Data()
         [MH_MAGIC_64, UInt32(CPU_TYPE_X86_64), UInt32(CPU_SUBTYPE_X86_64_ALL), UInt32(MH_PRELOAD), UInt32(staggered), UInt32(staggered * 152), 0, 0].forEach { stairs.appendUInt32($0) }
@@ -1510,7 +1529,7 @@ final class VerifierTests: XCTestCase {
         try stairs.write(to: stairsFile)
         let stairsLines = self.verify(stairsFile.path).lines
         XCTAssertFalse(stairsLines.contains { $0.contains(" of __G0 that no section covers") }, "nothing but zeros before the first section")
-        for index in [1, 2, 31, 63] {
+        for index in 1 ..< staggered {
             XCTAssertTrue(stairsLines.contains("\(stairsFile.path): \(index.hex) bytes of __G\(index) that no section covers are not zero, the first at \((top + 64).hex)"), "__G\(index)")
         }
 

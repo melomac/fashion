@@ -250,7 +250,7 @@ struct MachOVerifier {
      A string the image carries, a dylib's name, a certificate's, an entitlement's key, as a line shows it: as it is
      when printable ASCII, quoted and escaped otherwise, so that a newline in it cannot make a line of its own.
      */
-    private static func shown(_ string: String) -> String {
+    static func shown(_ string: String) -> String {
         string.utf8.allSatisfy { 0x20 ... 0x7e ~= $0 } ? string : self.escaped(string)
     }
 
@@ -377,11 +377,8 @@ struct MachOVerifier {
         }
         let pointer = image.is64 ? 8 : 4
         let unaligned = self.commands.enumerated().filter { $0.element.data.count % pointer != 0 }
-        for (index, command) in unaligned.prefix(Self.listed) {
-            found.append("load command #\(index), \(command.name), has a size \(command.data.count.hex) that is not a multiple of \(pointer)")
-        }
-        if unaligned.count > Self.listed {
-            found.append("and \(String(unaligned.count - Self.listed, pluralizing: "more load command")) with a size that is not a multiple of \(pointer)")
+        found += Self.few(unaligned, more: "load command", " with a size that is not a multiple of \(pointer)") { index, command in
+            "load command #\(index), \(command.name), has a size \(command.data.count.hex) that is not a multiple of \(pointer)"
         }
 
         // dyld's validStructureLoadCommands: a command it does not know is skipped, unless the command is flagged
@@ -389,11 +386,8 @@ struct MachOVerifier {
         // command size wrong"), as is LC_BUILD_VERSION for its tools: the bytes past the structure are a place no
         // loader reads, as the header pad is.
         let required = self.commands.enumerated().filter { !$0.element.isKnown && $0.element.cmd & UInt32(LC_REQ_DYLD) != 0 }
-        for (index, command) in required.prefix(Self.listed) {
-            found.append("load command #\(index), \(command.name), is unknown and flagged LC_REQ_DYLD, which dyld refuses")
-        }
-        if required.count > Self.listed {
-            found.append("and \(String(required.count - Self.listed, pluralizing: "more unknown load command")) flagged LC_REQ_DYLD")
+        found += Self.few(required, more: "unknown load command", " flagged LC_REQ_DYLD") { index, command in
+            "load command #\(index), \(command.name), is unknown and flagged LC_REQ_DYLD, which dyld refuses"
         }
         // A command shorter than its structure is one too: LC_BUILD_VERSION without room for its tool count, a
         // segment command without room for its header, which the segment rules then never see.
@@ -410,11 +404,8 @@ struct MachOVerifier {
             }
             return expected.flatMap { $0 == command.data.count ? nil : (index, command, $0) }
         }
-        for (index, command, expected) in sized.prefix(Self.listed) {
-            found.append("load command #\(index), \(command.name), is \(command.data.count.hex) bytes, not its structure's \(expected.hex), which dyld refuses")
-        }
-        if sized.count > Self.listed {
-            found.append("and \(String(sized.count - Self.listed, pluralizing: "more load command")) sized other than their structure")
+        found += Self.few(sized, more: "load command", " sized other than their structure") { index, command, expected in
+            "load command #\(index), \(command.name), is \(command.data.count.hex) bytes, not its structure's \(expected.hex), which dyld refuses"
         }
         let counts = Dictionary(self.commands.map { ($0.cmd, 1) }, uniquingKeysWith: +)
         if image.is64, counts[UInt32(LC_SEGMENT)] != nil {
@@ -515,24 +506,18 @@ struct MachOVerifier {
         var found: [String] = []
         let loaded = segments.filter { $0.filesize > 0 }
         let mapped = segments.filter { $0.vmsize > 0 }
-        for (before, after) in zip(loaded, loaded.dropFirst()) where after.fileoff < before.fileoff {
-            found.append("segment \(after.name)'s file offset \(after.fileoff.hex) is out of order after \(before.name)'s \(before.fileoff.hex)")
+        // Each rule names the first few segments it finds and counts the rest (`few`). A crafted table holds
+        // thousands of segments: a line each would be megabytes of output for a file of kilobytes.
+        found += Self.few(zip(loaded, loaded.dropFirst()).filter { $1.fileoff < $0.fileoff }, more: "such segment") { before, after in
+            "segment \(after.name)'s file offset \(after.fileoff.hex) is out of order after \(before.name)'s \(before.fileoff.hex)"
         }
-        for (before, after) in zip(mapped, mapped.dropFirst()) where after.vmaddr < before.vmaddr {
-            found.append("segment \(after.name)'s address \(after.vmaddr.hex) is out of order after \(before.name)'s \(before.vmaddr.hex)")
+        found += Self.few(zip(mapped, mapped.dropFirst()).filter { $1.vmaddr < $0.vmaddr }, more: "such segment") { before, after in
+            "segment \(after.name)'s address \(after.vmaddr.hex) is out of order after \(before.name)'s \(before.vmaddr.hex)"
         }
-        for (one, other) in Self.overlapping(loaded, from: \.fileoff, to: \.fileend) {
-            found.append("segments \(one.name) and \(other.name) overlap in the file")
-        }
-        for (one, other) in Self.overlapping(mapped, from: \.vmaddr, to: \.vmend) {
-            found.append("segments \(one.name) and \(other.name) overlap in memory")
-        }
-        for segment in segments where segment.filesize > segment.vmsize {
-            found.append("segment \(segment.name)'s file size \(segment.filesize.hex) exceeds its vmsize \(segment.vmsize.hex)")
-        }
-        for segment in mapped where segment.wraps {
-            found.append("segment \(segment.name)'s address \(segment.vmaddr.hex) and vmsize \(segment.vmsize.hex) wrap around the address space")
-        }
+        found += Self.few(Self.overlapping(loaded, from: \.fileoff, to: \.fileend), more: "such pair") { "segments \($0.name) and \($1.name) overlap in the file" }
+        found += Self.few(Self.overlapping(mapped, from: \.vmaddr, to: \.vmend), more: "such pair") { "segments \($0.name) and \($1.name) overlap in memory" }
+        found += Self.few(segments.filter { $0.filesize > $0.vmsize }, more: "such segment") { "segment \($0.name)'s file size \($0.filesize.hex) exceeds its vmsize \($0.vmsize.hex)" }
+        found += Self.few(mapped.filter(\.wraps), more: "such segment") { "segment \($0.name)'s address \($0.vmaddr.hex) and vmsize \($0.vmsize.hex) wrap around the address space" }
 
         // dyld's validSegments: the command's size is its sections' exactly; the kernel's load_segment: a file offset
         // it can map, which is on a page of the platform's, 4 KiB for iOS before 16 and tvOS, where the kernel maps an
@@ -540,20 +525,22 @@ struct MachOVerifier {
         // maps a segment with no more than its maximum.
         let page = UInt64(image.segmentAlignment)
         let mappedPage = (try? image.pageSizeLog()).map { UInt64(1) << UInt64($0) } ?? page
+        var commands: [String] = []
         for segment in segments {
             // Measured by the command's own structures, which a command of the other ABI keeps.
             if segment.sections.count != Int(segment.nsects) || (segment.cmdsize - (segment.wide ? MemoryLayout<segment_command_64>.size : MemoryLayout<segment_command>.size)) % (segment.wide ? MemoryLayout<section_64>.size : MemoryLayout<section>.size) != 0 {
-                found.append("segment \(segment.name)'s command size \(segment.cmdsize.hex) does not hold its \(String(Int(segment.nsects), pluralizing: "section"))")
+                commands.append("segment \(segment.name)'s command size \(segment.cmdsize.hex) does not hold its \(String(Int(segment.nsects), pluralizing: "section"))")
             }
             if self.isLoadable, segment.fileoff % mappedPage != 0 {
-                found.append("segment \(segment.name)'s file offset \(segment.fileoff.hex) is not page aligned")
+                commands.append("segment \(segment.name)'s file offset \(segment.fileoff.hex) is not page aligned")
             }
             if (segment.initprot | segment.maxprot) & ~(VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE) != 0 {
-                found.append("segment \(segment.name)'s protection has bits beyond rwx: \(segment.initprot.hex) within \(segment.maxprot.hex)")
+                commands.append("segment \(segment.name)'s protection has bits beyond rwx: \(segment.initprot.hex) within \(segment.maxprot.hex)")
             } else if segment.initprot & ~segment.maxprot != 0 {
-                found.append("segment \(segment.name)'s protection \(segment.protection) exceeds its maximum \(Segment.protection(segment.maxprot))")
+                commands.append("segment \(segment.name)'s protection \(segment.protection) exceeds its maximum \(Segment.protection(segment.maxprot))")
             }
         }
+        found += Self.few(commands, more: "such line") { $0 }
         for (name, count) in Dictionary(segments.map { ($0.name, 1) }, uniquingKeysWith: +).sorted(by: { $0.key < $1.key }) where count > 1 {
             found.append(name.isEmpty ? "\(count) segments with an empty name" : "\(count) segments named \(name)")
         }
@@ -611,9 +598,7 @@ struct MachOVerifier {
         // ("curprot cannot be write+execute. turning off execute"): the segment's code faults when entered.
         let wx = [CPU_TYPE_ARM64, CPU_TYPE_ARM64_32].contains(image.cpuType) ? ", which the kernel maps without execute as arm64" : ""
         let own = ["__TEXT", "__DATA", "__LINKEDIT", "__IMPORT"] + (image.filetype == UInt32(MH_KEXT_BUNDLE) ? ["__TEXT_EXEC"] : [])
-        for segment in segments where !own.contains(segment.name) && segment.isExecutable {
-            found.append(segment.isWritable ? "segment \(segment.name) is writable and executable\(wx)" : "segment \(segment.name) is executable")
-        }
+        found += Self.few(segments.filter { !own.contains($0.name) && $0.isExecutable }, more: "such segment") { $0.isWritable ? "segment \($0.name) is writable and executable\(wx)" : "segment \($0.name) is executable" }
 
         // The kernel's load_segment hands a segment flagged SG_PROTECTED_VERSION_1 to unprotect_dsmos_segment, which
         // decrypts its pages as it maps them, but for the image's first three pages, APPLE_UNPROTECTED_HEADER_SIZE,
@@ -624,10 +609,16 @@ struct MachOVerifier {
             found.append("segment \(segment.name) is Apple-protected (SG_PROTECTED_VERSION_1): the kernel decrypts it \(clear > 0 ? "past its first \(clear.hex) bytes" : "whole") as it maps it, the image's first 0x3000 bytes left clear")
         }
 
-        for segment in segments {
-            found += Self.nameAnomalies(segment.field, of: "segment \(segment.name)")
-        }
+        found += Self.few(segments.flatMap { Self.nameAnomalies($0.field, of: "segment \($0.name)") }, more: "such line") { $0 }
         return found
+    }
+
+    /**
+     The lines of the first few of `items`, which are all of one kind, then a count of the rest, with `rest` after
+     it: "and 3440 more such pairs". A line is made for the few alone: a crafted table holds thousands of items.
+     */
+    private static func few<T>(_ items: [T], more what: String, _ rest: String = "", line: (T) -> String) -> [String] {
+        items.prefix(self.listed).map(line) + (items.count > self.listed ? ["and \(String(items.count - self.listed, pluralizing: "more \(what)"))\(rest)"] : [])
     }
 
     /**
@@ -1013,6 +1004,7 @@ struct MachOVerifier {
         // and 0x10 its null one, com.apple.null, any other is LOAD_BADMACHO; a cryptsize of 0 it logs and ignores; the
         // range must lie inside one segment's file bytes, LC_SEGMENT or LC_SEGMENT_64 whatever the image, or
         // LOAD_BADMACHO, a rule it reaches once the crypter has the keys, so a crafted file dies for the keys first.
+        var crypters: [(cryptid: UInt32, offset: UInt64, size: UInt64)] = []
         for command in self.commands {
             let wide = command.cmd == UInt32(LC_ENCRYPTION_INFO_64)
             guard wide || command.cmd == UInt32(LC_ENCRYPTION_INFO), let info = command.payload(as: encryption_info_command.self) else {
@@ -1022,11 +1014,14 @@ struct MachOVerifier {
                 found.append("\(command.name) in a \(image.is64 ? 64 : 32)-bit image")
             }
             let cryptid = image.sw(info.cryptid)
-            let offset = UInt64(image.sw(info.cryptoff))
-            let size = UInt64(image.sw(info.cryptsize))
-            guard cryptid != 0 else {
-                continue
+            if cryptid != 0 {
+                crypters.append((cryptid, UInt64(image.sw(info.cryptoff)), UInt64(image.sw(info.cryptsize))))
             }
+        }
+
+        // The first few are named, the rest counted: a crafted table holds thousands, and each line named looks
+        // through every segment.
+        found += Self.few(crypters, more: "encryption command", " naming a crypter") { cryptid, offset, size in
             let crypter = cryptid == 0x10 ? "cryptid 0x10, the kernel's null crypter com.apple.null," : "cryptid \(cryptid)"
             var line = "encrypted: \(crypter) over \(size.hex) bytes at \(offset.hex)"
             if cryptid != 1, cryptid != 0x10 {
@@ -1036,8 +1031,9 @@ struct MachOVerifier {
             } else if !self.segments.contains(where: { $0.fileoff <= offset && offset + size <= $0.fileend }) {
                 line += ", which no one segment's file bytes hold: the kernel refuses it"
             }
-            found.append(line)
+            return line
         }
+
         // A version command too short to read is named by the table rules, not as none.
         if !self.commands.contains(where: { $0.cmd == UInt32(LC_BUILD_VERSION) || Self.versionMinCommands.contains($0.cmd) }) {
             found.append("no LC_BUILD_VERSION nor LC_VERSION_MIN_* dates it")
@@ -1328,16 +1324,16 @@ struct MachOVerifier {
             }
             return count > 0 ? File.NonZero(count: count, first: first) : nil
         }
-        for segment in uncovered {
-            if let nonZero = nonZero(in: segment.gaps) {
-                found.append("\(nonZero.count.hex) bytes of \(segment.name) that no section covers are not zero, the first at \(nonZero.first.hex)")
-            }
+
+        // The first few of each kind are named, the rest counted: a crafted table lays thousands of segments.
+        let inside = uncovered.compactMap { segment in
+            nonZero(in: segment.gaps).map { "\($0.count.hex) bytes of \(segment.name) that no section covers are not zero, the first at \($0.first.hex)" }
         }
-        for pair in between {
-            if let nonZero = nonZero(in: [pair.gap]) {
-                found.append("\(nonZero.count.hex) bytes between \(pair.before) and \(pair.after) are not zero, the first at \(nonZero.first.hex)")
-            }
+        found += Self.few(inside, more: "segment", " with bytes no section covers that are not zero") { $0 }
+        let outside = between.compactMap { pair in
+            nonZero(in: [pair.gap]).map { "\($0.count.hex) bytes between \(pair.before) and \(pair.after) are not zero, the first at \($0.first.hex)" }
         }
+        found += Self.few(outside, more: "gap", " between segments with bytes that are not zero") { $0 }
         return found
     }
 

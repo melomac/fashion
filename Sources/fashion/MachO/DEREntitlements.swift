@@ -76,7 +76,8 @@ enum DEREntitlements {
                 throw Refusal("a key that is not a string")
             }
             if ordered, let previous, !previous.lexicographicallyPrecedes(bytes) {
-                throw Refusal("keys out of order, \(key) after \(String(decoding: previous, as: UTF8.self))")
+                // A key is the blob's own bytes: quoted when it is not printable ASCII, so it stays on one line.
+                throw Refusal("keys out of order, \(MachOVerifier.shown(key)) after \(MachOVerifier.shown(String(decoding: previous, as: UTF8.self)))")
             }
             previous = bytes
             let value = try Self.value(of: entry[1], tag: tag, ordered: ordered, depth: depth + 1)
