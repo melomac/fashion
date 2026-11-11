@@ -716,6 +716,41 @@ final class ThinnerTests: XCTestCase {
     }
 
     /**
+     Go's linker and lld leave `__LINKEDIT`'s vmsize at the segment's file size, and name no Apple linker in
+     `LC_BUILD_VERSION`: Go names no tool, lld names itself. The linker's image is reshaped here as each leaves it.
+     Each, signed by `codesign`, comes back byte for byte.
+     */
+    func testUnsignLeavesTheLinkeditSizeOfAnImageAnotherLinkerWrote() throws {
+        let directory = try self.directory("other-linkers")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        for arch in ["x86_64", "arm64"] {
+            let linked = try compile("linked-\(arch)", in: directory, ["-arch", arch])
+            let image = try XCTUnwrap(MachO(File(path: linked.path)))
+            let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT"))
+            let build = try XCTUnwrap(image.findCommand(UInt32(LC_BUILD_VERSION)))
+            XCTAssertEqual(try XCTUnwrap(build.payload(as: build_version_command.self)).ntools, 1, arch)
+            var unrounded = try Data(contentsOf: linked)
+            let vmsize = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.vmsize))
+            try unrounded.replaceSubrange(vmsize ..< vmsize + 8, with: withUnsafeBytes(of: linkedit.load(segment_command_64.self).filesize.littleEndian) { Data($0) })
+            let ntools = try build.data.startIndex + XCTUnwrap(MemoryLayout<build_version_command>.offset(of: \.ntools))
+            var lld = unrounded
+            lld.replaceSubrange(ntools + 4 ..< ntools + 8, with: withUnsafeBytes(of: UInt32(4).littleEndian) { Data($0) }) // TOOL_LLD
+            var go = unrounded
+            go.replaceSubrange(ntools ..< ntools + 4, with: Data(count: 4))
+            for (linker, data) in [("lld", lld), ("go", go)] {
+                let name = "\(arch) \(linker)"
+                let crafted = try XCTUnwrap(MachO(File(data: data)))
+                XCTAssertNil(crafted.linkerVersion, name)
+                XCTAssertEqual(crafted.linkeditSizeRounding, 1, name)
+                let signed = try self.codesignedFile(data, in: directory)
+                XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]).last, try ByteHash.sha256.digest(data), name)
+            }
+        }
+    }
+
+    /**
      An `x86_64` image linked on 16 KiB pages (`ld -segalign 0x4000`) has its `__LINKEDIT` rounded to them. No command
      records the page, and the segments tell it: each has the size its sections need on 16 KiB, more than they need on
      4 KiB. An image linked on 4 KiB whose `__LINKEDIT` starts on 16 KiB by chance, behind a `__TEXT` of four pages,

@@ -687,7 +687,9 @@ extension MachO {
        the segment's file size, 32-bit and 64-bit alike, from cctools 698 (10.5) through 1009 (Xcode 15.2), and rounds
        64-bit up to 16 KiB from cctools 1010, which Xcode 15.3 shipped with ld64 1115: the linker's version, which
        `LC_BUILD_VERSION` records (`linkerVersion`), tells the toolchain, where the SDK alone would not, since one
-       builds against older SDKs.
+       builds against older SDKs;
+     - Go's linker and lld leave it at the segment's file size. Neither names `TOOL_LD` in `LC_BUILD_VERSION`, where
+       Apple's ld names itself: Go names no tool, lld names `TOOL_LLD`.
 
      An image is stripped when `strip` wrote its tables (`isStripped`). 1 for the file size as it is.
      A stripped image that records no linker, as one built for macOS 10.13 or earlier does, with
@@ -697,7 +699,8 @@ extension MachO {
      */
     var linkeditSizeRounding: Int? {
         guard self.isStripped else {
-            return self.linkedSegmentAlignment
+            // An image with the command and no Apple linker among its tools is another linker's.
+            return self.findCommand(UInt32(LC_BUILD_VERSION)) != nil && self.linkerVersion == nil ? 1 : self.linkedSegmentAlignment
         }
         guard self.is64 else {
             return 1
