@@ -1,0 +1,50 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26]
+        preview: [false]
+        include:
+          # macOS 27, a preview image until GitHub has a macos-27 label: its failures do not fail the run.
+          - os: xcode-27
+            preview: true
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.preview }}
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      # PackMachTests pack their fixtures with UPX, and skip without it (see Brewfile).
+      - name: Install UPX
+        run: brew install upx
+
+      - name: Test
+        run: make test
