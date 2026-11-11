@@ -97,11 +97,21 @@ struct Signer {
     // The certificate extensions Apple marks its leaves and CAs with (`certificate leaf[field.…] exists`).
     private static let softwareSigning = "1.2.840.113635.100.6.22"
     private static let appleCodeSigningCA = "Apple Code Signing Certification Authority"
-    private static let appStoreLeaves = ["1.2.840.113635.100.6.1.9", "1.2.840.113635.100.6.1.9.1", "1.2.840.113635.100.6.1.3", "1.2.840.113635.100.6.1.25.1"]
+    private static let appStoreLeaves = [
+        "1.2.840.113635.100.6.1.9",
+        "1.2.840.113635.100.6.1.9.1",
+        "1.2.840.113635.100.6.1.3",
+        "1.2.840.113635.100.6.1.25.1",
+    ]
     private static let developerIDLeaf = "1.2.840.113635.100.6.1.13"
     private static let developerIDCA = "1.2.840.113635.100.6.2.6"
     private static let developerIDDate = "1.2.840.113635.100.6.1.33"
-    private static let developmentLeaves = ["1.2.840.113635.100.6.1.12", "1.2.840.113635.100.6.1.2", "1.2.840.113635.100.6.1.7", "1.2.840.113635.100.6.1.4"]
+    private static let developmentLeaves = [
+        "1.2.840.113635.100.6.1.12",
+        "1.2.840.113635.100.6.1.2",
+        "1.2.840.113635.100.6.1.7",
+        "1.2.840.113635.100.6.1.4",
+    ]
 
     /// Developer ID accounts created on or after this day (`legacydevid.cpp`) must notarize.
     private static let accountCutOff = "20190407"

@@ -314,7 +314,8 @@ final class VerifierTests: XCTestCase {
      `codesign --remove-signature` leaves `__LINKEDIT`'s vmsize at the 16 KiB the signature needed, which names a
      signature that came out, where `unsign` restores it as the linker or `strip` left it and leaves no such trace;
      nothing is named of a stripped image whose linker is unknown, whose `strip` may have rounded it so itself, nor of an
-     `x86_64` image linked on 16 KiB pages (`ld -segalign 0x4000`), whose linker rounded it so.
+     `x86_64` image linked on 16 KiB pages (`ld -segalign 0x4000`), whose linker rounded it so, nor of one `strip -S`
+     kept every symbol of, which `strip` rounded all the same.
      */
     func testASignatureThatCameOutIsNamed() throws {
         let directory = try self.directory("residue")
@@ -342,6 +343,12 @@ final class VerifierTests: XCTestCase {
         let wide = try compile("linked-16k", in: directory, ["-arch", "x86_64", "-Wl,-segalign,0x4000"])
         XCTAssertEqual(try XCTUnwrap(XCTUnwrap(MachO(File(path: wide.path))).findSegment("__LINKEDIT")).load(segment_command_64.self).vmsize, 0x4000)
         self.assertVerify(wide.path, [])
+
+        // strip rounds to 16 KiB whatever it keeps, here every symbol: it was never signed either.
+        let kept = try compile("kept", in: directory, ["-arch", "x86_64"])
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip", "-S", kept.path]), "cannot run strip")
+        XCTAssertEqual(try XCTUnwrap(XCTUnwrap(MachO(File(path: kept.path))).findSegment("__LINKEDIT")).load(segment_command_64.self).vmsize, 0x4000)
+        self.assertVerify(kept.path, [])
     }
 
     /**

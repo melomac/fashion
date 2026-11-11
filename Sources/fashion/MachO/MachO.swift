@@ -257,7 +257,12 @@ struct MachO {
             return Version(platform: Int32(bitPattern: self.sw(build.platform)), minOS: self.sw(build.minos), sdk: self.sw(build.sdk))
         }
 
-        let platforms = [LC_VERSION_MIN_MACOSX: PLATFORM_MACOS, LC_VERSION_MIN_IPHONEOS: PLATFORM_IOS, LC_VERSION_MIN_TVOS: PLATFORM_TVOS, LC_VERSION_MIN_WATCHOS: PLATFORM_WATCHOS]
+        let platforms = [
+            LC_VERSION_MIN_MACOSX: PLATFORM_MACOS,
+            LC_VERSION_MIN_IPHONEOS: PLATFORM_IOS,
+            LC_VERSION_MIN_TVOS: PLATFORM_TVOS,
+            LC_VERSION_MIN_WATCHOS: PLATFORM_WATCHOS,
+        ]
         for command in self.loadCommands {
             if let platform = platforms[Int32(bitPattern: command.cmd)] {
                 let versionMin = try command.load(version_min_command.self)

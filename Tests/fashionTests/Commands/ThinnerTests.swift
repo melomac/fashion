@@ -653,7 +653,9 @@ final class ThinnerTests: XCTestCase {
      and keeps nothing of: the page ld64 aligns segments to for an image with a local symbol; the segment's file size
      for one `strip` emptied of them, as `strip` wrote it through cctools 1009, here today's stripped image reshaped so
      and given Xcode 15.2's linker, ld64 1022.1, for its own; 16 KiB for one whose linker is ld64 1115 or later, as the
-     `strip` beside it has written it since cctools 1010, today's. Each, signed by `codesign`, comes back byte for byte.
+     `strip` beside it has written it since cctools 1010, today's, whatever it was told to keep: an image `strip -S` or
+     `strip -x` kept symbols of is told by the string table `strip` writes. Each, signed by `codesign`, comes back byte
+     for byte.
      */
     func testUnsignRestoresTheLinkeditSizeAsStripOrTheLinkerLeftIt() throws {
         let directory = try self.directory("linkedit-size")
@@ -689,7 +691,19 @@ final class ThinnerTests: XCTestCase {
             try old.write(to: older)
             XCTAssertEqual(try XCTUnwrap(MachO(File(path: older.path))).linkeditSizeRounding, 1, arch)
 
-            for original in [linked, stripped, older] {
+            // strip rounds whatever it keeps: every symbol but the debugging ones, or the global ones.
+            var kept: [URL] = []
+            for flag in ["-S", "-x"] {
+                let partly = directory / "stripped\(flag)-\(arch)"
+                try FileManager.default.copyItem(at: linked, to: partly)
+                try XCTSkipUnless(execute("/usr/bin/xcrun", ["strip", flag, partly.path]), "cannot run strip")
+                let partlyImage = try XCTUnwrap(MachO(File(path: partly.path)))
+                XCTAssertTrue(partlyImage.isStripped, "\(arch) \(flag)")
+                XCTAssertEqual(partlyImage.linkeditSizeRounding, 0x4000, "\(arch) \(flag)")
+                kept.append(partly)
+            }
+
+            for original in [linked, stripped, older] + kept {
                 let name = "\(arch) \(original.lastPathComponent)"
                 let data = try Data(contentsOf: original)
                 let signed = try self.codesignedFile(data, in: directory)
@@ -1144,7 +1158,8 @@ final class ThinnerTests: XCTestCase {
     /**
      A stripped image's symbol tables are read within the image, and its symbols within the tables: a count of global
      symbols past the table, or a table past the image, as a crafted header has them, is read as unstripped rather
-     than read past, into another slice of a universal file.
+     than read past, into another slice of a universal file. The string table starts with a space here, as the linker
+     writes it, so that the symbols tell: behind four zero bytes, `strip`'s, the table tells before they are read.
      */
     func testAStrippedImagesTablesAreReadWithinTheImage() throws {
         let directory = try self.directory("tables")
@@ -1158,7 +1173,10 @@ final class ThinnerTests: XCTestCase {
         XCTAssertTrue(image.isStripped)
         let dysymtab = try XCTUnwrap(image.findCommand(UInt32(LC_DYSYMTAB)))
         let symtab = try XCTUnwrap(image.findCommand(UInt32(LC_SYMTAB)))
-        var globals = data
+        var linkers = data
+        try linkers[Int(XCTUnwrap(symtab.payload(as: symtab_command.self)).stroff)] = 0x20
+        XCTAssertTrue(try XCTUnwrap(MachO(File(data: linkers))).isStripped)
+        var globals = linkers
         globals.replaceSubrange(dysymtab.data.startIndex + 20 ..< dysymtab.data.startIndex + 24, with: withUnsafeBytes(of: UInt32.max.littleEndian) { Data($0) }) // nextdefsym
         XCTAssertFalse(try XCTUnwrap(MachO(File(data: globals))).isStripped)
         var past = data

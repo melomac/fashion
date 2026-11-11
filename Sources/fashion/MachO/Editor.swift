@@ -68,7 +68,14 @@ enum MachOEditor {
 
         /// The edits in the order they are done, each with the word an artifact is named by for it: `_unsigned` in a
         /// file's name, `unsigned` in hash mode's label (`Artifact`).
-        static let names: [(Edits, String)] = [(.exact, "exact"), (.unsigned, "unsigned"), (.decompressed, "decompressed"), (.unpacked, "unpacked"), (.exactUnpacked, "exact"), (.unsignedUnpacked, "unsigned")]
+        static let names: [(Edits, String)] = [
+            (.exact, "exact"),
+            (.unsigned, "unsigned"),
+            (.decompressed, "decompressed"),
+            (.unpacked, "unpacked"),
+            (.exactUnpacked, "exact"),
+            (.unsignedUnpacked, "unsigned"),
+        ]
 
         /// The words for these edits, in the order they were done: `["exact", "unsigned"]`.
         var words: [String] {
@@ -676,15 +683,17 @@ extension MachO {
        (Mac OS X 10.5 to 10.6), then the segment alignment of every segment in `HeaderAndLoadCommands.hpp` since ld64
        123 (Xcode 4), 16 KiB on arm64; cctools' classic `ld` rounded it to the segment alignment as well
        (`ld/layout.c`);
-     - `strip`, which rewrites the segment when it strips an image, sets it to the segment's file size (`misc/strip.c`),
-       32-bit and 64-bit alike, from cctools 698 (10.5) through 1009 (Xcode 15.2), and rounds 64-bit up to 16 KiB from
-       cctools 1010, which Xcode 15.3 shipped with ld64 1115: the linker's version, which `LC_BUILD_VERSION` records
-       (`linkerVersion`), tells the toolchain, where the SDK alone would not, since one builds against older SDKs.
+     - `strip`, which rewrites the segment whatever it was told to strip (`strip_object` in `misc/strip.c`), sets it to
+       the segment's file size, 32-bit and 64-bit alike, from cctools 698 (10.5) through 1009 (Xcode 15.2), and rounds
+       64-bit up to 16 KiB from cctools 1010, which Xcode 15.3 shipped with ld64 1115: the linker's version, which
+       `LC_BUILD_VERSION` records (`linkerVersion`), tells the toolchain, where the SDK alone would not, since one
+       builds against older SDKs.
 
-     An image is stripped when its symbol table is as `strip` leaves it (`isStripped`). 1 for the file size as it is.
-     An image that records no linker, as one built for macOS 10.13 or earlier does, with `LC_VERSION_MIN_MACOSX` in
-     place of `LC_BUILD_VERSION`, or one whose `LC_BUILD_VERSION` names no `TOOL_LD`, is dated by the SDK it was built
-     against, Xcode 15.3's being the first to ship cctools 1010. Nil for a stripped 64-bit image that records neither.
+     An image is stripped when `strip` wrote its tables (`isStripped`). 1 for the file size as it is.
+     A stripped image that records no linker, as one built for macOS 10.13 or earlier does, with
+     `LC_VERSION_MIN_MACOSX` in place of `LC_BUILD_VERSION`, or one whose `LC_BUILD_VERSION` names no `TOOL_LD`, is
+     dated by the SDK it was built against, Xcode 15.3's being the first to ship cctools 1010. Nil for a stripped
+     64-bit image that records neither.
      */
     var linkeditSizeRounding: Int? {
         guard self.isStripped else {
@@ -706,10 +715,15 @@ extension MachO {
     /// simulators' and Mac Catalyst's the same.
     private static let firstRoundingSDK: [Int32: UInt32] = [
         PLATFORM_MACOS: 0x000e_0400,
-        PLATFORM_IOS: 0x0011_0400, PLATFORM_IOSSIMULATOR: 0x0011_0400, PLATFORM_MACCATALYST: 0x0011_0400,
-        PLATFORM_TVOS: 0x0011_0400, PLATFORM_TVOSSIMULATOR: 0x0011_0400,
-        PLATFORM_WATCHOS: 0x000a_0400, PLATFORM_WATCHOSSIMULATOR: 0x000a_0400,
-        11: 0x0001_0100, 12: 0x0001_0100, // visionOS and its simulator
+        PLATFORM_IOS: 0x0011_0400,
+        PLATFORM_IOSSIMULATOR: 0x0011_0400,
+        PLATFORM_MACCATALYST: 0x0011_0400,
+        PLATFORM_TVOS: 0x0011_0400,
+        PLATFORM_TVOSSIMULATOR: 0x0011_0400,
+        PLATFORM_WATCHOS: 0x000a_0400,
+        PLATFORM_WATCHOSSIMULATOR: 0x000a_0400,
+        PLATFORM_VISIONOS: 0x0001_0100,
+        PLATFORM_VISIONOSSIMULATOR: 0x0001_0100,
     ]
 
     /**
@@ -737,16 +751,32 @@ extension MachO {
     }
 
     /**
-     Whether the image's symbol table is as `strip` leaves it (`strip_symtab` in cctools' `misc/strip.c`): no local
-     symbol but the one `radr://5614542` placeholder `strip` writes when none is left and the image has an indirect
-     symbol table, so that no indirect symbol gets the index 0, which dyld reads as the classic linker's bug, so that
-     no local symbol beside an indirect symbol table is the linker's doing, not `strip`'s; and in an
-     executable, no defined global symbol but those `strip` keeps, the ones referenced dynamically
-     (`REFERENCED_DYNAMICALLY`, `__mh_execute_header` as the linker marks it) and the weak definitions, where the
-     linker leaves `_main` at least, while a library keeps every global symbol. An executable `strip -x` kept the global
-     symbols of passes for the linker's. An image without `LC_DYSYMTAB`, or whose tables do not lie in the image, or
-     whose symbol ranges do not lie in the tables, is taken for unstripped: in a universal file, a range past the slice
-     would read another slice's bytes.
+     Whether `strip` wrote the image's symbol and string tables (`strip_symtab` in cctools' `misc/strip.c`).
+
+     The string table tells a 64-bit image. `strip` starts it with four zero bytes, whatever it was told to keep
+     (`strip -S`, `strip -x`). ld64 starts it with a space (`StringPoolAtom`), and lld and Go's linker do as ld64:
+
+     ```
+     strip    00 00 00 00 "__mh_execute_header" ...    the first name at index 4
+     ld64     20 00 "__mh_execute_header" ...          the first name at index 2
+     ```
+
+     A 32-bit image is not asked: how the classic ld started the table is not known here.
+
+     The symbols tell any image, as `strip` leaves them when told nothing. It may leave no string table then.
+
+     - Local symbols. None, in an image without an indirect symbol table. Or one, the `radr://5614542` placeholder,
+       in an image with one: `strip` writes it so that no indirect symbol gets the index 0, which dyld reads as the
+       classic linker's bug. No local symbol beside an indirect symbol table is the linker's doing.
+     - Global symbols, in an executable. None defined but those `strip` keeps: the ones referenced dynamically
+       (`REFERENCED_DYNAMICALLY`, `__mh_execute_header` as the linker marks it) and the weak definitions. The linker
+       leaves `_main` at least. A library keeps every global symbol, so its local symbols alone tell.
+
+     What the symbols miss: a 32-bit executable `strip -x` kept the global symbols of passes for the linker's.
+
+     The tables are read within the image. An image without `LC_DYSYMTAB`, or whose tables do not lie in the image,
+     or whose symbol ranges do not lie in the tables, is taken for unstripped. In a universal file, a range past
+     the slice would read another slice's bytes.
      */
     var isStripped: Bool {
         guard
@@ -763,6 +793,9 @@ extension MachO {
             stroff <= self.length, strsize <= self.length - stroff
         else {
             return false
+        }
+        if self.is64, strsize >= 4, let start = try? self.dataAt(stroff, count: 4), start.allSatisfy({ $0 == 0 }) {
+            return true
         }
         /// The `count` symbols from `first`, when the table holds them.
         func symbols(_ first: UInt32, _ count: Int) -> Data? {
