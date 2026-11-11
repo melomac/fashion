@@ -336,14 +336,21 @@ final class UnsignerTests: XCTestCase {
     }
 
     /**
-     Security's `remove_signature_space` walks the `ncmds` commands the loaders read and takes the last `__LINKEDIT`,
-     the last `LC_SYMTAB` and the last `LC_CODE_SIGNATURE` of them, an `LC_SEGMENT` named `__LINKEDIT` before an
-     `LC_SEGMENT_64` one, whatever the image's width. An arm64 program given a second, empty `__LINKEDIT`
-     after its own, signed by codesign, comes back as it was, byte for byte: codesign extends and shrinks the second,
-     and leaves the 16 KiB signing gave it where unsign restores the nothing it had. One given a second `LC_SYMTAB`
-     whose string table ends nowhere near the signature unsigns to what `codesign --remove-signature` writes, byte for
-     byte, the padding before the signature kept. A signature command hidden past `ncmds`, or under `ncmds` 0, is none
-     to either: codesign leaves the file as it is, and so does unsign.
+     Security's `remove_signature_space` walks the `ncmds` commands the loaders read. It takes the last `__LINKEDIT`,
+     the last `LC_SYMTAB` and the last `LC_CODE_SIGNATURE` of them, and an `LC_SEGMENT` named `__LINKEDIT` before an
+     `LC_SEGMENT_64` one, whatever the image's width. unsign takes the same, of an arm64 program codesign signed:
+
+     - With a second, empty `__LINKEDIT` after its own, the program comes back as it was, byte for byte. codesign
+       extends and shrinks the second, and leaves it the vmsize signing gave it, where unsign restores the nothing
+       it had.
+     - With a second `LC_SYMTAB` whose string table ends nowhere near the signature, unsign writes what
+       `codesign --remove-signature` writes, byte for byte, the padding before the signature kept. The vmsize
+       alone differs: codesign leaves what signing rounded it to, 16 KiB since macOS 27 and 32 KiB before, and
+       unsign restores the program's own.
+     - With an `LC_SEGMENT` named `__LINKEDIT` put first, Security shrinks that one and leaves the program's own.
+       So does unsign.
+     - With its signature command hidden past `ncmds`, or under `ncmds` 0, the program has none to either. codesign
+       leaves the file as it is, and so does unsign.
      */
     func testUnsignTakesTheLastCommandsAsCodesignDoes() throws {
         let directory = try self.directory("last")
@@ -370,7 +377,14 @@ final class UnsignerTests: XCTestCase {
             let reporter = Reporter(console: Console())
             XCTAssertEqual(try Unsigner.lines(for: file.path, write: false, reporter: reporter).map(\.text), [file.path + "_unsigned"], name)
             let unsigned = try Data(contentsOf: URL(fileURLWithPath: file.path + "_unsigned"))
-            XCTAssertEqual(unsigned, try roundTrip ? original : Data(contentsOf: oracle), name)
+            var expected = try roundTrip ? original : Data(contentsOf: oracle)
+            if !roundTrip {
+                // What codesign wrote, with the vmsize the program had before it was signed.
+                let command = try XCTUnwrap(XCTUnwrap(MachO(File(data: expected))).findSegment("__LINKEDIT"))
+                let vmsize = try command.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.vmsize))
+                expected.replaceSubrange(vmsize ..< vmsize + 8, with: withUnsafeBytes(of: linkedit.vmsize.littleEndian) { Data($0) })
+            }
+            XCTAssertEqual(unsigned, expected, name)
             XCTAssertEqual(unsigned.count, try Data(contentsOf: oracle).count, name)
         }
 

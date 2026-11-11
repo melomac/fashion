@@ -707,7 +707,9 @@ final class ThinnerTests: XCTestCase {
                 let name = "\(arch) \(original.lastPathComponent)"
                 let data = try Data(contentsOf: original)
                 let signed = try self.codesignedFile(data, in: directory)
-                XCTAssertEqual(try XCTUnwrap(MachO(File(path: signed.path))).findSegment("__LINKEDIT")?.load(segment_command_64.self).vmsize, 0x4000, "\(name): codesign rounds to 16 KiB")
+                // 16 KiB since macOS 27, and 32 KiB before for images as small as these.
+                let rounded = try XCTUnwrap(XCTUnwrap(MachO(File(path: signed.path))).findSegment("__LINKEDIT")).load(segment_command_64.self).vmsize
+                XCTAssertTrue(rounded > 0 && rounded % 0x4000 == 0, "\(name): codesign rounds to 16 KiB, not \(rounded)")
                 XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]).last, try ByteHash.sha256.digest(data), name)
                 XCTAssertEqual(try Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
                 XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: signed.path + "_unsigned")), data, name)

@@ -464,9 +464,12 @@ final class MachOTests: XCTestCase {
 
     /**
      dyld's `mach_o::Universal` accepts at most `kMaxSliceCount (16)` slices: fashion reads a universal file exactly
-     when libdyld's `macho_for_each_slice` does.
+     when libdyld's `macho_for_each_slice` does, macOS 27's: the one before refuses the file of 16 slices too.
      */
     func testUniversalSliceLimitMatchesDyld() throws {
+        guard #available(macOS 27, *) else {
+            throw XCTSkip("libdyld before macOS 27 refuses the file of 16 slices")
+        }
         for count in [16, 17] {
             var data = Data()
             data.appendUInt32BE(FAT_MAGIC)
@@ -555,7 +558,8 @@ final class MachOTests: XCTestCase {
 
     /**
      A table that counts no entry is a universal file by an arm64 slice hidden past it alone, as Security and dyld
-     read it, libdyld's `macho_for_each_slice` among them; with another entry there, or none, it is no Mach-O.
+     read it, libdyld's `macho_for_each_slice` among them since macOS 27; with another entry there, or none, it is
+     no Mach-O.
      */
     func testAZeroCountTableIsAUniversalFileByItsHiddenSlice() throws {
         let arm = (cpuType: CPU_TYPE_ARM64, cpuSubtype: CPU_SUBTYPE_ARM64_ALL, data: self.makeThin64(), align: 12)
@@ -569,9 +573,11 @@ final class MachOTests: XCTestCase {
         defer {
             try? FileManager.default.removeItem(at: url)
         }
-        var dyldSlices = 0
-        XCTAssertEqual(macho_for_each_slice(url.path()) { _, _, _, _ in dyldSlices += 1 }, 0)
-        XCTAssertEqual(dyldSlices, 1)
+        if #available(macOS 27, *) {
+            var dyldSlices = 0
+            XCTAssertEqual(macho_for_each_slice(url.path()) { _, _, _, _ in dyldSlices += 1 }, 0)
+            XCTAssertEqual(dyldSlices, 1)
+        }
 
         let x86 = (cpuType: CPU_TYPE_X86_64, cpuSubtype: CPU_SUBTYPE_X86_64_ALL, data: self.makeThin64(cpuType: CPU_TYPE_X86_64), align: 12)
         guard case .notMachO = try Universal.open(data: makeUniversal([x86], hideLast: true)) else {

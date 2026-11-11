@@ -1173,7 +1173,11 @@ final class VerifierTests: XCTestCase {
         let padding = try XCTUnwrap((0 ..< bytes.count).first { wrapped(short, Data(count: $0)).count == bytes.count })
         let inner = try verified(resealed(wrapped(short, Data(count: padding))), "inner")
         XCTAssertEqual(inner.lines, [refused("bytes after the dictionary within the wrapper")])
-        XCTAssertEqual([inner.runs, inner.decodes], [false, false])
+        XCTAssertFalse(inner.runs)
+        // codesign decodes them before macOS 27.
+        if #available(macOS 27, *) {
+            XCTAssertFalse(inner.decodes)
+        }
         let outer = try verified(resealed(wrapped(short) + Data(count: bytes.count - wrapped(short).count)), "outer")
         XCTAssertEqual(outer.lines, [": the entitlements and their DER form, which AMFI reads, disagree on com.apple.security.fashion.dict", hardening])
         XCTAssertEqual([outer.runs, outer.decodes], [true, true])
@@ -2008,7 +2012,8 @@ final class VerifierTests: XCTestCase {
 
     /**
      The CMS signs the directory at slot 0 and binds the others by the signer's hash-agility attributes. A signer
-     that wrote none binds nothing, and Apple's own platform signatures carry none.
+     that wrote none binds nothing, and Apple's own platform signatures carry none since macOS 27. The one before
+     binds `/bin/ls`'s directory by a cdhashes plist, which leaves nothing to show there.
 
      A SHA-384 directory is made here over `/bin/ls`'s `x86_64` code and added beside the SHA-256 one Apple
      signed. It outranks it, so Security and the kernel read the signature by it: codesign says valid on disk, and
@@ -2025,6 +2030,8 @@ final class VerifierTests: XCTestCase {
         let signed = try Data(XCTUnwrap(MachO.component(0, of: superblob)))
         XCTAssertEqual(signed[37], 2, "SHA-256 at slot 0")
         XCTAssertNil(MachO.component(0x1000, of: superblob), "no alternate")
+        let agility = try Signer.hashAgility(in: Data(XCTUnwrap(MachO.component(0x10000, of: superblob)).dropFirst(8)))
+        try XCTSkipUnless(agility.cdhashes == nil && agility.v2 == nil, "the signer of /bin/ls bound its code directory")
 
         // The same header and identifier, no special slot, a SHA-384 slot per page of the code.
         let hashOffset = Int(UInt32(bigEndian: signed.load(UInt32.self, at: 16)))
@@ -2362,7 +2369,7 @@ final class VerifierTests: XCTestCase {
        past the last Security visits, 12, is not read;
      - a slot sealed over what lies under a wrapper, 6, is hashed over that and not over the blob;
      - the top directory's blob, slot 4, must lie under a wrapper, sealed or not;
-     - the signature slot's must too, behind a directory flagged ad hoc as behind any;
+     - the signature slot's must too, behind a directory flagged ad hoc as behind any, since macOS 27;
      - the code limit must be the signature's offset, not past it;
      - the pages are cut by an `int` shifted by the directory's exponent, which counts modulo 32: one slot over
        all the code holds under an exponent of 31 or 63, pages past any limit, and not under 44, pages of 4 KiB;
@@ -2506,7 +2513,17 @@ final class VerifierTests: XCTestCase {
             let results = try CDHash.hash(path: file.path)
             XCTAssertEqual(results.map(\.invalid), results.map { _ in invalid }, name)
             XCTAssertEqual(results.map(\.strictOnly), results.map { _ in name == "appended" }, name)
-            XCTAssertEqual((try? codesign(["--verify", file.path])) == nil, invalid, "\(name): codesign --verify")
+
+            // Security reads the signature slot's wrapper behind an ad hoc directory since macOS 27.
+            let asked = if #available(macOS 27, *) {
+                true
+            } else {
+                name != "signature-unwrapped"
+            }
+            if asked {
+                XCTAssertEqual((try? codesign(["--verify", file.path])) == nil, invalid, "\(name): codesign --verify")
+            }
+
             // What verify says of it, where this test is about the line.
             if let lines {
                 XCTAssertEqual(self.verify(file.path).lines.map { $0.replacingOccurrences(of: file.path, with: "") }, lines, name)

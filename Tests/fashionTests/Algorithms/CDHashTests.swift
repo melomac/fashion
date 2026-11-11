@@ -312,12 +312,15 @@ final class CDHashTests: XCTestCase {
     }
 
     /**
-     Security's signer refuses SHA-512: `SecCodeSignerAddSignature` fails with errSecCSUnsupportedDigestAlgorithm for
-     hash type 5, alone or beside SHA-256, so Security reads such a directory and builds none, and the builder's
-     SHA-512 directory has no oracle. Types 1 to 4 it signs, each alone (SHA-1 too, which codesign refuses alone), the
-     directory's full cdhash read back from `kSecCodeInfoCdHashesFull` equal to the builder's. Each slice of the
-     stripped `ls` is signed thin, as `SecStaticCodeCreateWithPath` picks the running architecture's slice of a
-     universal file.
+     Security's signer refuses SHA-512. `SecCodeSignerAddSignature` fails for hash type 5, alone or beside SHA-256:
+     with errSecCSUnsupportedDigestAlgorithm since macOS 27, with errSecCSSignatureUnsupported before. So Security
+     reads such a directory and builds none, and the builder's SHA-512 directory has no oracle.
+
+     It signs types 1 to 4, each alone, SHA-1 too, which codesign refuses alone. The directory's full cdhash, read
+     back from `kSecCodeInfoCdHashesFull`, is the builder's.
+
+     Each slice of the stripped `ls` is signed thin, as `SecStaticCodeCreateWithPath` picks the running
+     architecture's slice of a universal file.
      */
     func testSecCodeSignerSignsEveryTypeButSHA512() throws {
         let directory = try self.temporaryDirectory()
@@ -340,8 +343,14 @@ final class CDHashTests: XCTestCase {
                 let built = try image.adhocCDHashes(codeLimit: image.length, invalid: false, hashTypes: [type])
                 XCTAssertEqual(built.map(\.hash), signed.cdhashes[type].map { [$0] } ?? [], "\(slice.name) \(type.name)")
             }
-            XCTAssertEqual(try Self.secCodeSigner(thin, types: [.sha512]).status, OSStatus(errSecCSUnsupportedDigestAlgorithm), "\(slice.name) sha512")
-            XCTAssertEqual(try Self.secCodeSigner(thin, types: [.sha256, .sha512]).status, OSStatus(errSecCSUnsupportedDigestAlgorithm), "\(slice.name) sha256 beside sha512")
+
+            let refusal: OSStatus = if #available(macOS 27, *) {
+                errSecCSUnsupportedDigestAlgorithm
+            } else {
+                errSecCSSignatureUnsupported
+            }
+            XCTAssertEqual(try Self.secCodeSigner(thin, types: [.sha512]).status, refusal, "\(slice.name) sha512")
+            XCTAssertEqual(try Self.secCodeSigner(thin, types: [.sha256, .sha512]).status, refusal, "\(slice.name) sha256 beside sha512")
         }
     }
 
