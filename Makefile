@@ -5,10 +5,6 @@ all: release
 # Swift
 # ----------------------------------------------------------------------------
 
-PRODUCT_NAME = fashion
-INSTALL_PATH ?= /usr/local/bin/
-ARCHIVE_PATH = /tmp/fashion.zip
-
 .PHONY: debug
 debug:
 	swift build
@@ -27,23 +23,18 @@ format:
 clean:
 	swift package clean
 
-.PHONY: install
-install: release
-	cp /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) $(INSTALL_PATH)
-
-.PHONY: zip
-zip: release
-	rm -f $(ARCHIVE_PATH)
-	zip -j $(ARCHIVE_PATH) /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) LICENSE NOTICE
-
 # ----------------------------------------------------------------------------
 # Xcode
 # ----------------------------------------------------------------------------
 
+PRODUCT_NAME = fashion
 CONFIG_PATH ?= $(PRODUCT_NAME).xcconfig
 XCODE_FLAGS = -scheme $(PRODUCT_NAME) -xcconfig $(CONFIG_PATH)
 BUILD_FLAGS = -target $(PRODUCT_NAME) -destination generic/platform=macOS
 TEST_FLAGS = -target $(PRODUCT_NAME)Tests -destination platform=macOS
+
+INSTALL_PATH ?= /usr/local/bin/
+ARCHIVE_PATH = /tmp/fashion.zip
 
 .PHONY: release
 release: xcode
@@ -60,6 +51,16 @@ xcode-test: xcode
 .PHONY: xcode-clean
 xcode-clean: xcode
 	xcodebuild clean -scheme $(PRODUCT_NAME) -destination platform=macOS -alltargets
+	rm -rf /tmp/$(PRODUCT_NAME).dst
+
+.PHONY: install
+install: release
+	cp /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) $(INSTALL_PATH)
+
+.PHONY: zip
+zip: release
+	rm -f $(ARCHIVE_PATH)
+	zip -j $(ARCHIVE_PATH) /tmp/$(PRODUCT_NAME).dst/usr/local/bin/$(PRODUCT_NAME) LICENSE NOTICE
 
 # ----------------------------------------------------------------------------
 # Setup dependencies
