@@ -44,7 +44,7 @@ final class SymHashTests: XCTestCase {
         func table(_ count: Int) -> Data {
             var data = self.makeMachO(symoff: 56, nsyms: UInt32(count), stroff: UInt32(56 + 16 * count), strsize: 1)
             var entries = Data(count: 16 * count)
-            entries.withUnsafeMutableBytes { raw in
+            entries.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
                 for symbol in 0 ..< count {
                     raw[16 * symbol + 4] = 1 // N_EXT
                 }

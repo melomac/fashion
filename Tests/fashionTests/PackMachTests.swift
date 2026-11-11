@@ -1215,7 +1215,8 @@ final class PackMachTests: XCTestCase {
         let count = 0x1000 - 104
         /// Runs of seven `byte`, a byte that varies after each, behind `lead`: what the encoder packs.
         func body(lead: Data, of byte: UInt8) -> Data {
-            Data((lead + Data((0 ..< count).map { $0 % 8 == 7 ? UInt8(0x10 + $0 / 8 % 32) : byte })).prefix(count))
+            let runs: [UInt8] = (0 ..< count).map { $0 % 8 == 7 ? UInt8(0x10 + $0 / 8 % 32) : byte }
+            return Data((lead + Data(runs)).prefix(count))
         }
 
         let distinct = Data((0x10 ..< 0x20).map { UInt8($0) })
@@ -1259,7 +1260,8 @@ final class PackMachTests: XCTestCase {
         let directory = try self.directory("long-key")
         let count = 0x1000 - 104 - 64
         // Runs of 255 bytes, a byte that varies after each, behind the padding: under a key, a run repeats with it.
-        let body = Data(count: 64) + Data((0 ..< count).map { $0 % 256 == 255 ? UInt8(0x10 + $0 / 256 % 32) : 0x41 })
+        let runs: [UInt8] = (0 ..< count).map { $0 % 256 == 255 ? UInt8(0x10 + $0 / 256 % 32) : 0x41 }
+        let body = Data(count: 64) + Data(runs)
 
         for (name, key, said) in [("hello", Array("Hello".utf8), "\"Hello\""), ("hello-world", Array("Hello, World!".utf8), "\"Hello, World!\""), ("long", (1 ... 40).map { UInt8($0) }, nil)] {
             let (packed, original) = try self.packedByHand(overlapping: 0, filtered: (body, key))
