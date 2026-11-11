@@ -66,7 +66,7 @@ struct Fashion: ParsableCommand {
         commandName: "fashion",
         abstract: "Compute and match file cryptographic or fuzzy hash digests for threat hunting and binary triage.",
         discussion: copyright,
-        version: "1.7.3",
+        version: "1.7.4",
         subcommands: [
             Hasher.self,
             Thinner.self,
