@@ -671,10 +671,11 @@ extension MachO {
      Security's `assure_signature_space` then rounds up to 16 KiB whatever it was, and `remove_signature_space` leaves
      so, as Apple's sources have it:
 
-     - ld64 rounds it up to the page it aligns segments to (`segmentAlignment`): `(address - base + 4095) & -4096` in
-       `adjustLinkEditSections` of `MachOWriterExecutable.hpp`, ld64 77.1 to 97.17 (Mac OS X 10.5 to 10.6), then the
-       segment alignment of every segment in `HeaderAndLoadCommands.hpp` since ld64 123 (Xcode 4), 16 KiB on arm64;
-       cctools' classic `ld` rounded it to the segment alignment as well (`ld/layout.c`);
+     - ld64 rounds it up to the page it aligned the segments to (`linkedSegmentAlignment`):
+       `(address - base + 4095) & -4096` in `adjustLinkEditSections` of `MachOWriterExecutable.hpp`, ld64 77.1 to 97.17
+       (Mac OS X 10.5 to 10.6), then the segment alignment of every segment in `HeaderAndLoadCommands.hpp` since ld64
+       123 (Xcode 4), 16 KiB on arm64; cctools' classic `ld` rounded it to the segment alignment as well
+       (`ld/layout.c`);
      - `strip`, which rewrites the segment when it strips an image, sets it to the segment's file size (`misc/strip.c`),
        32-bit and 64-bit alike, from cctools 698 (10.5) through 1009 (Xcode 15.2), and rounds 64-bit up to 16 KiB from
        cctools 1010, which Xcode 15.3 shipped with ld64 1115: the linker's version, which `LC_BUILD_VERSION` records
@@ -687,7 +688,7 @@ extension MachO {
      */
     var linkeditSizeRounding: Int? {
         guard self.isStripped else {
-            return self.segmentAlignment
+            return self.linkedSegmentAlignment
         }
         guard self.is64 else {
             return 1
@@ -827,6 +828,74 @@ extension MachO {
         default:
             0x1000
         }
+    }
+
+    /**
+     The page the linker aligned this image's segments to, which no command records: `segmentAlignment`, or 16 KiB
+     for an architecture of 4 KiB when the linker was told so (`ld -segalign 0x4000`). The linker takes no third page
+     for an image with chained fixups ("page_size not 4KB or 16KB").
+
+     The segments tell. The linker gives each the size its sections need, rounded up to the page:
+
+     ```
+     x86_64, -segalign 0x4000    sections need     vmsize
+     __TEXT                              0x680     0x4000
+     __DATA_CONST                         0x20     0x4000
+     __DATA                            0x11ad0    0x14000
+     ```
+
+     The page is 16 KiB when every segment with sections has the size they need on 16 KiB, and one of them more than
+     they need on 4 KiB. The addresses do not tell: segments of 4 KiB pages start on 16 KiB by chance.
+     */
+    var linkedSegmentAlignment: Int {
+        let page = self.segmentAlignment
+        guard page < 0x4000 else {
+            return page
+        }
+        var roomier = false
+        for command in self.loadCommands {
+            guard let (need, vmsize) = self.sectionsExtent(of: command), need > 0 else {
+                continue
+            }
+            guard need <= vmsize, vmsize - need < 0x4000, vmsize % 0x4000 == 0 else {
+                return page
+            }
+            roomier = roomier || vmsize - need >= UInt64(page)
+        }
+        return roomier ? 0x4000 : page
+    }
+
+    /// The size the sections of a segment `command` need, from the segment's address to their furthest end, and the
+    /// segment's vmsize; nil for another command. 0 without sections, and past any vmsize for a section that wraps.
+    private func sectionsExtent(of command: LoadCommand) -> (need: UInt64, vmsize: UInt64)? {
+        let wide = command.cmd == UInt32(LC_SEGMENT_64)
+        let vmaddr, vmsize: UInt64
+        let nsects: UInt32
+        if wide, let segment = command.payload(as: segment_command_64.self) {
+            (vmaddr, vmsize, nsects) = (self.sw(segment.vmaddr), self.sw(segment.vmsize), self.sw(segment.nsects))
+        } else if command.cmd == UInt32(LC_SEGMENT), let segment = command.payload(as: segment_command.self) {
+            (vmaddr, vmsize, nsects) = (UInt64(self.sw(segment.vmaddr)), UInt64(self.sw(segment.vmsize)), self.sw(segment.nsects))
+        } else {
+            return nil
+        }
+        let header = wide ? MemoryLayout<segment_command_64>.size : MemoryLayout<segment_command>.size
+        let stride = wide ? MemoryLayout<section_64>.size : MemoryLayout<section>.size
+        var end = vmaddr
+        // As many sections as the command holds, whatever nsects claims.
+        for index in 0 ..< min(Int(nsects), (command.data.count - header) / stride) {
+            let data = command.data.dropFirst(header + index * stride)
+            let addr, size: UInt64
+            if wide {
+                let entry = data.withUnsafeBytes { $0.loadUnaligned(as: section_64.self) }
+                (addr, size) = (self.sw(entry.addr), self.sw(entry.size))
+            } else {
+                let entry = data.withUnsafeBytes { $0.loadUnaligned(as: section.self) }
+                (addr, size) = (UInt64(self.sw(entry.addr)), UInt64(self.sw(entry.size)))
+            }
+            let (sum, wraps) = addr.addingReportingOverflow(size)
+            end = max(end, wraps ? .max : sum)
+        }
+        return (end - vmaddr, vmsize)
     }
 
     /**

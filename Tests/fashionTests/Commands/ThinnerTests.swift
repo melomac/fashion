@@ -633,12 +633,16 @@ final class ThinnerTests: XCTestCase {
         guard case let .fat(archs) = try Universal.open(File(path: universal.path)) else {
             return XCTFail("a universal file")
         }
-        XCTAssertEqual(archs.map(\.align), [12, 14])
+
+        // cctools' lipo, Xcode's through 26, aligns an image from its segments' addresses: this one at 2^14.
+        try XCTSkipUnless(archs.map(\.align) == [12, 14], "lipo aligns the slices at 2^\(archs.map(\.align)), from their segments' addresses")
+
         _ = try codesign(["-s", "-", universal.path])
         let reporter = Reporter(console: Console())
         let artifacts = try Thinner.lines(for: universal.path, exact: false, unsign: true, unpack: false, write: true, reporter: reporter).map(\.text)
         XCTAssertEqual(Set(artifacts), Set(["universal_x86_64", "universal_x86_64_unsigned", "universal_arm64", "universal_arm64_unsigned"].map { (directory / $0).path }))
         XCTAssertEqual(reporter.errorCount, 0)
+
         let expected = directory / "expected"
         try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", (directory / "universal_x86_64_unsigned").path, (directory / "universal_arm64_unsigned").path, "-output", expected.path]), "cannot run lipo")
         XCTAssertEqual(try self.hashLines(universal.path, ["--unsign"]).last, try ByteHash.sha256.digest(Data(contentsOf: expected)))
@@ -676,6 +680,7 @@ final class ThinnerTests: XCTestCase {
             let vmsize = try linkedit.data.startIndex + XCTUnwrap(MemoryLayout<segment_command_64>.offset(of: \.vmsize))
             old.replaceSubrange(vmsize ..< vmsize + 8, with: withUnsafeBytes(of: segment.filesize.littleEndian) { Data($0) })
             XCTAssertNotNil(strippedImage.linkerVersion, arch)
+
             let build = try XCTUnwrap(strippedImage.findCommand(UInt32(LC_BUILD_VERSION)))
             let tools = build.data.startIndex + MemoryLayout<build_version_command>.size
             let linker = try tools + XCTUnwrap((0 ..< Int(XCTUnwrap(build.payload(as: build_version_command.self)).ntools)).first { old[tools + $0 * 8] == UInt8(TOOL_LD) }) * 8 + 4
@@ -693,6 +698,35 @@ final class ThinnerTests: XCTestCase {
                 XCTAssertEqual(try Thinner.lines(for: signed.path, exact: false, unsign: true, unpack: false, write: true, reporter: Reporter(console: Console())).map(\.text), [signed.path + "_unsigned"], name)
                 XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: signed.path + "_unsigned")), data, name)
             }
+        }
+    }
+
+    /**
+     An `x86_64` image linked on 16 KiB pages (`ld -segalign 0x4000`) has its `__LINKEDIT` rounded to them. No command
+     records the page, and the segments tell it: each has the size its sections need on 16 KiB, more than they need on
+     4 KiB. An image linked on 4 KiB whose `__LINKEDIT` starts on 16 KiB by chance, behind a `__TEXT` of four pages,
+     tells nothing of the kind. Each, signed by `codesign`, comes back byte for byte.
+     */
+    func testUnsignRestoresTheLinkeditSizeOfAnImageLinkedOn16KPages() throws {
+        let directory = try self.directory("linked-16k")
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        // Data and zero fill beside the code, so that three segments have sections.
+        let source = "#include <stdio.h>\nint initialized[600] = {1, 2, 3};\nstatic char zeroed[70000];\nint main(int argc, char **argv) { zeroed[argc] = 1; printf(\"%d %d\\n\", initialized[argc], zeroed[2]); return 0; }\n"
+        let linked = try compile("linked-16k", in: directory, source: source, ["-arch", "x86_64", "-Wl,-segalign,0x4000"])
+        // 14000 bytes of constants fill __TEXT up to four pages of 4 KiB.
+        let chance = try compile("chance", in: directory, source: "const char filler[14000] = {1};\nint main(void) { return 0; }\n", ["-arch", "x86_64"])
+        for (file, page) in [(linked, 0x4000), (chance, 0x1000)] {
+            let name = file.lastPathComponent
+            let image = try XCTUnwrap(MachO(File(path: file.path)))
+            let linkedit = try XCTUnwrap(image.findSegment("__LINKEDIT")).load(segment_command_64.self)
+            XCTAssertEqual(linkedit.vmaddr % 0x4000, 0, "\(name): __LINKEDIT starts on 16 KiB")
+            XCTAssertEqual(image.linkedSegmentAlignment, page, name)
+            XCTAssertEqual(linkedit.vmsize, UInt64(page), name)
+            let data = try Data(contentsOf: file)
+            let signed = try self.codesignedFile(data, in: directory)
+            XCTAssertEqual(try self.hashLines(signed.path, ["--unsign"]).last, try ByteHash.sha256.digest(data), name)
         }
     }
 
