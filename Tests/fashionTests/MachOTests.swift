@@ -49,6 +49,71 @@ final class MachOTests: XCTestCase {
         XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_ARM, cpuSubtype: 0), "arm")
     }
 
+    /// The subtypes the fallback table names apart from their family, and `arm`, which the OS has no name for.
+    private static let fallbackNames: [(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t, name: String)] = [
+        (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_H, "x86_64h"),
+        (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_H | cpu_subtype_t(bitPattern: 0x8000_0000), "x86_64h"),
+        (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_ALL, "arm"),
+        (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V6, "armv6"),
+        (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7, "armv7"),
+        (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7S, "armv7s"),
+        (CPU_TYPE_ARM, CPU_SUBTYPE_ARM_V7K, "armv7k"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_601, "ppc601"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_602, "ppc"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_603, "ppc603"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_603e, "ppc603e"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_603ev, "ppc603ev"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_604, "ppc604"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_604e, "ppc604e"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_620, "ppc"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_750, "ppc750"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_7400, "ppc7400"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_7450, "ppc7450"),
+        (CPU_TYPE_POWERPC, CPU_SUBTYPE_POWERPC_970, "ppc970"),
+        (CPU_TYPE_POWERPC64, CPU_SUBTYPE_POWERPC_ALL, "ppc64"),
+        (CPU_TYPE_POWERPC64, CPU_SUBTYPE_POWERPC_970, "ppc970-64"),
+    ]
+
+    /**
+     The fallback table spells `x86_64h`, the 32-bit ARM subtypes and the PowerPC models by their own names, capability
+     bits masked. An OS that cannot name one of them would otherwise report it as a second `x86_64`, `arm` or `ppc`.
+
+     `archName` gives the same names, whichever of the OS and the table answers on the running OS.
+     */
+    func testFallbackArchNames() {
+        for (cpuType, cpuSubtype, name) in Self.fallbackNames {
+            XCTAssertEqual(Universal.fallbackArchName(cpuType: cpuType, cpuSubtype: cpuSubtype), name)
+            XCTAssertEqual(Universal.archName(cpuType: cpuType, cpuSubtype: cpuSubtype), name)
+        }
+    }
+
+    /**
+     The fallback table's names are the ones codesign prints, for a slice the OS function has no name for too.
+
+     The oracle is a signed thin slice of `/bin/ls` with its header's CPU type and subtype patched: codesign -dv names
+     the architecture from the header without verifying the signature.
+     */
+    func testFallbackArchNamesMatchCodesign() throws {
+        let path = "/bin/ls"
+        var slice = try Data(contentsOf: URL(fileURLWithPath: path))
+        if case let .fat(archs) = try Universal.open(path: path), let first = archs.first {
+            slice = slice.subdata(in: first.offset ..< first.offset + first.length)
+        }
+        try XCTSkipUnless(slice.prefix(4).elementsEqual([0xcf, 0xfa, 0xed, 0xfe]), "\(path) has no little-endian 64-bit slice")
+
+        let url = FileManager.default.temporaryDirectory / "fashion-arch-\(UUID())"
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        for (cpuType, cpuSubtype, name) in Self.fallbackNames {
+            var header = Data()
+            header.appendInt32(cpuType)
+            header.appendInt32(cpuSubtype)
+            slice.replaceSubrange(4 ..< 12, with: header)
+            try slice.write(to: url)
+            XCTAssertEqual(try codesignArchs(url.path), [name], "cputype \(cpuType), cpusubtype \(cpuSubtype)")
+        }
+    }
+
     func testArchNamePPC() {
         XCTAssertEqual(Universal.archName(cpuType: CPU_TYPE_POWERPC, cpuSubtype: 0), "ppc")
     }

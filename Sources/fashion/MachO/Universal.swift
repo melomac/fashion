@@ -161,43 +161,68 @@ enum Universal {
      so every subtype the running OS knows — `arm64e.x1`, `x86_64h`, `armv7k`… — is spelled the way Apple's tools
      spell it, capability bits included.
 
-     A slice the OS cannot name (newer than the OS, or legacy `ppc64`) falls
-     back to a built-in table. The closed families there keep their base name for any subtype; the still-growing
-     arm64 family labels an unrecognized subtype `unknown(cputype,cpusubtype)` like `lipo -archs`, because a
-     base name `codesign --arch` would resolve to some other slice.
+     A slice the OS cannot name (newer than the OS, or legacy `ppc64`) takes its name from `fallbackArchName`.
      */
     static func archName(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t) -> String {
         if let name = macho_arch_name_for_cpu_type(cpuType, cpuSubtype) {
             return String(cString: name)
         }
 
+        return self.fallbackArchName(cpuType: cpuType, cpuSubtype: cpuSubtype)
+    }
+
+    /**
+     The name of a slice the OS cannot name, from a built-in table, capability bits masked.
+
+     The table spells the subtypes it knows as `codesign` does:
+
+     - `x86_64h` apart from `x86_64`
+     - `armv6`, `armv7`, `armv7s` and `armv7k` apart from `arm`
+     - the PowerPC models, `ppc601` to `ppc970`, apart from `ppc`
+     - `ppc970-64` apart from `ppc64`
+
+     Any other subtype of a closed family keeps the family's base name.
+
+     The still-growing arm64 family labels an unrecognized subtype `unknown(cputype,cpusubtype)` like `lipo -archs`,
+     because a base name `codesign --arch` would resolve to some other slice.
+     */
+    static func fallbackArchName(cpuType: cpu_type_t, cpuSubtype: cpu_subtype_t) -> String {
         let masked = cpuSubtype & ~cpu_subtype_t(bitPattern: CPU_SUBTYPE_MASK)
-        switch cpuType {
+        return switch cpuType {
         case CPU_TYPE_ARM64:
             switch masked {
-            case CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_V8:
-                return "arm64"
-            case CPU_SUBTYPE_ARM64E:
-                return "arm64e"
-            case CPU_SUBTYPE_ARM64E_X1:
-                return "arm64e.x1"
-            default:
-                return self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
+            case CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_ARM64_V8: "arm64"
+            case CPU_SUBTYPE_ARM64E: "arm64e"
+            case CPU_SUBTYPE_ARM64E_X1: "arm64e.x1"
+            default: self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
             }
-        case CPU_TYPE_ARM64_32:
-            return "arm64_32"
-        case CPU_TYPE_X86_64:
-            return "x86_64"
-        case CPU_TYPE_I386:
-            return "i386"
+        case CPU_TYPE_ARM64_32: "arm64_32"
+        case CPU_TYPE_X86_64: masked == CPU_SUBTYPE_X86_64_H ? "x86_64h" : "x86_64"
+        case CPU_TYPE_I386: "i386"
         case CPU_TYPE_ARM:
-            return "arm"
+            switch masked {
+            case CPU_SUBTYPE_ARM_V6: "armv6"
+            case CPU_SUBTYPE_ARM_V7: "armv7"
+            case CPU_SUBTYPE_ARM_V7S: "armv7s"
+            case CPU_SUBTYPE_ARM_V7K: "armv7k"
+            default: "arm"
+            }
         case CPU_TYPE_POWERPC:
-            return "ppc"
-        case CPU_TYPE_POWERPC64:
-            return "ppc64"
-        default:
-            return self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
+            switch masked {
+            case CPU_SUBTYPE_POWERPC_601: "ppc601"
+            case CPU_SUBTYPE_POWERPC_603: "ppc603"
+            case CPU_SUBTYPE_POWERPC_603e: "ppc603e"
+            case CPU_SUBTYPE_POWERPC_603ev: "ppc603ev"
+            case CPU_SUBTYPE_POWERPC_604: "ppc604"
+            case CPU_SUBTYPE_POWERPC_604e: "ppc604e"
+            case CPU_SUBTYPE_POWERPC_750: "ppc750"
+            case CPU_SUBTYPE_POWERPC_7400: "ppc7400"
+            case CPU_SUBTYPE_POWERPC_7450: "ppc7450"
+            case CPU_SUBTYPE_POWERPC_970: "ppc970"
+            default: "ppc"
+            }
+        case CPU_TYPE_POWERPC64: masked == CPU_SUBTYPE_POWERPC_970 ? "ppc970-64" : "ppc64"
+        default: self.unknownArchName(cpuType: cpuType, cpuSubtype: masked)
         }
     }
 
