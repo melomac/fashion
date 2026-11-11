@@ -1231,10 +1231,13 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try self.verify(mismagic, "mismagic", in: directory).lines, [": the CMS blob's magic is 0xfade0b02, not 0xfade0b01, which Security refuses the signature for"])
         XCTAssertEqual(try CDHash.hash(fixture: mismagic).map(\.invalid), [true])
         // Security takes exactly one signer: the same signer twice is an invalid signature to it, where the one is
-        // a signature codesign verifies.
+        // a signature codesign verifies. The rule is macOS 27.2's. Before it, verifySignature asked
+        // CMSDecoderCopySignerStatus for signer 0 alone, and codesign verified the pair.
         let doubled = try Self.withSigners(signatureBlob, times: 2)
         XCTAssertEqual(try self.verify(embedded(directoryBlob, doubled), "doubled", in: directory).lines, [": a CMS signature with 2 signers, where Security requires exactly one, an invalid signature to it"])
-        XCTAssertFalse(try execute("/usr/bin/codesign", ["--verify", (directory / "doubled").path]))
+        if #available(macOS 27.2, *) {
+            XCTAssertFalse(try execute("/usr/bin/codesign", ["--verify", (directory / "doubled").path]))
+        }
         XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, doubled)).map(\.invalid), [true])
         XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", (directory / "self-signed").path]))
 
