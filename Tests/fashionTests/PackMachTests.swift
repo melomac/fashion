@@ -1196,6 +1196,16 @@ final class PackMachTests: XCTestCase {
         return try (self.resummed(packed), original)
     }
 
+    /// `count` bytes in runs of `byte`, every `length`th a byte that varies from run to run: what the encoder packs.
+    private static func runs(of byte: UInt8, every length: Int, count: Int) -> Data {
+        var bytes = Data(repeating: byte, count: count)
+        for index in stride(from: length - 1, to: count, by: length) {
+            let run = index / length
+            bytes[index] = UInt8(0x10 + run % 32)
+        }
+        return bytes
+    }
+
     /**
      The byte a modified UPX XORs its filtered blocks with is read off the blocks as they decompress, with no
      search. Three files made by hand, the key 0x5a:
@@ -1215,8 +1225,7 @@ final class PackMachTests: XCTestCase {
         let count = 0x1000 - 104
         /// Runs of seven `byte`, a byte that varies after each, behind `lead`: what the encoder packs.
         func body(lead: Data, of byte: UInt8) -> Data {
-            let runs: [UInt8] = (0 ..< count).map { $0 % 8 == 7 ? UInt8(0x10 + $0 / 8 % 32) : byte }
-            return Data((lead + Data(runs)).prefix(count))
+            Data((lead + Self.runs(of: byte, every: 8, count: count)).prefix(count))
         }
 
         let distinct = Data((0x10 ..< 0x20).map { UInt8($0) })
@@ -1260,8 +1269,7 @@ final class PackMachTests: XCTestCase {
         let directory = try self.directory("long-key")
         let count = 0x1000 - 104 - 64
         // Runs of 255 bytes, a byte that varies after each, behind the padding: under a key, a run repeats with it.
-        let runs: [UInt8] = (0 ..< count).map { $0 % 256 == 255 ? UInt8(0x10 + $0 / 256 % 32) : 0x41 }
-        let body = Data(count: 64) + Data(runs)
+        let body = Data(count: 64) + Self.runs(of: 0x41, every: 256, count: count)
 
         for (name, key, said) in [("hello", Array("Hello".utf8), "\"Hello\""), ("hello-world", Array("Hello, World!".utf8), "\"Hello, World!\""), ("long", (1 ... 40).map { UInt8($0) }, nil)] {
             let (packed, original) = try self.packedByHand(overlapping: 0, filtered: (body, key))
