@@ -816,7 +816,7 @@ struct EmbeddedCodeDirectory {
             return nil
         }
 
-        let (hashSize, rawHashType, pageSizeLog) = blob.withUnsafeBytes { raw -> (Int, UInt8, UInt8) in (Int(raw[36]), raw[37], raw[39]) }
+        let (hashSize, rawHashType, pageSizeLog) = blob.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> (Int, UInt8, UInt8) in (Int(raw[36]), raw[37], raw[39]) }
         guard
             let hashType = HashType(rawValue: rawHashType),
             hashType.slotSize == hashSize
