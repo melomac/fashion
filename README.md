@@ -46,7 +46,7 @@ cd fashion
 make
 ```
 
-`make test` runs the tests twice, once per `--exact` ending.
+`make test` runs the [tests][GitHub test] twice, once per `--exact` ending.
 The packed fixtures require `upx` installed, and are skipped without it.
 
 ## Usage
@@ -529,6 +529,7 @@ The ssdeep, TLSH, UCL and LZMA SDK sources are in the repository's submodules, w
 
 [Codeberg]: https://codeberg.org/melomac/fashion "Codeberg: melomac/fashion"
 [GitHub]: https://github.com/melomac/fashion "GitHub: melomac/fashion"
+[GitHub test]: https://github.com/melomac/fashion/actions/workflows/test.yml "GitHub: melomac/fashion test action"
 [melomac/tap]: https://github.com/melomac/homebrew-tap "GitHub: melomac/homebrew-tap"
 
 [VERIFY-STRATEGY.md]: VERIFY-STRATEGY.md
