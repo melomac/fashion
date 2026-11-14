@@ -36,16 +36,76 @@ final class File {
     /// Streaming chunk size (1 MiB).
     static let chunkSize = 1 << 20
 
-    /// A part of an edited file: bytes in memory, or a range of the file it edits.
+    /// A part of an edited file: bytes in memory, a range of the file it edits, or a run of zeros.
     enum Piece {
         case bytes(Data)
         case range(Range<Int>)
+        /// A run of zeros: a hole, like the one UPX leaves when it seeks past the end of its output file. It takes
+        /// no memory. A read fills the caller's buffer with zeros.
+        case zeros(Int)
 
         var count: Int {
             switch self {
             case let .bytes(data): data.count
             case let .range(range): range.count
+            case let .zeros(count): count
             }
+        }
+
+        /**
+         The part of `pieces` inside `range`. `range` counts bytes from the start of the first piece. A piece that
+         crosses a bound of `range` is cut there. Bytes are not copied: a cut piece shares the memory of the piece
+         it comes from.
+
+         ```
+         pieces           | bytes, 100 | zeros, 1000 | bytes, 50 |
+         range                   60 ..<                1120
+         result                  | 40  | zeros, 1000 | 20 |
+         ```
+         */
+        static func slice(_ pieces: [Piece], _ range: Range<Int>) -> [Piece] {
+            var sliced: [Piece] = []
+            var start = 0
+            for piece in pieces {
+                let lower = max(range.lowerBound, start)
+                let upper = min(range.upperBound, start + piece.count)
+                if lower < upper {
+                    switch piece {
+                    case let .bytes(data):
+                        sliced.append(.bytes(data[data.startIndex + lower - start ..< data.startIndex + upper - start]))
+                    case let .range(whole):
+                        sliced.append(.range(whole.lowerBound + lower - start ..< whole.lowerBound + upper - start))
+                    case .zeros:
+                        sliced.append(.zeros(upper - lower))
+                    }
+                }
+                start += piece.count
+            }
+            return sliced
+        }
+
+        /**
+         `pieces` with `data` written at `offset`, as a write to a file does it. The bytes already there are
+         replaced. A write past the end leaves a hole of zeros before `data`, as a seek past the end of a file does.
+
+         ```
+         pieces           | bytes, 100   |        | bytes, 100 |
+         write            40 bytes at 30          40 bytes at 500
+         result           | 30 | 40 | 30 |        | bytes, 100 | zeros, 400 | 40 |
+         ```
+         */
+        static func write(_ data: Data, at offset: Int, over pieces: [Piece]) -> [Piece] {
+            let count = pieces.reduce(0) { $0 + $1.count }
+            let end = offset + data.count
+            var written = self.slice(pieces, 0 ..< min(offset, count))
+            if offset > count {
+                written.append(.zeros(offset - count))
+            }
+            written.append(.bytes(data))
+            if end < count {
+                written += self.slice(pieces, end ..< count)
+            }
+            return written
         }
     }
 
@@ -227,8 +287,8 @@ final class File {
     }
 
     /**
-     Fill `buffer` from `offset` in the file `pieces` make, each from memory or from `base`, until the buffer is full,
-     the pieces end, or `base` comes up short. Returns the count read.
+     Fill `buffer` from `offset` in the file `pieces` make, each from memory, from `base` or with zeros, until the
+     buffer is full, the pieces end, or `base` comes up short. Returns the count read.
      */
     private static func read(_ pieces: [Piece], of base: File, at offset: Int, into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
         var filled = 0
@@ -251,6 +311,8 @@ final class File {
                 guard read == count else {
                     return filled + read
                 }
+            case .zeros:
+                memset(target.baseAddress!, 0, count)
             }
             filled += count
         }

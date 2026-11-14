@@ -127,8 +127,8 @@ struct ArtifactWriter {
             // With exact alone, the editor pads a file cut short of its last page, an edit of its own, and names it;
             // with no flag at all, the file as read, its slices as the table places them.
             let edit = try self.unsign || self.unpack || self.exact
-                ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { subject.warn($1, arch: $0) }, keep: self.keep ? { arch, edits, data in
-                    kept.append(Artifact(name: (arch.map { [$0] } ?? []) + edits.words, bytes: File(editing: read, pieces: [.bytes(data)])))
+                ? MachOEditor.edit(read, exact: self.exact ? .always : .asNeeded, unsign: self.unsign, unpack: self.unpack, caveat: { subject.warn($1, arch: $0) }, keep: self.keep ? { arch, edits, pieces in
+                    kept.append(Artifact(name: (arch.map { [$0] } ?? []) + edits.words, bytes: File(editing: read, pieces: pieces)))
                 } : nil)
                 : MachOEditor.Edit(unedited: read, opened: Universal.open(read))
             let artifacts = self.split ? Self.slices(of: edit) : Self.whole(of: edit, exact: self.exact)

@@ -1,3 +1,4 @@
+import CryptoKit
 @testable import fashion
 import XCTest
 import zlib
@@ -1425,9 +1426,10 @@ final class PackMachTests: XCTestCase {
      of `__TEXT` stored, the other two segments copied page-aligned after the blocks, every command kept, the pack
      header at the file's end; `p_info` says `fileSize` for the original's size. With `modInit`, the second segment
      is a `__DATA` with a `__mod_init_func` section, whose offset the packed headers place outside the segment, in
-     the padding after the blocks, where 8 bytes point into the file.
+     the padding after the blocks, where 8 bytes point into the file. With `linkedit`, the original's headers place
+     `__LINKEDIT` at that offset. `original` still holds its 32 bytes after the second segment.
      */
-    private func packedDylibByHand(fileSize: Int, modInit: Bool = false) throws -> (packed: Data, original: Data) {
+    private func packedDylibByHand(fileSize: Int, modInit: Bool = false, linkedit: Int? = nil) throws -> (packed: Data, original: Data) {
         let page = 0x1000
         let sizeofcmds = UInt32(modInit ? 320 : 240)
         var original = Data()
@@ -1447,7 +1449,7 @@ final class PackMachTests: XCTestCase {
         uuid.appendUInt32(UInt32(LC_UUID)); uuid.appendUInt32(24); uuid.append(Data((1 ... 16).map { UInt8($0) }))
         segment("__TEXT", 0, page, 5, into: &original, vmaddr: 0)
         segment(modInit ? "__DATA" : "__DATA_CONST", page, 64, 3, into: &original, vmaddr: page, section: modInit ? page : nil)
-        segment("__LINKEDIT", page + 64, 32, 1, into: &original, vmaddr: 2 * page)
+        segment("__LINKEDIT", linkedit ?? page + 64, 32, 1, into: &original, vmaddr: 2 * page)
         original += uuid
         let headers = original.count
         original.append(Data((headers ..< page + 96).map { UInt8(truncatingIfNeeded: $0 * 7 + 1) }))
@@ -1506,6 +1508,79 @@ final class PackMachTests: XCTestCase {
                 let upxd = directory / "\(name)_upx-d"
                 XCTAssertTrue(try execute(upx, ["-q", "-d", "-o", upxd.path, file.path]), name)
                 XCTAssertEqual(try Data(contentsOf: upxd), original, name)
+            }
+        }
+    }
+
+    /**
+     The headers may place a dylib's copied segment far from the bytes before it. UPX seeks to that offset and
+     writes, so its file has a hole of zeros before the segment. The image holds the hole as a piece of zeros, which
+     takes no memory when the image is unpacked and when it is read.
+
+     ```
+     upx -d writes   | __TEXT, 0x1000 bytes | __DATA_CONST, 64 bytes | hole, up to 128 MiB | __LINKEDIT, 32 bytes |
+     pieces          | bytes, the blocks    | bytes, copied          | zeros               | bytes, copied        |
+     ```
+
+     The unpack fuzz harness found three such dylibs:
+
+     - 8 KiB, the segment at 608 MiB, past `p_filesize`. The hole was appended as a buffer of zeros, so it was held
+       twice: 1.2 GiB to unpack.
+     - 13 KiB and 21 KiB, the segment at 128 MiB and at 672 MiB, inside a `p_filesize` of 720 MiB. The hole was held
+       once, when the image was read.
+
+     Here the segment is at 128 MiB, first past `p_filesize`, then inside a `p_filesize` of 720 MiB. Each time, the
+     process must not grow by the hole when hash mode unpacks and hashes the file. The digest must be the digest of
+     the image, and of the file `upx -d` writes when UPX is installed. The files are not kept as fixtures: every
+     file the fuzzer made from them would have a hole to read.
+     */
+    func testAHoleBeforeADylibsCopiedSegmentTakesNoMemory() throws {
+        let (page, hole) = (0x1000, 128 << 20)
+        let directory = try self.directory("hole")
+        for (name, fileSize) in [("past", 0x1060), ("within", 0x2d00_1060)] {
+            let (packed, original) = try self.packedDylibByHand(fileSize: fileSize, linkedit: hole)
+            let file = directory / name
+            try packed.write(to: file)
+
+            let unpacked = try XCTUnwrap(PackMach(XCTUnwrap(MachO(File(path: file.path))))).unpack()
+            XCTAssertEqual(unpacked.count, hole + 32, name)
+            guard
+                unpacked.pieces.count == 4,
+                case let .bytes(text) = unpacked.pieces[0],
+                case let .bytes(data) = unpacked.pieces[1],
+                case let .zeros(zeros) = unpacked.pieces[2],
+                case let .bytes(linkedit) = unpacked.pieces[3]
+            else {
+                XCTFail("\(name): pieces of \(unpacked.pieces.map(\.count)) bytes")
+                continue
+            }
+            XCTAssertEqual(text, original.prefix(page), name)
+            XCTAssertEqual(data, original[page ..< page + 64], name)
+            XCTAssertEqual(zeros, hole - (page + 64), name)
+            XCTAssertEqual(linkedit, original[page + 64 ..< page + 96], name)
+
+            let resident = residentBytes()
+            let lines = try Digester(Hasher.parse([file.path, "--quiet", "--unpack"])).lines(for: file.path, reporter: Reporter(console: Console())).map(\.text)
+            XCTAssertLessThan(residentBytes() - resident, 64 << 20, "\(name): the hole was held in memory")
+
+            // The digest of the image, computed apart from `File`: the bytes of the segments, and the zeros of the
+            // hole fed 1 MiB at a time.
+            var sha256 = SHA256()
+            sha256.update(data: original.prefix(page + 64))
+            let megabyte = Data(count: 1 << 20)
+            for left in stride(from: zeros, to: 0, by: -megabyte.count) {
+                sha256.update(data: megabyte.prefix(left))
+            }
+            sha256.update(data: linkedit)
+            let expected = sha256.finalize().hexString
+            XCTAssertEqual(lines.last, expected, name)
+            if let upx = try? self.upx() {
+                let upxd = directory / "\(name)_upx-d"
+                defer {
+                    try? FileManager.default.removeItem(at: upxd)
+                }
+                XCTAssertTrue(try execute(upx, ["-q", "-d", "-o", upxd.path, file.path]), name)
+                XCTAssertEqual(try ByteHash.sha256.digest(File(path: upxd.path)), expected, name)
             }
         }
     }

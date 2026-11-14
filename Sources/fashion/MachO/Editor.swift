@@ -30,7 +30,8 @@ extension EditError: LocalizedError {
 
  Where Security stops at what it can tell from the signed file, the file is restored as it was before it was signed,
  as far as it can be: the linker's `__LINKEDIT` vmsize, and the layout `lipo` gave a universal file. An image UPX packed
- is unpacked as `upx -d` unpacks it (`PackMach`), the one edit whose bytes all live in memory.
+ is unpacked as `upx -d` unpacks it (`PackMach`). It is the one edit whose bytes all live in memory, except a hole of
+ zeros that UPX leaves in the image, which takes none (`File.Piece.zeros`).
 
  Each image goes through the edits the flags ask for, every state it reaches an artifact `thinr` lists and hash mode
  digests, named for the edits done so far (`Edits.words`); the `exact` cut alone is no edit, and so no state: it is
@@ -186,7 +187,7 @@ enum MachOEditor {
      image. They are held in memory until the file is digested or written. A slice whose image no longer fits is
      refused as an image too large is.
      */
-    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, unpackLimit: Int = PackMach.maxSize, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ data: Data) -> Void)? = nil) throws -> Edit {
+    static func edit(_ file: File, exact: Exact, unsign: Bool, unpack: Bool, unpackLimit: Int = PackMach.maxSize, caveat: (_ arch: String?, _ message: String) -> Void = { _, _ in }, keep: ((_ arch: String?, _ edits: Edits, _ pieces: [File.Piece]) -> Void)? = nil) throws -> Edit {
         let read = file
         var held: [String] = []
         let file: File
@@ -348,7 +349,7 @@ enum MachOEditor {
      memory, the states after it sharing its bytes. `keep` gets what decompressed of an image that fails a check
      after, with the edits before it and `decompressed`, before the refusal is thrown.
      */
-    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, room: inout Int, caveat: (String) -> Void, keep: ((Edits, Data) -> Void)?) throws -> Edited {
+    private static func edit(_ image: MachO, of file: File, subject: String, exact: Exact, unsign: Bool, unpack: Bool, padded: Bool, room: inout Int, caveat: (String) -> Void, keep: ((Edits, [File.Piece]) -> Void)?) throws -> Edited {
         var states: [State] = []
         var edits: Edits = padded ? [.exact] : []
         let end = padded ? image.logicalEnd() : self.cut(image, exact: exact)
@@ -384,7 +385,7 @@ enum MachOEditor {
                 // What decompressed of an image that fails a check, or decoded under no key where a key was applied,
                 // kept as it is for --keep: named for the edits before it, the signature that came out for UPX to be
                 // found behind it included.
-                let hold = { (data: Data, why: String) in
+                let hold = { (pieces: [File.Piece], why: String) in
                     guard let keep else {
                         return
                     }
@@ -393,12 +394,12 @@ enum MachOEditor {
                         kept.insert(.unsigned)
                     }
                     kept.insert(.decompressed)
-                    keep(kept, data)
+                    keep(kept, pieces)
                     logger.info("\(subject, privacy: .public): decompressed, kept as it is: \(why, privacy: .public)")
                 }
                 let output = try packMach.unpack(limit: room)
-                let data = output.data
-                room -= data.count
+                let pieces = output.pieces
+                room -= output.count
                 if let message = output.caveat {
                     caveat(message)
                 }
@@ -412,7 +413,7 @@ enum MachOEditor {
                     logger.info("\(subject, privacy: .public): unsigned, \(Self.removal(of: unsigned, from: end), privacy: .public), for UPX to be found behind it")
                 }
                 edits.insert(.unpacked)
-                states.append(State(edits: edits, pieces: [.bytes(data)]))
+                states.append(State(edits: edits, pieces: pieces))
                 for note in output.notes {
                     logger.info("\(subject, privacy: .public): unpacked, \(note, privacy: .public)")
                 }
@@ -421,13 +422,13 @@ enum MachOEditor {
                 // kept as it is for --keep.
                 let unpacked: MachO
                 do {
-                    guard let parsed = try MachO(File(editing: file, pieces: [.bytes(data)])) else {
+                    guard let parsed = try MachO(File(editing: file, pieces: pieces)) else {
                         throw UnpackError.cantUnpack("file header corrupted")
                     }
                     unpacked = parsed
                 } catch {
                     let reason = error is UnpackError ? "file header corrupted" : "the unpacked image does not parse, \(File.message(for: error))"
-                    hold(data, reason)
+                    hold(pieces, reason)
                     throw UnpackError.unverified(reason)
                 }
                 align = unpacked.universalAlignment
@@ -435,12 +436,12 @@ enum MachOEditor {
                 let end = self.cut(unpacked, exact: unsign ? exact : exact.flagged)
                 if end < unpacked.length {
                     edits.insert(.exactUnpacked)
-                    states.append(State(edits: edits, pieces: [.bytes(data[..<end])]))
+                    states.append(State(edits: edits, pieces: File.Piece.slice(pieces, 0 ..< end)))
                     logger.info("\(subject, privacy: .public): unpacked image cut, \(String(unpacked.length - end, pluralizing: "byte"), privacy: .public) appended past it dropped, \(end, privacy: .public) left")
                 }
                 if unsign, let inner = try unpacked.removingSignature(end: end) {
                     edits.insert(.unsignedUnpacked)
-                    states.append(State(edits: edits, pieces: [.bytes(inner.head), .bytes(data[inner.head.count ..< inner.end])]))
+                    states.append(State(edits: edits, pieces: [.bytes(inner.head)] + File.Piece.slice(pieces, inner.head.count ..< inner.end)))
                     logger.info("\(subject, privacy: .public): unpacked image unsigned, a code signature of \(String(end - inner.end, pluralizing: "byte"), privacy: .public) removed, \(inner.end, privacy: .public) left")
                 }
             }

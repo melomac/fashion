@@ -549,7 +549,7 @@ struct PackMach {
         for key in plain.pass.sample.keys {
             var keyed = try self.unpack(key: key, limit: limit)
             if keyed.adler == self.uAdler {
-                keyed.decompressed = plain.data
+                keyed.decompressed = plain.pieces
                 return finished(keyed, xor: key)
             }
         }
@@ -572,7 +572,7 @@ struct PackMach {
         let header = self.header
         let at = { (offset: Int) in self.image.offset == 0 ? offset.hex : "\(offset.hex) (\((self.image.offset + offset).hex) in the file)" }
         var notes = [
-            "\(String(unpacked.data.count, pluralizing: "byte")) from \(self.image.length), pack header version \(header.version) for format \(header.format), \(methods), \(filters)",
+            "\(String(unpacked.count, pluralizing: "byte")) from \(self.image.length), pack header version \(header.version) for format \(header.format), \(methods), \(filters)",
             "pack header at \(at(self.headerOffset)), \(header.size) bytes: marker \(Self.quoted(header.magic)), version \(header.version), format \(header.format), method \(header.method) (\(Self.methodName(header.method))), level \(header.level), u_adler \(header.uAdler.hex), c_adler \(header.cAdler.hex), u_len \(header.uncompressed), c_len \(header.compressed), u_file_size \(header.uFileSize), filter \(String(format: "0x%02x", header.filter)), cto \(String(format: "0x%02x", header.cto)), n_mru \(header.nMru), checksum \(String(format: "0x%02x", header.checksum)), then overlay_offset \(self.overlayOffset.hex)",
             "l_info at \(at(self.overlayOffset - 12)), p_info at \(at(self.overlayOffset)): p_progid \(unpacked.pInfo.progid.hex), p_filesize \(unpacked.pInfo.fileSize), p_blocksize \(unpacked.pInfo.blocksize.hex); the blocks follow, each after its 12-byte b_info",
         ]
@@ -611,16 +611,32 @@ struct PackMach {
     }
 
     /**
-     An image unpacked, as `upx -d` writes it: its bytes, `data`; a word on it when a modified UPX packed it, `caveat`,
-     nil for UPX's own; words for the log on how it was packed and where its parts lie, `notes`; and under a XOR key,
-     `decompressed`, the image with its blocks as they decoded under none, for --keep to write, nil otherwise. With
-     what the pass over its blocks summed and saw, and the `p_info` before the blocks, for the unpacker alone.
+     An image unpacked, as `upx -d` writes it: its bytes in order, `pieces`, and its size, `count`; a word on it when
+     a modified UPX packed it, `caveat`, nil for UPX's own; words for the log on how it was packed and where its parts
+     lie, `notes`; and under a XOR key, `decompressed`, the image with its blocks as they decoded under none, for
+     --keep to write, nil otherwise. With what the pass over its blocks summed and saw, and the `p_info` before the
+     blocks, for the unpacker alone.
+
+     The pieces are the bytes that the blocks and the copied segments wrote, and zeros for each hole between them.
+     UPX seeks its output file to the offset of a segment and writes there. When the headers of a dylib place a
+     copied segment far away, the file has a hole of zeros before that segment:
+
+     ```
+     upx -d writes   | __TEXT, from the blocks |        hole        | __LINKEDIT, copied |
+     pieces          | bytes                   | zeros              | bytes              |
+     ```
+
+     A piece of zeros takes no memory, and a read fills the buffer with zeros. Held as bytes, a hole cost its size in
+     memory when the image was read: the unpack fuzz harness found dylibs of 13 KiB and 21 KiB whose headers place a
+     segment at 128 MiB and at 672 MiB.
      */
     struct Unpacked {
-        var data: Data
+        var pieces: [File.Piece]
+        /// The size of the image in bytes, holes included.
+        var count: Int
         var caveat: String?
         var notes: [String] = []
-        var decompressed: Data?
+        var decompressed: [File.Piece]?
         /// The offset in the image's headers of the first load command UPX refuses, "bad packed Mach
         /// load_command". The image is unpacked all the same: its bytes are the original's.
         fileprivate var refusedCommand: Int?
@@ -718,30 +734,28 @@ struct PackMach {
         // here, p_filesize bytes, as the blocks are bounded by it. A dylib's segments after the first are copied, not
         // decoded, and UPX seeks to where the headers place them and writes, past p_filesize included: those grow
         // the image, under this tool's limit, as they do UPX's file.
-        let decoded = self.image.filetype == MH_DYLIB ? Array(segments.first { $0.filesize != 0 }.map { [$0] } ?? []) : segments
+        let dylib = self.image.filetype == MH_DYLIB
+        let decoded = dylib ? Array(segments.first { $0.filesize != 0 }.map { [$0] } ?? []) : segments
         guard decoded.allSatisfy({ $0.filesize == 0 || ($0.fileoff <= fileSize && $0.filesize <= fileSize - $0.fileoff) }) else {
             throw UnpackError.cantUnpack("file header corrupted")
         }
 
-        var output = Data(count: fileSize)
+        // The buffer for the bytes that the blocks write. For a dylib, the blocks hold the first segment alone, so
+        // the buffer ends where that segment ends. The other segments are copied later, each as a piece of its own
+        // (`copyDylibSegments`). For any other image, the blocks fill the image up to p_filesize.
+        //
+        // The buffer used to span the whole image of a dylib: p_filesize, or the end of the furthest copied segment.
+        // A hole before a copied segment then cost its size in memory: twice when the buffer grew to reach the
+        // segment, once when the image was read. The unpack fuzz harness found dylibs of 8 KiB to 21 KiB whose
+        // headers place a 32-byte segment at 128 MiB, 608 MiB and 672 MiB.
+        var output = Data(count: dylib ? decoded.first.map { $0.fileoff + $0.filesize } ?? 0 : fileSize)
         var cursor = blocks
         var pass = Pass(key: key)
         pass.methods.insert(first.method)
         for segment in segments where segment.filesize != 0 {
-            try self.unpackExtent(segment.filesize, into: &output, at: segment.fileoff, cursor: &cursor, blocksize: blocksize, pass: &pass)
-            if self.image.filetype == MH_DYLIB {
+            try self.unpackExtent(segment.filesize, into: &output, at: segment.fileoff, cursor: &cursor, blocksize: blocksize, fileSize: fileSize, pass: &pass)
+            if dylib {
                 break
-            }
-        }
-
-        if self.image.filetype == MH_DYLIB {
-            try self.copyDylibSegments(commands, into: &output, limit: limit, pass: &pass)
-        } else {
-            for (index, segment) in segments.enumerated() where segment.filesize != 0 {
-                let gap = Self.gap(after: index, in: segments, end: fileSize)
-                if gap > 0 {
-                    try self.unpackExtent(gap, into: &output, at: segment.fileoff + segment.filesize, cursor: &cursor, blocksize: blocksize, pass: &pass)
-                }
             }
         }
 
@@ -749,8 +763,19 @@ struct PackMach {
         // last wrote: p_filesize bounds what the blocks fill and where the segments lie, it is not a length. A dylib
         // whose p_filesize claims more than its segments reach would otherwise come out that long, zeros after the
         // last one, and cost that much to hash.
-        output.count = pass.extent
-        return Unpacked(data: output, refusedCommand: refusedCommand, pass: pass, pInfo: PInfo(progid: progid, fileSize: fileSize, blocksize: blocksize))
+        var pieces: [File.Piece]
+        if dylib {
+            pieces = try self.copyDylibSegments(commands, over: Self.pieces(of: output, written: pass.written), limit: limit)
+        } else {
+            for (index, segment) in segments.enumerated() where segment.filesize != 0 {
+                let gap = Self.gap(after: index, in: segments, end: fileSize)
+                if gap > 0 {
+                    try self.unpackExtent(gap, into: &output, at: segment.fileoff + segment.filesize, cursor: &cursor, blocksize: blocksize, fileSize: fileSize, pass: &pass)
+                }
+            }
+            pieces = Self.pieces(of: output, written: pass.written)
+        }
+        return Unpacked(pieces: pieces, count: pieces.reduce(0) { $0 + $1.count }, refusedCommand: refusedCommand, pass: pass, pInfo: PInfo(progid: progid, fileSize: fileSize, blocksize: blocksize))
     }
 
     // MARK: - Private
@@ -825,8 +850,8 @@ struct PackMach {
         var adler: uLong = 1
         var filtered = false
         var produced = 0
-        /// The end of the furthest byte written, by a block or a copied segment: where the image ends.
-        var extent = 0
+        /// The ranges of the image that the blocks wrote so far. Between them, the image is zeros.
+        var written: [Range<Int>] = []
         /// The candidates for an XOR key, sampled when there is no `key`.
         var sample = KeySample()
         /// The compression methods and filters of the blocks seen, for the log, the first blocks themselves, and how
@@ -835,6 +860,18 @@ struct PackMach {
         var filters: Set<UInt8> = []
         var blocks: [Block] = []
         var blockCount = 0
+
+        /**
+         Record that a block wrote `range` of the image. A range that starts where the last one ends extends it:
+         the blocks of one extent make one range, so the list stays short.
+         */
+        mutating func wrote(_ range: Range<Int>) {
+            if let last = self.written.last, last.upperBound == range.lowerBound {
+                self.written[self.written.count - 1] = last.lowerBound ..< range.upperBound
+            } else {
+                self.written.append(range)
+            }
+        }
     }
 
     /// UPX's `p_info`, the 12 bytes before the blocks: the program id, the original's size and the block size.
@@ -1046,9 +1083,10 @@ struct PackMach {
      compressed size is its size is stored as it is, any other is decompressed by its method where it goes, then
      unfiltered there; each is summed into `pass`, its packed bytes and its own. The blocks of every extent together
      make no more than the image, `p_filesize`: extents laid over one another by crafted headers would decode the
-     image's worth of blocks each, up to 255 times, where UPX writes each byte of the original once.
+     image's worth of blocks each, up to 255 times, where UPX writes each byte of the original once. `fileSize` is
+     `p_filesize`: `output` is shorter for a dylib, whose blocks hold the first segment alone.
      */
-    private func unpackExtent(_ wanted: Int, into output: inout Data, at offset: Int, cursor: inout Int, blocksize: Int, pass: inout Pass) throws {
+    private func unpackExtent(_ wanted: Int, into output: inout Data, at offset: Int, cursor: inout Int, blocksize: Int, fileSize: Int, pass: inout Pass) throws {
         var wanted = wanted
         var offset = offset
         while wanted > 0 {
@@ -1060,11 +1098,11 @@ struct PackMach {
                 info.compressed <= info.uncompressed,
                 info.uncompressed <= blocksize,
                 info.uncompressed <= wanted,
-                info.uncompressed <= output.count - offset
+                info.uncompressed <= fileSize - offset
             else {
                 throw UnpackError.cantUnpack("corrupt b_info")
             }
-            guard info.uncompressed <= output.count - pass.produced else {
+            guard info.uncompressed <= fileSize - pass.produced else {
                 throw UnpackError.cantUnpack("the blocks make more than p_filesize bytes")
             }
             let block = try self.block(at: cursor + 12, count: info.compressed)
@@ -1098,7 +1136,7 @@ struct PackMach {
             let sum = output.withUnsafeBytes { UInt32(adler32(1, $0.baseAddress!.advanced(by: offset).assumingMemoryBound(to: Bytef.self), uInt(info.uncompressed))) }
             pass.adler = adler32_combine(pass.adler, uLong(sum), info.uncompressed)
             pass.produced += info.uncompressed
-            pass.extent = max(pass.extent, offset + info.uncompressed)
+            pass.wrote(offset ..< offset + info.uncompressed)
             offset += info.uncompressed
             wanted -= info.uncompressed
         }
@@ -1114,16 +1152,54 @@ struct PackMach {
     }
 
     /**
-     A dylib's segments after the first, which UPX leaves uncompressed where they lie in the packed image: copied to
-     where the original headers place them, the image grown to hold one placed past its end, as UPX's output file
-     grows, the pointer in `__mod_init_func`, which UPX points at its loader, restored.
+     The bytes that the blocks wrote, as pieces: each range in `written`, as a slice of `output`, and a piece of
+     zeros for each hole before a range. Ranges that touch or overlap make one piece. The pieces end where the last
+     range ends.
+
+     ```
+     written          | 0 ..< 0x1000  |               | 0x3000 ..< 0x3800 |
+     pieces           | bytes, 0x1000 | zeros, 0x2000 | bytes, 0x800      |
+     ```
+
+     The slices share the memory of `output`: nothing is copied.
      */
-    private func copyDylibSegments(_ commands: [Command], into output: inout Data, limit: Int, pass: inout Pass) throws {
+    private static func pieces(of output: Data, written: [Range<Int>]) -> [File.Piece] {
+        var runs: [Range<Int>] = []
+        for range in written.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = runs.last, range.lowerBound <= last.upperBound {
+                runs[runs.count - 1] = last.lowerBound ..< max(last.upperBound, range.upperBound)
+            } else {
+                runs.append(range)
+            }
+        }
+        var pieces: [File.Piece] = []
+        var end = 0
+        for run in runs {
+            if run.lowerBound > end {
+                pieces.append(.zeros(run.lowerBound - end))
+            }
+            pieces.append(.bytes(output[run]))
+            end = run.upperBound
+        }
+        return pieces
+    }
+
+    /**
+     A dylib's segments after the first, which UPX leaves uncompressed where they lie in the packed image. Each is
+     written over `pieces`, the image so far, at the offset the original headers give, in the order of the load
+     commands, as UPX seeks its output file there and writes. The pointer in `__mod_init_func`, which UPX points at
+     its loader, is restored. Returns the image with the segments in it.
+
+     A segment may lie past `p_filesize`, and past the end of the image so far: the image then has a hole of zeros
+     before the segment, a piece that takes no memory (`File.Piece.write`).
+     */
+    private func copyDylibSegments(_ commands: [Command], over pieces: [File.Piece], limit: Int) throws -> [File.Piece] {
         // UPX compares the two headers' ncmds, the packed file's and the original's.
         let packed = self.image.loadCommands.prefix(self.image.ncmds)
         guard self.image.ncmds == commands.count else {
             throw UnpackError.cantUnpack("file header corrupted")
         }
+        var pieces = pieces
         for (raw, original) in zip(packed, commands).dropFirst() {
             guard
                 let rc = Segment(raw, in: self.image),
@@ -1148,12 +1224,9 @@ struct PackMach {
             guard sc.fileoff >= 0, !end.overflow, end.partialValue <= limit else {
                 throw UnpackError.imageTooLarge(size: end.overflow ? Int.max : end.partialValue, limit: limit)
             }
-            if end.partialValue > output.count {
-                output.append(Data(count: end.partialValue - output.count))
-            }
-            output.replaceSubrange(sc.fileoff ..< end.partialValue, with: data)
-            pass.extent = max(pass.extent, end.partialValue)
+            pieces = File.Piece.write(data, at: sc.fileoff, over: pieces)
         }
+        return pieces
     }
 
     /// A pointer-sized `__mod_init_func` section: its offset in the image, and the pointer it holds.
