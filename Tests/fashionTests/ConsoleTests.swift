@@ -14,6 +14,8 @@ final class ConsoleTests: XCTestCase {
 
     func testTintedWrapsTheLine() {
         XCTAssertEqual(Console.tinted("abc  /tmp/x", .adhoc), "\u{1B}[2mabc  /tmp/x\u{1B}[0m")
+        XCTAssertEqual(Console.tinted("abc  /tmp/x", .invalid), "\u{1B}[31mabc  /tmp/x\u{1B}[0m")
+        XCTAssertEqual(Console.tinted("abc  /tmp/x", .rehashed), "\u{1B}[2mabc  /tmp/x\u{1B}[0m")
         XCTAssertEqual(Console.tinted("abc  /tmp/x", .none), "abc  /tmp/x")
     }
 
@@ -27,6 +29,8 @@ final class ConsoleTests: XCTestCase {
         XCTAssertEqual([0, 0.01, 1].map { Tint.match(distance: $0).sgr(colors256: false) }, ["32", "2;32", "2;32"])
         XCTAssertEqual(Tint.weak.sgr(colors256: false), "90")
         XCTAssertEqual(Tint.adhoc.sgr(colors256: false), "2")
+        XCTAssertEqual(Tint.invalid.sgr(colors256: false), "31")
+        XCTAssertEqual(Tint.rehashed.sgr(colors256: false), "2")
     }
 
     func testPrintableKeepsOrdinaryText() {

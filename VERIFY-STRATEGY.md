@@ -171,7 +171,7 @@ left out, with the reason.
 |:--|:--|:--|
 | Bytes no section covers that are not zero: the header pad, a segment's padding after its last section; not a gap shorter than the alignment of the section that follows, which an older ld64 fills with no-ops on x86_64 (862 Python extension modules) | research: a payload, free polymorphism | ran; "valid on disk" when signed |
 | Bytes between two segments that are not zero | research | ran |
-| Bytes appended past the image's end | research: a new hash per copy, polyglots; `--exact` undoes it | ran |
+| Bytes appended past the image's end | research: a new hash per copy, polyglots; `--exact` undoes it. Security's strict validation refuses them and the kernel never reads them: a signed image keeps its cdhash, and hash mode reports the bytes without marking it `INVALID` | ran |
 | A `__LINKEDIT` vmsize rounded as a signature rounds it, on an image without a signature; not named of a stripped 64-bit image that records no linker (`LC_VERSION_MIN_MACOSX`, macOS 10.13 and earlier), whose `strip` may have rounded to 16 KiB itself (cctools 1010, Xcode 15.3), nor of an image of a 4 KiB architecture linked on 16 KiB pages (`ld -segalign 0x4000` for x86_64), whose linker rounded it so: no command records the page, and the segments tell it, each the size its sections need on 16 KiB and one of them more than they need on 4 KiB, nor of a 64-bit image `strip` kept symbols of (`strip -S`, `strip -x`), which it rounds to 16 KiB all the same: the four zero bytes `strip` starts its string table with tell it | research: a signature came out, which `codesign --remove-signature` leaves so | ran (x86_64) |
 | UPX, as is, by a modified UPX with its marker, or signed after packing, bytes appended after signing or not; a pack header found that does not hold, or none before the 16-byte `__LINKEDIT` only UPX writes (canUnpack's style 395 "file corrupted"), which `unpack` refuses | research; `--unpack` undoes it | ran |
 | A UPX `p_info` whose size for the original is not the pack header's: UPX writes the one value in both, the pack header's under its checksum, the `p_info`'s under nothing, which its stub never reads; its ELF unpacker refuses the two disagreeing, its Mach-O one does not look (`p_lx_elf.cpp` against `p_mach.cpp`) | research: edited after packing; the unpack fuzz harness's dylib claimed 515 MiB over a pack header saying 4096, which cost 554 MB to hash before `unpack` ended the image at the last byte written | as UPX's own: both die under Rosetta here (SIGTRAP), the stub reading no `p_info` |
@@ -181,7 +181,7 @@ left out, with the reason.
 | Rule | Authority | Launch |
 |:--|:--|:--|
 | An arm64 image without a signature | kernel `cs_process_global_enforcement` → `LOAD_FAILURE`; a fresh unsigned build is the one thing the toolchain makes that says so | killed |
-| A code directory whose slots do not hash the code: which page | Security `validateExecutable` `kSecCFErrorInvalidPage`; the kernel kills on that page | `SIGSEGV`, or killed |
+| A code directory whose slots do not hash the code: which page, the first, where Security stops; hash mode lists every one | Security `validateExecutable` `kSecCFErrorInvalidPage`; the kernel kills on that page | `SIGSEGV`, or killed |
 | Code limit short of the signature's offset: pages before the signature left unsigned | kernel `csb_end_offset`: segments past it refused, pages inside a segment past it unsigned; Security: `codesign -v` says "invalid or unsupported format"; dyld "code signature does not cover entire file up to signature" | ran (x86_64 unenforced) |
 | `LC_CODE_SIGNATURE`'s `datasize` past its superblob's length | not named: Apple's own arm64e slices keep a stale signature's hashes there, where the x86_64 slice's larger signature sized the range (272 OS slices) | |
 | `LC_CODE_SIGNATURE`'s `datasize` not a multiple of 16 | Security `assure_signature_space` "signature size not a multiple of 16"; not named: ld64's linker signatures have any size (1,169 Homebrew slices) | |
@@ -253,7 +253,7 @@ universal file.
 | E20 | Code limit short: a valid signature over part of the code | "valid signature" as a trust signal |
 | E21 | Entitlements edited after signing | entitlement review without hash check |
 | E22 | Weakening entitlements, ad hoc, linker signed | notarization-shaped trust |
-| E23 | Code modified after signing | hash mode marks the cdhash invalid; `verify` names the page |
+| E23 | Code modified after signing | hash mode marks the cdhash `INVALID`, lists every page that fails and prints the `REHASHED` cdhash; `verify` names the first page |
 | E24 | Encrypted segments (`cryptid`), Apple-protected segments | static analysis |
 | E25 | Strip `LC_UUID`, randomize it, randomize `reserved`, `LC_SOURCE_VERSION`, `cpusubtype` capability bits | hash lists, UUID pivots |
 | E26 | `LC_SEGMENT` (32-bit) in a 64-bit image: tools that parse both see a segment the kernel refuses | parsers that take both |
@@ -281,9 +281,13 @@ too. The `verify` subcommand (`Commands/Verify.swift`) only walks the files and 
 of a superblob comes back beside the lines and prints red after them, counted, as hash mode reports it. Hash mode's
 INVALID label is Security's static verdict as well: the code slots, the sealed blobs, the code limit under strict
 validation, and the CMS signature verified over the primary directory and bound to every directory, the chain left
-to `verify`. `hash --verify` and `thinr --verify` run the same verifier on each file they work on and leave its
-findings in the unified log alone, under the `verify` category, so a scan for another purpose records what is odd
-without printing it.
+to `verify`. One strict rule is left out of the label: bytes appended past the image, which the kernel never reads,
+are reported on standard error and the cdhash stays as it is. Where Security stops at the first page that fails,
+hash mode checks them all and lists each with the sections it holds. Beside an INVALID cdhash it prints the
+REHASHED one, the same directory with its code slots and sealed blobs hashed again from the file: the cdhash
+`codesign` gives when the file is signed again the same way. `hash --verify` and `thinr --verify` run the same
+verifier on each file they work on and leave its findings in the unified log alone, under the `verify` category, so
+a scan for another purpose records what is odd without printing it.
 
 Headers only, but for three reads: the bytes no section or table covers (the padding alone), the signature's pages
 (the signed extent once, as hash mode reads it), and the superblob's blobs against their special slots. The signer
@@ -412,7 +416,9 @@ syspolicyd (26B118) decides in `-[PolicyScanner policyMatchForCode:…]`, in thi
 allowed) against a requirement built in `-[PolicyScanner init]`: `anchor apple`; the Mac App Store
 (`certificate leaf[field.1.2.840.113635.100.6.1.9]`, `.9.1` on internal builds); notarized, a ticket looked up by
 cdhash, with the opaque-signature path for unsigned code (`checkOpaqueSignatureForCode:` signs it ad hoc in memory,
-`ADHOC`, SHA-256, and looks that cdhash up, "Checking legacy notarization"); TestFlight (`6.1.25.1` under WWDR); and
+`ADHOC`, SHA-256, and looks that cdhash up, "Checking legacy notarization"; only when the validity check returns
+`errSecCSUnsigned`, so a signature that does not hold gets no such cdhash, and hash mode keeps `ADHOC` for unsigned
+code); TestFlight (`6.1.25.1` under WWDR); and
 Developer ID (`certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists`),
 notarized or `legacy`. Nothing else matches: not a development certificate, not a self-signed chain `codesign -v`
 passes. Whether it evaluates at all is `determineGKEvaluationTypeForArguments:`: the quarantine attribute, a user

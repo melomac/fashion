@@ -329,19 +329,31 @@ struct MachO {
     }
 
     /**
-     Whether Security's strict validation, codesign's and Gatekeeper's default, refuses the image as a main
-     executable when it is `length` bytes long: "main executable failed strict validation" (`MachO::isSuspicious`).
+     The reason Security's strict validation refuses the image as a main executable, when the image is `length`
+     bytes long. Nil when strict validation accepts it. The reason is worded for a warning.
+
+     Strict validation is the default of codesign and Gatekeeper. codesign reports "main executable failed strict
+     validation" (`MachO::isSuspicious`).
 
      ```
      0                                         strictEnd()            length
      | headers | segments .. | __LINKEDIT .... | bytes appended ..... |
      ```
 
-     The range that ends the image (`strictExtent`) must end at `length` exactly: bytes appended past it are
-     refused. An image with no such range is refused whatever its length.
+     The range that ends the image (`strictExtent`) must end exactly at `length`. Most often, bytes were appended
+     past it. An image with no such range is always refused.
+
+     The kernel does not read the appended bytes: the image still runs, and its cdhash does not change.
      */
-    func failsStrictValidation(length: Int) -> Bool {
-        self.strictEnd() != UInt64(length)
+    func strictFault(length: Int) -> String? {
+        guard let end = self.strictEnd() else {
+            return "neither a __LINKEDIT segment nor an LC_SYMTAB ends the image"
+        }
+        let length = UInt64(length)
+        if end < length {
+            return "\((length - end).hex) bytes appended past the image's end at \(end.hex)"
+        }
+        return end > length ? "the image ends at \(end.hex), past its \(length.hex) bytes" : nil
     }
 
     /// Where the image ends for Security's strict validation (`strictExtent`), in either build: `logicalEnd` may
@@ -492,6 +504,112 @@ struct MachO {
         LC_RPATH,
         LC_MAIN,
     ])
+
+    // MARK: - Contents
+
+    /**
+     The names of what the bytes of `range` hold, in the order of the load commands:
+
+     - "the Mach-O header" and "the load commands";
+     - each section with bytes in the range, as `segment,section`;
+     - a segment alone, when none of its sections has bytes in the range.
+
+     ```
+     | header | load commands | padding | __text | __stubs | ... | __LINKEDIT |
+     |<---------------------- __TEXT segment ----------------->|
+
+     range                             names
+     --------------------------------  ----------------------------------------------
+     inside the load commands          the load commands
+     from the load commands to __text  the load commands, __TEXT,__text
+     inside the padding                __TEXT
+     inside __LINKEDIT                 __LINKEDIT
+     ```
+
+     A segment is named alone in two cases: it has no section, like `__LINKEDIT`, or the range only covers padding
+     between its sections. The header and the load commands lie inside the first segment. A range that covers them
+     does not name this segment alone.
+
+     Names are shown the way `verify` shows them (`MachOVerifier.shown`).
+     */
+    func contents(of range: Range<Int>) -> [String] {
+        /**
+         Whether `range` covers at least one of the `size` bytes at `offset`.
+         */
+        func holds(_ offset: UInt64, _ size: UInt64) -> Bool {
+            let end = offset.addingReportingOverflow(size)
+            return size > 0 && offset < UInt64(range.upperBound) && UInt64(range.lowerBound) < (end.overflow ? UInt64.max : end.partialValue)
+        }
+
+        var found: [String] = []
+        if holds(0, UInt64(self.headerSize)) {
+            found.append("the Mach-O header")
+        }
+        if holds(UInt64(self.headerSize), UInt64(self.sizeofcmds)) {
+            found.append("the load commands")
+        }
+        // The offset where the load commands end, and whether `range` covers bytes before this offset.
+        let headEnd = UInt64(self.headerSize + self.sizeofcmds)
+        let head = !found.isEmpty
+        for command in self.loadCommands {
+            let segment: Extent? = switch command.cmd {
+            case UInt32(LC_SEGMENT):
+                command.payload(as: segment_command.self).map { Extent(offset: UInt64(self.sw($0.fileoff)), size: UInt64(self.sw($0.filesize))) }
+            case UInt32(LC_SEGMENT_64):
+                command.payload(as: segment_command_64.self).map { Extent(offset: self.sw($0.fileoff), size: self.sw($0.filesize)) }
+            default:
+                nil
+            }
+            guard let segment, holds(segment.offset, segment.size) else {
+                continue
+            }
+            let name = MachOVerifier.shown(command.segmentName)
+            let sections = self.sections(of: command).filter { holds($0.offset, $0.size) }.map { "\(name),\(MachOVerifier.shown($0.name))" }
+            if !sections.isEmpty {
+                found += sections
+            } else if !head || segment.offset >= headEnd {
+                found.append(name)
+            }
+        }
+        return found
+    }
+
+    /**
+     The sections of a segment command that have bytes in the file. Each one is returned with its section name.
+
+     Only the sections that fit in the command are read, even when the command declares more. A zero-fill section
+     has no bytes in the file, so it is left out.
+     */
+    func sections(of command: LoadCommand) -> [FileRange] {
+        guard [UInt32(LC_SEGMENT), UInt32(LC_SEGMENT_64)].contains(command.cmd) else {
+            return []
+        }
+        let wide = command.cmd == UInt32(LC_SEGMENT_64)
+        let (header, stride) = wide
+            ? (MemoryLayout<segment_command_64>.size, MemoryLayout<section_64>.size)
+            : (MemoryLayout<segment_command>.size, MemoryLayout<section>.size)
+        let declared = wide
+            ? command.payload(as: segment_command_64.self).map { self.sw($0.nsects) }
+            : command.payload(as: segment_command.self).map { self.sw($0.nsects) }
+        guard let declared else {
+            return []
+        }
+
+        let zeroFill = [S_ZEROFILL, S_GB_ZEROFILL, S_THREAD_LOCAL_ZEROFILL].map(UInt32.init)
+        return (0 ..< min(Int(declared), (command.data.count - header) / stride)).compactMap { index in
+            let entry = command.data.bytes(in: header + index * stride ..< header + (index + 1) * stride)
+            let name = String(decoding: entry.prefix(16).prefix { $0 != 0 }, as: UTF8.self)
+            let (offset, size, flags): (UInt64, UInt64, UInt32) = entry.withUnsafeBytes { raw in
+                if wide {
+                    let section = raw.loadUnaligned(as: section_64.self)
+                    return (UInt64(self.sw(section.offset)), self.sw(section.size), self.sw(section.flags))
+                }
+                let section = raw.loadUnaligned(as: section.self)
+                return (UInt64(self.sw(section.offset)), UInt64(self.sw(section.size)), self.sw(section.flags))
+            }
+            return zeroFill.contains(flags & UInt32(SECTION_TYPE)) ? nil : FileRange(name: name, offset: offset, size: size)
+        }
+    }
 
     // MARK: - Filetype
 

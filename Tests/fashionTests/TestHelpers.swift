@@ -140,7 +140,111 @@ extension CDHash {
 
     /// The strongest cdhash of a thin fixture, embedded or ad-hoc; nil for anything else.
     static func hash(data: Data, exact: Bool = false) throws -> String? {
-        try MachO(data)?.codeDirectoryHashes(exact: exact).hashes.first?.hash
+        try MachO(data)?.codeDirectoryHashes(exact: exact).hashes.first
+    }
+}
+
+extension MachO.CDHashes {
+    /// The embedded cdhashes of a signed slice. Empty for any other slice.
+    var embedded: [MachO.EmbeddedCDHash] {
+        if case let .signed(embedded, _) = self {
+            return embedded
+        }
+        return []
+    }
+
+    /// The ad-hoc cdhash of an unsigned slice. Nil for any other slice.
+    var adhoc: String? {
+        if case let .unsigned(adhoc) = self {
+            return adhoc
+        }
+        return nil
+    }
+
+    /// The rehashed cdhash of a rejected slice. Nil for any other slice: a signed slice has one per embedded
+    /// cdhash (`MachO.EmbeddedCDHash.rehashed`).
+    var rejectedRehashed: String? {
+        if case let .rejected(rehashed) = self {
+            return rehashed
+        }
+        return nil
+    }
+
+    /// Whether the slice has a signature that Security loads no code directory from.
+    var rejected: Bool {
+        if case .rejected = self {
+            return true
+        }
+        return false
+    }
+
+    /// Whether the signature is invalid: it is rejected, or one of its code directories is invalid.
+    var invalid: Bool {
+        self.rejected || self.embedded.contains(where: \.invalid)
+    }
+
+    /// The reason strict validation refuses a slice with a valid signature. Nil for any other slice.
+    var strictFault: String? {
+        if case let .signed(_, strictFault) = self {
+            return strictFault
+        }
+        return nil
+    }
+
+    /// The reason a slice has no cdhash. Nil for a slice with one.
+    var skipReason: String? {
+        if case let .none(reason) = self {
+            return reason
+        }
+        return nil
+    }
+
+    /// The cdhashes of the slice: the embedded ones of a signed slice, the ad-hoc one of an unsigned slice, or
+    /// the rehashed one of a rejected slice.
+    var hashes: [String] {
+        self.embedded.map(\.hash) + [self.adhoc, self.rejectedRehashed].compactMap(\.self)
+    }
+}
+
+extension CDHash.SliceResult {
+    var embedded: [MachO.EmbeddedCDHash] {
+        self.cdhashes.embedded
+    }
+
+    var adhoc: String? {
+        self.cdhashes.adhoc
+    }
+
+    var rejectedRehashed: String? {
+        self.cdhashes.rejectedRehashed
+    }
+
+    var rejected: Bool {
+        self.cdhashes.rejected
+    }
+
+    var invalid: Bool {
+        self.cdhashes.invalid
+    }
+
+    var strictFault: String? {
+        self.cdhashes.strictFault
+    }
+
+    var hashes: [String] {
+        self.cdhashes.hashes
+    }
+}
+
+extension [CDHash.SliceResult] {
+    /// The embedded cdhashes of all the slices, in order.
+    var embedded: [MachO.EmbeddedCDHash] {
+        self.flatMap(\.embedded)
+    }
+
+    /// The cdhashes of all the slices, in the order hash mode prints them.
+    var hashes: [String] {
+        self.flatMap(\.hashes)
     }
 }
 

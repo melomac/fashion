@@ -186,7 +186,7 @@ final class RunnerTests: XCTestCase {
         defer {
             try? FileManager.default.removeItem(at: bad)
         }
-        let others = try CDHash.hash(path: "/bin/ls").filter { $0.arch != named[1].name }.map(\.hash)
+        let others = try CDHash.hash(path: "/bin/ls").filter { $0.arch != named[1].name }.hashes
         XCTAssertFalse(others.isEmpty)
         let fault = "fashion: \(bad.path) (\(named[1].name)): Invalid Mach-O: sizeofcmds 2147483647 does not hold a load-command table in the \(named[1].arch.length)-byte slice"
 

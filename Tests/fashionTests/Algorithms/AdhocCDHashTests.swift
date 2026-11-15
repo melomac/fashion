@@ -334,7 +334,7 @@ final class AdhocCDHashTests: XCTestCase {
     func testATruncatedDirectoryHasATruncatedCDHash() throws {
         let directory = self.codeDirectory(hashType: 3)
         let data = self.makeSignedMachO(signature: self.superblob(slots: [(0, directory)]))
-        XCTAssertEqual(try CDHash.hash(fixture: data).map(\.hash), [Data(SHA256.hash(data: directory)).prefix(20).hexString])
+        XCTAssertEqual(try CDHash.hash(fixture: data).embedded.map(\.hash), [Data(SHA256.hash(data: directory)).prefix(20).hexString])
     }
 
     /**
@@ -346,14 +346,29 @@ final class AdhocCDHashTests: XCTestCase {
         let sha384 = self.codeDirectory(hashType: 4)
         let data = self.makeSignedMachO(signature: self.superblob(slots: [(0, sha1), (0x1000, sha256), (0x1001, sha384)]))
         let slice = try XCTUnwrap(MachO(data))
-        let directories = try slice.codeDirectoryHashes(exact: false).hashes
+        let hashed = try slice.codeDirectoryHashes(exact: false)
 
-        XCTAssertEqual(directories.map(\.type), ["sha384", "sha256", "sha1"])
-        XCTAssertEqual(directories.map(\.hash), [SHA384.hash(data: sha384).hexString, SHA256.hash(data: sha256).hexString, Insecure.SHA1.hash(data: sha1).hexString])
-        XCTAssertFalse(directories.contains { $0.adhoc })
+        XCTAssertEqual(hashed.embedded.map(\.type), ["sha384", "sha256", "sha1"])
+        XCTAssertEqual(hashed.embedded.map(\.hash), [SHA384.hash(data: sha384).hexString, SHA256.hash(data: sha256).hexString, Insecure.SHA1.hash(data: sha1).hexString])
+        // The code limit of these directories is 0, not the signature's offset. So the signature is invalid: the
+        // slice has its embedded cdhashes, and no ad-hoc one. The directories have no slot, so no hash fails:
+        // the slice has no rehashed cdhash.
+        XCTAssertEqual(hashed.embedded.map(\.invalid), [true, true, true])
+        XCTAssertEqual(hashed.embedded.map(\.rehashed), [nil, nil, nil])
+        XCTAssertNil(hashed.adhoc)
+        XCTAssertFalse(hashed.rejected)
 
-        // With several directories the hash type is part of each reported line.
-        XCTAssertEqual(try CDHash.hash(fixture: data).map(\.type), ["sha384", "sha256", "sha1"])
+        // With several directories, each line shows its hash type.
+        let url = FileManager.default.temporaryDirectory / "fashion-ranked-\(UUID())"
+        try data.write(to: url)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+        let lines = try Digester(Hasher.parse([url.path, "--algo", "cdhash"])).lines(for: url.path, reporter: Reporter(console: Console())).filter { !$0.diagnostic }
+        XCTAssertEqual(lines.map(\.tint), [.invalid, .invalid, .invalid])
+        for (line, tag) in zip(lines, ["sha384", "sha256", "sha1"]) {
+            XCTAssertTrue(line.text.hasSuffix("  \(url.path) (INVALID, \(tag))"), line.text)
+        }
     }
 
     /**
@@ -374,7 +389,7 @@ final class AdhocCDHashTests: XCTestCase {
 
         for (name, slots, expected) in cases {
             let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: slots))))
-            XCTAssertEqual(try slice.codeDirectoryHashes(exact: false).hashes.map(\.hash), expected, name)
+            XCTAssertEqual(try slice.codeDirectoryHashes(exact: false).embedded.map(\.hash), expected, name)
         }
 
         let url = FileManager.default.temporaryDirectory / "fashion-sha512-\(UUID())"
@@ -389,6 +404,9 @@ final class AdhocCDHashTests: XCTestCase {
      Security calls a slice whose code directories it cannot load "not signed at all", and codesign signs it ad
      hoc up to where the signature starts (`MachORep::signingLimit`). Two directories of one hash type are no such
      slice: Security refuses the signature as invalid, and so does this, naming the hash type.
+
+     The digest of the directory codesign builds is the rehashed cdhash of the slice. It is not an ad-hoc cdhash:
+     the slice still has its `LC_CODE_SIGNATURE`.
      */
     func testRejectedCodeDirectoriesMakeTheSliceUnsigned() throws {
         func field(_ directory: Data, at offset: Int, _ value: UInt32) -> Data {
@@ -422,11 +440,12 @@ final class AdhocCDHashTests: XCTestCase {
         for (name, slots) in cases {
             let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: slots))))
             let hashed = try slice.codeDirectoryHashes(exact: false)
-            let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
-            XCTAssertNil(skipReason, name)
-            XCTAssertEqual(hashes.map(\.adhoc), [true], name)
-            // Unlike an unsigned slice's, its ad-hoc cdhashes stand for a signature that does not hold.
-            XCTAssertEqual(hashes.map(\.invalid), [true], name)
+            XCTAssertNil(hashed.skipReason, name)
+            XCTAssertTrue(hashed.embedded.isEmpty, name)
+            XCTAssertNotNil(hashed.rejectedRehashed, name)
+            XCTAssertNil(hashed.adhoc, name)
+            // The slice has a signature, and Security rejects it. An unsigned slice is not marked this way.
+            XCTAssertTrue(hashed.rejected, name)
         }
 
         let twice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: self.superblob(slots: [(0, sha256), (0x1000, sha256)]))))
@@ -437,46 +456,53 @@ final class AdhocCDHashTests: XCTestCase {
 
     /**
      Named on stderr even into a pipe, as Security's rejection reads no code, without failing the run.
+
+     The line of the cdhash is labeled INVALID and REHASHED, and dimmed. ADHOC is only for an unsigned slice.
      */
     func testRejectedSignatureIsWarnedAbout() throws {
         let url = FileManager.default.temporaryDirectory / "fashion-rejected-\(UUID())"
         try self.makeSignedMachO(signature: self.superblob(slots: [])).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
+        let warning = "fashion: \(url.path): signature rejected (no code directory loads), hashed up to the signature"
         let (status, errors) = try runFashion(["--algo", "cdhash", url.path])
         XCTAssertEqual(status, 0)
-        XCTAssertEqual(errors, ["fashion: \(url.path): signature rejected, hashed as unsigned"])
+        XCTAssertEqual(errors, [warning])
+
+        let lines = try Digester(Hasher.parse([url.path, "--algo", "cdhash"])).lines(for: url.path, reporter: Reporter(console: Console()))
+        XCTAssertEqual(lines.map(\.tint), [.error, .rehashed])
+        XCTAssertEqual(lines.first?.text, warning)
+        XCTAssertEqual(lines.last?.text.hasSuffix("  \(url.path) (INVALID, REHASHED)"), true, lines.last?.text ?? "")
     }
 
     // MARK: - Ad-hoc synthesis (unsigned slice)
 
     func testUnsignedSliceSynthesizesAdhoc() throws {
         let slice = try XCTUnwrap(MachO(self.makeMachO()))
-        let directories = try slice.codeDirectoryHashes(exact: false).hashes
+        let hashed = try slice.codeDirectoryHashes(exact: false)
 
-        // An unsigned slice yields one synthesized ad-hoc cdhash, SHA-256.
-        XCTAssertEqual(directories.count, 1)
-        XCTAssertFalse(directories.contains(where: \.invalid))
+        // An unsigned slice has no embedded cdhash. It has one ad-hoc cdhash, a SHA-256 one.
+        XCTAssertTrue(hashed.embedded.isEmpty)
+        XCTAssertFalse(hashed.rejected)
 
-        let sha256 = try XCTUnwrap(directories.first)
-        XCTAssertTrue(sha256.adhoc, "An unsigned slice yields the synthesized ad-hoc cdhash")
-        XCTAssertEqual(sha256.type, "sha256")
-        XCTAssertEqual(sha256.hash.count, 64) // full SHA-256 of the SHA-256 CodeDirectory
-        XCTAssertTrue(sha256.hash.allSatisfy(\.isHexDigit))
+        let sha256 = try XCTUnwrap(hashed.adhoc, "An unsigned slice yields the synthesized ad-hoc cdhash")
+        XCTAssertEqual(try slice.adhocCDHashes(codeLimit: slice.length).map(\.type), ["sha256"])
+        XCTAssertEqual(sha256.count, 64) // full SHA-256 of the SHA-256 CodeDirectory
+        XCTAssertTrue(sha256.allSatisfy(\.isHexDigit))
 
         // Deterministic.
-        XCTAssertEqual(directories.map(\.hash), try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
+        XCTAssertEqual(sha256, try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).adhoc)
     }
 
     func testExactStripsTrailingGarbage() throws {
         let clean = self.makeMachO(segment: "__LINKEDIT", fileSize: 256) // the image ends with __LINKEDIT
-        let cleanHashes = try XCTUnwrap(try MachO(clean)?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
+        let cleanHashes = try XCTUnwrap(try MachO(clean)?.codeDirectoryHashes(exact: false).hashes)
 
         var dirty = clean
         dirty.append(Data(repeating: 0x41, count: 100))
 
-        let dirtyExact = try MachO(dirty)?.codeDirectoryHashes(exact: true).hashes.map(\.hash)
-        let dirtyWhole = try MachO(dirty)?.codeDirectoryHashes(exact: false).hashes.map(\.hash)
+        let dirtyExact = try MachO(dirty)?.codeDirectoryHashes(exact: true).hashes
+        let dirtyWhole = try MachO(dirty)?.codeDirectoryHashes(exact: false).hashes
         XCTAssertEqual(dirtyExact, cleanHashes, "Exact must strip appended garbage")
         XCTAssertNotEqual(dirtyWhole, cleanHashes, "Whole-slice adhoc must include garbage")
     }
@@ -505,9 +531,10 @@ final class AdhocCDHashTests: XCTestCase {
         for (filetype, isCode) in [(MH_EXECUTE, true), (MH_DYLIB, true), (MH_OBJECT, false), (MH_DSYM, false), (MH_FILESET, false)] {
             let slice = try XCTUnwrap(MachO(self.makeSignedMachO(signature: signature, filetype: UInt32(filetype))))
             let hashed = try slice.codeDirectoryHashes(exact: false)
-            let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
-            XCTAssertEqual(hashes.map(\.adhoc), isCode ? [false] : [], slice.filetypeName)
-            XCTAssertEqual(skipReason == nil, isCode, slice.filetypeName)
+            // A code file has its embedded cdhash, and no ad-hoc one. A file that is not code has neither.
+            XCTAssertEqual(hashed.embedded.count, isCode ? 1 : 0, slice.filetypeName)
+            XCTAssertNil(hashed.adhoc, slice.filetypeName)
+            XCTAssertEqual(hashed.skipReason == nil, isCode, slice.filetypeName)
         }
     }
 
@@ -524,31 +551,34 @@ final class AdhocCDHashTests: XCTestCase {
         XCTAssertEqual(results.count, 1, "an unsigned thin slice yields its ad-hoc cdhash")
 
         for result in results {
-            XCTAssertTrue(result.adhoc, "CDHash tags an unsigned slice ADHOC")
+            XCTAssertNotNil(result.adhoc, "CDHash tags an unsigned slice ADHOC")
+            XCTAssertTrue(result.embedded.isEmpty)
             XCTAssertNil(result.arch, "thin binary → nil arch")
         }
 
-        XCTAssertEqual(results.map(\.hash), try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes.map(\.hash))
+        XCTAssertEqual(results.hashes, try MachO(self.makeMachO())?.codeDirectoryHashes(exact: false).hashes)
     }
 
     /**
      codesign calls a slice whose superblob holds no code directory unsigned, and signs it up to the signature.
+     The digest of the directory it builds is the rehashed cdhash of the slice.
      */
-    func testSignatureWithoutCodeDirectoryIsAdhocUpToTheSignature() throws {
+    func testSignatureWithoutCodeDirectoryIsHashedUpToTheSignature() throws {
         let data = self.makeSignedEmptySuperblob()
         let slice = try XCTUnwrap(MachO(data))
         let hashed = try slice.codeDirectoryHashes(exact: false)
-        let (hashes, skipReason) = (hashed.hashes, hashed.skipReason)
-        XCTAssertNil(skipReason)
-        XCTAssertEqual(hashes.map(\.adhoc), [true])
+        XCTAssertNil(hashed.skipReason)
+        XCTAssertTrue(hashed.embedded.isEmpty)
+        XCTAssertNil(hashed.adhoc)
+        XCTAssertNotNil(hashed.rejectedRehashed)
 
         // Whatever follows the signature's offset is not code; what precedes it is.
         var afterSignature = data
         afterSignature.append(Data(repeating: 0xee, count: 64))
-        XCTAssertEqual(try XCTUnwrap(MachO(afterSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
+        XCTAssertEqual(try XCTUnwrap(MachO(afterSignature)).codeDirectoryHashes(exact: false).rejectedRehashed, hashed.rejectedRehashed)
 
         var beforeSignature = data
         beforeSignature[127] ^= 0xff
-        XCTAssertNotEqual(try XCTUnwrap(MachO(beforeSignature)).codeDirectoryHashes(exact: false).hashes.map(\.hash), hashes.map(\.hash))
+        XCTAssertNotEqual(try XCTUnwrap(MachO(beforeSignature)).codeDirectoryHashes(exact: false).rejectedRehashed, hashed.rejectedRehashed)
     }
 }

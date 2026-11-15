@@ -967,7 +967,7 @@ final class VerifierTests: XCTestCase {
         let section = try self.section("__TEXT", "__text", in: program)
         modified[Int(program.load(UInt32.self, at: section + 48)) + 4] ^= 0xff
         XCTAssertEqual(try self.verify(modified, "modified", in: directory).lines, [": page 0 of the code does not hash to the sha256 code directory"])
-        XCTAssertEqual(try CDHash.hash(fixture: modified).map(\.invalid), [true])
+        XCTAssertEqual(try CDHash.hash(fixture: modified).embedded.map(\.invalid), [true])
 
         // The code directory: slot 0 of the superblob LC_CODE_SIGNATURE points at.
         let signature = try XCTUnwrap(image.findCodeSignature())
@@ -978,7 +978,7 @@ final class VerifierTests: XCTestCase {
         short.store(UInt32((slots - 1) * page).bigEndian, at: directoryOffset + 32)
         short.store(UInt32(slots - 1).bigEndian, at: directoryOffset + 28)
         XCTAssertEqual(try self.verify(short, "short", in: directory).lines, [": the sha256 code directory covers \(((slots - 1) * page).hex) bytes, \((signature.offset - (slots - 1) * page).hex) short of the signature at \(signature.offset.hex): the rest is unsigned, and strict validation refuses the signature"])
-        XCTAssertEqual(try CDHash.hash(fixture: short).map(\.invalid), [true], "strict validation refuses a code limit short of the signature")
+        XCTAssertEqual(try CDHash.hash(fixture: short).embedded.map(\.invalid), [true], "strict validation refuses a code limit short of the signature")
 
         var refused = program
         refused.store(UInt32(0), at: signature.offset)
@@ -1003,7 +1003,7 @@ final class VerifierTests: XCTestCase {
         let flag = try XCTUnwrap(weakened.range(of: Data("<true/>".utf8)))
         tampered.replaceSubrange(flag, with: "<trux/>".utf8)
         XCTAssertEqual(try self.verify(tampered, "tampered", in: directory).lines, [": the entitlements blob does not hash to its slot in the sha256 code directory", ": entitlements that do not parse as a plist", hardening])
-        XCTAssertEqual(try CDHash.hash(fixture: tampered).map(\.invalid), [true], "a sealed blob changed")
+        XCTAssertEqual(try CDHash.hash(fixture: tampered).embedded.map(\.invalid), [true], "a sealed blob changed")
         XCTAssertEqual(try CDHash.hash(fixture: weakened).map(\.invalid), [false])
 
         // The DER form changed to disagree with the XML and sealed again: the disagreement is named, and the verdict
@@ -1232,12 +1232,12 @@ final class VerifierTests: XCTestCase {
         XCTAssertEqual(try self.verify(embedded(directoryBlob, signatureBlob), "self-signed", in: directory).lines, [": signed outside Apple's chains by Fashion Self, which Gatekeeper refuses"])
         // Hash mode's verdict is Security's static one: the signature verifies, whoever signed, or does not.
         XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, signatureBlob)).map(\.invalid), [false])
-        XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, Data())).map(\.invalid), [true], "no CMS blob behind a directory not flagged ad hoc")
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, Data())).embedded.map(\.invalid), [true], "no CMS blob behind a directory not flagged ad hoc")
 
         var altered = directoryBlob
         altered[Int(UInt32(bigEndian: adhoc.load(UInt32.self, at: 20)))] ^= 0x20 // the identifier's first byte
         XCTAssertEqual(try self.verify(embedded(altered, signatureBlob), "altered", in: directory).lines, [": the CMS signature does not verify over the sha256 code directory"])
-        XCTAssertEqual(try CDHash.hash(fixture: embedded(altered, signatureBlob)).map(\.invalid), [true])
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(altered, signatureBlob)).embedded.map(\.invalid), [true])
 
         XCTAssertEqual(try self.verify(embedded(adhoc, signatureBlob), "ad hoc", in: directory).lines, [": a CMS signature behind a code directory flagged ad hoc, which Security ignores"])
         XCTAssertEqual(try CDHash.hash(fixture: embedded(adhoc, signatureBlob)).map(\.invalid), [false])
@@ -1246,7 +1246,7 @@ final class VerifierTests: XCTestCase {
         let wrapper = try XCTUnwrap(mismagic.range(of: Data([0xfa, 0xde, 0x0b, 0x01])))
         mismagic.store(UInt32(0xfade_0b02).bigEndian, at: wrapper.lowerBound)
         XCTAssertEqual(try self.verify(mismagic, "mismagic", in: directory).lines, [": the CMS blob's magic is 0xfade0b02, not 0xfade0b01, which Security refuses the signature for"])
-        XCTAssertEqual(try CDHash.hash(fixture: mismagic).map(\.invalid), [true])
+        XCTAssertEqual(try CDHash.hash(fixture: mismagic).embedded.map(\.invalid), [true])
         // Security takes exactly one signer: the same signer twice is an invalid signature to it, where the one is
         // a signature codesign verifies. The rule is macOS 27.2's. Before it, verifySignature asked
         // CMSDecoderCopySignerStatus for signer 0 alone, and codesign verified the pair.
@@ -1255,7 +1255,7 @@ final class VerifierTests: XCTestCase {
         if #available(macOS 27.2, *) {
             XCTAssertFalse(try execute("/usr/bin/codesign", ["--verify", (directory / "doubled").path]))
         }
-        XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, doubled)).map(\.invalid), [true])
+        XCTAssertEqual(try CDHash.hash(fixture: embedded(directoryBlob, doubled)).embedded.map(\.invalid), [true])
         XCTAssertTrue(try execute("/usr/bin/codesign", ["--verify", (directory / "self-signed").path]))
 
         let plist = directory / "entitlements.plist"
@@ -2055,8 +2055,8 @@ final class VerifierTests: XCTestCase {
 
         XCTAssertTrue(try codesign(["--verify", "--verbose=4", file.path]).contains("valid on disk"))
         let results = try CDHash.hash(path: file.path)
-        XCTAssertEqual(results.map(\.type), ["sha384", "sha256"])
-        XCTAssertEqual(results.map(\.invalid), [false, false])
+        XCTAssertEqual(results.embedded.map(\.type), ["sha384", "sha256"])
+        XCTAssertEqual(results.embedded.map(\.invalid), [false, false])
         self.assertVerify(file.path, [
             "\(file.path): the requirements blob is not sealed by the sha384 code directory",
             "\(file.path): the sha384 code directory, which Security and the kernel read the signature by, is not the one the CMS signs, the sha256 code directory at slot 0, and the signer binds none to it: anyone may have added it",
@@ -2097,7 +2097,7 @@ final class VerifierTests: XCTestCase {
             let path = directory / name
             try file.write(to: path)
             XCTAssertEqual(try execute("/usr/bin/codesign", ["--verify", path.path]), bound, "\(name): codesign --verify")
-            XCTAssertEqual(try CDHash.hash(path: path.path).map(\.invalid), [!bound], name)
+            XCTAssertEqual(try CDHash.hash(path: path.path).embedded.map(\.invalid), [!bound], name)
             XCTAssertEqual(self.verify(path.path).lines, ["\(path.path): " + (bound ? "signed outside Apple's chains by Fashion Self, which Gatekeeper refuses" : "the CMS signature does not bind the code directories as Security requires: its hash agility names other code directories than the signature holds, an invalid signature to it")], name)
         }
     }
@@ -2355,14 +2355,15 @@ final class VerifierTests: XCTestCase {
                 try file.write(to: path)
                 let verifies = try execute("/usr/bin/codesign", ["--verify", path.path])
                 XCTAssertEqual(verifies, bound && form.taken, "\(name), \(form.name): codesign --verify")
-                XCTAssertEqual(try CDHash.hash(path: path.path).map(\.invalid), [!verifies], "\(name), \(form.name)")
+                XCTAssertEqual(try CDHash.hash(path: path.path).embedded.map(\.invalid), [!verifies], "\(name), \(form.name)")
             }
         }
     }
 
     /**
      Hash mode's INVALID is the verdict of Security's static validation, which judges a signature by its best
-     directory, as `codesign --verify` has it for each file here, made from an ad hoc signature taken apart:
+     directory, as `codesign --verify` has it for each file here, made from an ad hoc signature taken apart. There
+     is one exception, the file with bytes appended:
 
      - a special slot the directory seals wants its blob there and hashing to it, up to the library constraint's,
        slot 11: a launch constraint changed or missing is INVALID, one unsealed or sealed right is not, and a slot
@@ -2374,10 +2375,14 @@ final class VerifierTests: XCTestCase {
      - the pages are cut by an `int` shifted by the directory's exponent, which counts modulo 32: one slot over
        all the code holds under an exponent of 31 or 63, pages past any limit, and not under 44, pages of 4 KiB;
      - a scatter vector is not read: the slots are checked in order, sound or changed;
-     - the image must end where its bytes do, as strict validation has it: bytes appended are INVALID, and not
-       with --exact, which hashes the image without them;
+     - bytes appended past the image are not INVALID. Strict validation and `codesign --verify` refuse them, but
+       the kernel does not read them, and the cdhash does not change. They are reported separately. With --exact,
+       the image is hashed without them, and nothing is reported;
      - an alternate's own seals are never read: a wrong one beside a sound best directory is no INVALID, and a
-       wrong one in the best is, on every line.
+       wrong one in the best is, on every line;
+     - an invalid signature has a rehashed cdhash for each directory with a hash that does not hold: a code slot,
+       or the seal of a blob. It is the cdhash of the directory as it was before the hash was changed. A valid
+       signature has none, and a directory whose hashes all hold has none.
 
      verify names each in a line: the slot that does not seal its blob, by what it seals, and for an alternate that
      Security does not read it; the blob that does not lie under its wrapper; the limit strict validation refuses.
@@ -2505,14 +2510,39 @@ final class VerifierTests: XCTestCase {
             ("best-seal", embedded([(0, first), (2, requirements), (0x1000, unsealed(second)), (0x10000, wrapper)], in: both, at: pairSignature), true, [": the requirements blob does not hash to its slot in \(type)"]),
         ]
 
-        cases.append(("appended", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]) + Data("appended".utf8), true, nil))
+        cases.append(("appended", embedded([(0, sha256), (2, requirements), (0x10000, wrapper)]) + Data("appended".utf8), false, nil))
+
+        // The rehashed cdhashes, where the directory as it was before its change is known. A directory whose
+        // hashes all hold has none.
+        var unsealedConstraint = sealing(sha256, [8: constraint])
+        let eighth = Int(UInt32(bigEndian: unsealedConstraint.load(UInt32.self, at: 16))) - 8 * 32
+        unsealedConstraint.replaceSubrange(eighth ..< eighth + 32, with: Data(count: 32))
+        let rehashed: [String: [String?]] = [
+            "scattered-changed": [SHA256.hash(data: scattered(sha256)).hexString],
+            "constraint-changed": [SHA256.hash(data: sealing(sha256, [8: constraint])).hexString],
+            "constraint-missing": [SHA256.hash(data: unsealedConstraint).hexString],
+            "best-seal": [SHA256.hash(data: second).hexString, nil],
+            "top-unwrapped": [nil],
+            "signature-unwrapped": [nil],
+            "limit-past": [nil],
+        ]
 
         for (name, data, invalid, lines) in cases {
             let file = directory / name
             try data.write(to: file)
             let results = try CDHash.hash(path: file.path)
-            XCTAssertEqual(results.map(\.invalid), results.map { _ in invalid }, name)
-            XCTAssertEqual(results.map(\.strictOnly), results.map { _ in name == "appended" }, name)
+            XCTAssertEqual(results.embedded.map(\.invalid), results.embedded.map { _ in invalid }, name)
+            // Appended bytes are reported separately, and only for a valid signature.
+            XCTAssertEqual(results.map { $0.strictFault != nil }, [name == "appended"], name)
+            // Security loads the code directories of every file here, so none has an ad-hoc cdhash.
+            XCTAssertEqual(results.map(\.adhoc), [nil], name)
+            // Only an invalid signature has rehashed cdhashes.
+            if !invalid {
+                XCTAssertEqual(results.embedded.map(\.rehashed), results.embedded.map { _ in nil }, name)
+            }
+            if let expected = rehashed[name] {
+                XCTAssertEqual(results.embedded.map(\.rehashed), expected, name)
+            }
 
             // Security reads the signature slot's wrapper behind an ad hoc directory since macOS 27.
             let asked = if #available(macOS 27, *) {
@@ -2521,7 +2551,7 @@ final class VerifierTests: XCTestCase {
                 name != "signature-unwrapped"
             }
             if asked {
-                XCTAssertEqual((try? codesign(["--verify", file.path])) == nil, invalid, "\(name): codesign --verify")
+                XCTAssertEqual((try? codesign(["--verify", file.path])) == nil, invalid || name == "appended", "\(name): codesign --verify")
             }
 
             // What verify says of it, where this test is about the line.
@@ -2530,7 +2560,7 @@ final class VerifierTests: XCTestCase {
             }
         }
         let appended = directory / "appended"
-        XCTAssertEqual(try CDHash.hash(path: appended.path, exact: true).map(\.invalid), [false])
+        XCTAssertEqual(try CDHash.hash(path: appended.path, exact: true).map(\.strictFault), [nil])
     }
 
     /**

@@ -13,7 +13,7 @@ final class CDHashTests: XCTestCase {
         let results = try CDHash.hash(path: "/bin/ls")
         XCTAssertFalse(results.isEmpty, "Expected CDHash for /bin/ls")
 
-        let first = results[0]
+        let first = try XCTUnwrap(results[0].embedded.first, "/bin/ls is signed")
         XCTAssertFalse(first.hash.isEmpty)
         // CDHash should be hex: SHA-1 (40 chars) or SHA-256 (64 chars)
         XCTAssertTrue(first.hash.count == 40 || first.hash.count == 64, "Unexpected CDHash length: \(first.hash.count)")
@@ -32,12 +32,12 @@ final class CDHashTests: XCTestCase {
         switch try Universal.open(data: data) {
         case .thin:
             let dataHash = try CDHash.hash(data: data)
-            XCTAssertEqual(dataHash, pathResults[0].hash)
+            XCTAssertEqual(dataHash, pathResults[0].hashes.first)
         case let .fat(archs):
             // hash(data:) on first slice should match first path result
             let slice = Universal.sliceData(fileData: data, arch: archs[0])
             let dataHash = try CDHash.hash(data: slice)
-            XCTAssertEqual(dataHash, pathResults[0].hash)
+            XCTAssertEqual(dataHash, pathResults[0].hashes.first)
         case .notMachO:
             XCTFail("/bin/ls should be Mach-O")
         }
@@ -72,8 +72,10 @@ final class CDHashTests: XCTestCase {
 
             for result in results {
                 XCTAssertNotNil(result.arch, "Fat binary slices should have arch names")
-                XCTAssertFalse(result.hash.isEmpty)
-                XCTAssertTrue(result.hash.count == 40 || result.hash.count == 64)
+                XCTAssertFalse(result.hashes.isEmpty)
+                for hash in result.hashes {
+                    XCTAssertTrue(hash.count == 40 || hash.count == 64)
+                }
             }
             return
         }
@@ -88,7 +90,8 @@ final class CDHashTests: XCTestCase {
         let results = try CDHash.hash(path: "/bin/ls")
         XCTAssertFalse(results.isEmpty)
         for result in results {
-            XCTAssertFalse(result.adhoc, "A signed slice must not be tagged ADHOC")
+            XCTAssertFalse(result.embedded.isEmpty, "A signed slice has its embedded cdhash")
+            XCTAssertNil(result.adhoc, "A signed slice whose signature holds has no ad-hoc cdhash")
         }
     }
 
@@ -116,7 +119,7 @@ final class CDHashTests: XCTestCase {
             XCTAssertEqual(first.count, again.count)
 
             for (a, b) in zip(first, again) {
-                XCTAssertEqual(a.hash, b.hash)
+                XCTAssertEqual(a.hashes, b.hashes)
             }
         }
     }
@@ -139,15 +142,19 @@ final class CDHashTests: XCTestCase {
         XCTAssertTrue(described.contains("+0 "), "no special slot: \(described)")
 
         let results = try CDHash.hash(path: program.path)
-        XCTAssertEqual(results.map(\.adhoc), [false])
+        XCTAssertEqual(results.map(\.adhoc), [nil])
         XCTAssertEqual(results.map(\.invalid), [false])
-        XCTAssertTrue(described.contains("CandidateCDHashFull sha256=\(results[0].hash)"), described)
+        XCTAssertEqual(results.embedded.count, 1)
+        XCTAssertTrue(described.contains("CandidateCDHashFull sha256=\(results.hashes[0])"), described)
     }
 
     /**
      A byte of code flipped after signing leaves the signature, and so the cdhash, as it was, but the code no longer
      hashes to its directory: `codesign --verify` reports "code or signature have been modified" for that slice only,
      and fashion names it on stderr, even into a pipe, without failing the run.
+
+     The warning lists the page that fails: the page that holds the flipped byte. The embedded cdhashes of this
+     slice are red, and each one is followed by its rehashed cdhash, dimmed. No slice has an ad-hoc cdhash.
      */
     func testModifiedCodeIsFlagged() throws {
         var data = try Data(contentsOf: URL(fileURLWithPath: "/bin/ls"))
@@ -160,17 +167,30 @@ final class CDHashTests: XCTestCase {
         try data.write(to: tampered)
 
         let results = try CDHash.hash(path: tampered.path)
-        XCTAssertEqual(results.map(\.hash), try CDHash.hash(path: "/bin/ls").map(\.hash))
+        XCTAssertEqual(results.embedded.map(\.hash), try CDHash.hash(path: "/bin/ls").hashes)
         XCTAssertFalse(try CDHash.hash(path: "/bin/ls").contains(where: \.invalid))
         for result in results {
             XCTAssertEqual(result.invalid, result.arch == slice.arch, result.arch ?? "thin")
+            XCTAssertNil(result.adhoc, result.arch ?? "thin")
+            // Only the slice with the flipped byte has rehashed cdhashes. They are not the embedded ones.
+            XCTAssertEqual(result.embedded.map { $0.rehashed != nil }, result.embedded.map { _ in result.invalid }, result.arch ?? "thin")
+            XCTAssertTrue(result.embedded.allSatisfy { $0.rehashed != $0.hash }, result.arch ?? "thin")
         }
+        // One page fails: the page that holds the flipped byte.
+        let failed = try XCTUnwrap(results.first { $0.arch == slice.arch }?.embedded.first?.failed)
+        XCTAssertEqual(failed.count, 1)
+        XCTAssertEqual(failed.runs.map(\.slots.count), [1])
+        XCTAssertEqual(failed.runs.first?.bytes.contains(slice.length / 4), true, "\(failed)")
 
-        // Its lines say so too: the warning first, for stderr, then one per directory, the slice's labeled INVALID.
-        let warning = "fashion: \(tampered.path)\(slice.arch.map { " (\($0))" } ?? ""): invalid signature (code or signature have been modified)"
+        // The output agrees: first the warning, for stderr, then one line per cdhash. The embedded lines of this
+        // slice are labeled INVALID, and red. Each one is followed by its REHASHED line, dimmed.
+        let warning = "fashion: \(tampered.path)\(slice.arch.map { " (\($0))" } ?? ""): invalid signature (code or signature have been modified): \(Digester.describe(failed))"
         let lines = try Digester(Hasher.parse([tampered.path, "--algo", "cdhash"])).lines(for: tampered.path, reporter: Reporter(console: Console()))
+        let tints = results.flatMap { result in result.embedded.flatMap { _ in result.invalid ? [Tint.invalid, .rehashed] : [.none] } }
         XCTAssertEqual(lines.filter(\.diagnostic).map(\.text), [warning])
-        XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("INVALID") }, results.map(\.invalid))
+        XCTAssertEqual(lines.filter { !$0.diagnostic }.map(\.tint), tints)
+        XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("INVALID") }, tints.map { $0 == .invalid })
+        XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("REHASHED") }, tints.map { $0 == .rehashed })
 
         let (status, errors) = try runFashion(["--algo", "cdhash", tampered.path])
         XCTAssertEqual(status, 0)
@@ -182,34 +202,290 @@ final class CDHashTests: XCTestCase {
         }
     }
 
+    /**
+     A signed program with one byte of `__TEXT,__text` flipped. Its signature is invalid.
+
+     - The embedded cdhash does not change. Its line is red and labeled INVALID.
+     - The REHASHED line follows, dimmed. Its cdhash is the one `codesign` gives when it signs the changed program
+       again, in the same way. There is no ADHOC line.
+     - The warning lists the page that holds the flipped byte, with the names of what the page holds.
+     - With --unsign, the signature is removed first. The only line is then the ADHOC one, dimmed, with no
+       warning: the cdhash of an image without `LC_CODE_SIGNATURE`.
+     */
+    func testInvalidSignatureHasItsRehashedCDHashAndUnsignGivesTheAdhocOne() throws {
+        let dir = try self.temporaryDirectory()
+        let signed = try compile("signed", in: dir, ["-arch", "arm64"])
+        // The identifier is given: without it, codesign takes it from the name of the file.
+        let signing = ["-f", "-s", "-", "-i", "com.example.signed"]
+        _ = try codesign(signing + [signed.path])
+        let image = try XCTUnwrap(MachO(File(path: signed.path)))
+        let text = try XCTUnwrap(image.sections(of: XCTUnwrap(image.findSegment("__TEXT"))).first { $0.name == "__text" })
+        var data = try Data(contentsOf: signed)
+        data[Int(text.offset)] ^= 0xff
+        let tampered = dir / "tampered"
+        try data.write(to: tampered)
+
+        let results = try CDHash.hash(path: tampered.path)
+        XCTAssertEqual(results.count, 1)
+        let result = try XCTUnwrap(results.first)
+        XCTAssertEqual(result.embedded.map(\.invalid), [true])
+        XCTAssertEqual(result.embedded.map(\.hash), try CDHash.hash(path: signed.path).hashes)
+        XCTAssertFalse(result.rejected)
+        XCTAssertNil(result.adhoc)
+
+        // The rehashed cdhash is the embedded cdhash of the changed program once codesign signs it again.
+        let rehashed = try XCTUnwrap(result.embedded.first?.rehashed)
+        let resigned = dir / "resigned"
+        try data.write(to: resigned)
+        _ = try codesign(signing + [resigned.path])
+        let again = try CDHash.hash(path: resigned.path)
+        XCTAssertEqual(again.embedded.map(\.invalid), [false])
+        XCTAssertEqual(again.embedded.map(\.rehashed), [nil], "a valid signature has no rehashed cdhash")
+        XCTAssertEqual(again.hashes, [rehashed])
+        XCTAssertNotEqual(result.hashes, [rehashed])
+
+        // One page fails: the page that holds the flipped byte. Its run lists what the page holds.
+        let pageSize = try 1 << Int(image.pageSizeLog())
+        let codeLimit = try XCTUnwrap(image.findCodeSignature()).offset
+        let failed = try XCTUnwrap(result.embedded.first?.failed)
+        XCTAssertEqual(failed.count, 1)
+        XCTAssertEqual(failed.total, (codeLimit + pageSize - 1) / pageSize)
+        XCTAssertEqual(failed.runs.count, 1)
+        let run = try XCTUnwrap(failed.runs.first)
+        XCTAssertEqual(run.slots, Int(text.offset) / pageSize ..< Int(text.offset) / pageSize + 1)
+        XCTAssertEqual(run.bytes, run.slots.lowerBound * pageSize ..< min(run.slots.upperBound * pageSize, codeLimit))
+        XCTAssertEqual(run.contents, image.contents(of: run.bytes))
+        XCTAssertTrue(run.contents.contains("__TEXT,__text"), "\(run.contents)")
+
+        let lines = try Digester(Hasher.parse([tampered.path, "--algo", "cdhash"])).lines(for: tampered.path, reporter: Reporter(console: Console()))
+        XCTAssertEqual(lines.map(\.tint), [.error, .invalid, .rehashed])
+        XCTAssertEqual(lines.map(\.diagnostic), [true, false, false])
+        XCTAssertEqual(lines.first?.text, "fashion: \(tampered.path): invalid signature (code or signature have been modified): \(Digester.describe(failed))")
+        XCTAssertEqual(lines.dropFirst().map { String($0.text.dropFirst(OutputFormatter.cdhashPadWidth + 2)) }, ["\(tampered.path) (INVALID)", "\(tampered.path) (REHASHED)"])
+        XCTAssertEqual(lines.dropFirst().map { String($0.text.prefix(OutputFormatter.cdhashPadWidth)) }, result.hashes + [rehashed])
+
+        // With --unsign, the slice is unsigned before it is hashed.
+        let unsigned = try Digester(Hasher.parse([tampered.path, "--algo", "cdhash", "--unsign"])).lines(for: tampered.path, reporter: Reporter(console: Console()))
+        XCTAssertEqual(unsigned.map(\.tint), [.adhoc])
+        XCTAssertEqual(unsigned.map(\.diagnostic), [false])
+        XCTAssertEqual(unsigned.map { String($0.text.dropFirst(OutputFormatter.cdhashPadWidth + 2)) }, ["\(tampered.path) (ADHOC)"])
+        let edited = try XCTUnwrap(MachO(MachOEditor.edit(File(path: tampered.path), exact: .asNeeded, unsign: true, unpack: false).file))
+        XCTAssertNil(try edited.findCodeSignature())
+        XCTAssertEqual(unsigned.map { String($0.text.prefix(OutputFormatter.cdhashPadWidth)) }, try edited.codeDirectoryHashes(exact: false).hashes)
+    }
+
+    /**
+     The ad-hoc cdhash under --unsign does not depend on the signature. Two copies of one program have the same
+     one: a copy with a valid signature, and a copy whose signature is damaged while its code is intact.
+
+     The damage is one byte of the first code slot, inside the code directory. The page no longer hashes to its
+     slot, so the signature is invalid, and the embedded cdhash changes with the directory.
+
+     The rehashed cdhash of the damaged copy is the embedded cdhash of the valid copy: when the page is hashed
+     again, the slot gets back the bytes it had.
+     */
+    func testUnsignGivesTheSameAdhocCDHashWhateverTheSignature() throws {
+        let dir = try self.temporaryDirectory()
+        let signed = try compile("signed", in: dir, ["-arch", "arm64"])
+        _ = try codesign(["-s", "-", signed.path])
+        var data = try Data(contentsOf: signed)
+        let signature = try XCTUnwrap(MachO(File(path: signed.path))?.findCodeSignature())
+        // The code directory is the first blob of the superblob. Its `hashOffset` field is at offset 16.
+        let directory = signature.offset + Int(UInt32(bigEndian: data.load(UInt32.self, at: signature.offset + 16)))
+        data[directory + Int(UInt32(bigEndian: data.load(UInt32.self, at: directory + 16)))] ^= 0xff
+        let damaged = dir / "damaged"
+        try data.write(to: damaged)
+
+        let valid = try CDHash.hash(path: signed.path)
+        let invalid = try CDHash.hash(path: damaged.path)
+        XCTAssertEqual(valid.embedded.map(\.invalid), [false])
+        XCTAssertEqual(invalid.embedded.map(\.invalid), [true])
+        XCTAssertNotEqual(valid.hashes, invalid.hashes)
+        XCTAssertEqual(valid.embedded.map(\.rehashed), [nil])
+        XCTAssertEqual(invalid.embedded.map(\.rehashed), valid.hashes)
+
+        /// The cdhashes hash mode prints for `file` with --unsign.
+        func unsigned(_ file: URL) throws -> [String] {
+            try Digester(Hasher.parse([file.path, "--algo", "cdhash", "--unsign", "--quiet"])).lines(for: file.path, reporter: Reporter(console: Console())).map(\.text)
+        }
+        XCTAssertEqual(try unsigned(signed).count, 1)
+        XCTAssertEqual(try unsigned(damaged), try unsigned(signed))
+        XCTAssertNotEqual(try unsigned(signed), valid.hashes)
+    }
+
+    /**
+     --match compares each cdhash line on its own. So it finds a slice with an invalid signature by its embedded
+     cdhash, by its rehashed cdhash, or by both.
+
+     ```
+     --match               lines printed
+     --------------------  -------------------------
+     the embedded cdhash   the INVALID line
+     the rehashed cdhash   the REHASHED line
+     both                  both lines
+     another cdhash        none
+     ```
+
+     A line that matches is green: the match replaces the red or dimmed tint. The warning about the signature
+     is still reported.
+
+     With --negate, the file is printed only when neither cdhash matches. Its lines then keep their own tints.
+     */
+    func testMatchFindsTheEmbeddedAndTheRehashedCDHash() throws {
+        let dir = try self.temporaryDirectory()
+        let signed = try compile("signed", in: dir, ["-arch", "arm64"])
+        _ = try codesign(["-s", "-", signed.path])
+        let image = try XCTUnwrap(MachO(File(path: signed.path)))
+        let text = try XCTUnwrap(image.sections(of: XCTUnwrap(image.findSegment("__TEXT"))).first { $0.name == "__text" })
+        var data = try Data(contentsOf: signed)
+        data[Int(text.offset)] ^= 0xff
+        let tampered = dir / "tampered"
+        try data.write(to: tampered)
+
+        let cdhash = try XCTUnwrap(CDHash.hash(path: tampered.path).embedded.first)
+        let (embedded, rehashed) = try (cdhash.hash, XCTUnwrap(cdhash.rehashed))
+        // A cdhash of the right shape that is neither of them.
+        let other = String(embedded.dropLast()) + (embedded.hasSuffix("0") ? "1" : "0")
+        XCTAssertNotEqual(other, rehashed)
+
+        /**
+         The cdhash lines that hash mode prints for the tampered program with `arguments`, without the warning.
+         */
+        func lines(_ arguments: [String]) throws -> [Line] {
+            try Digester(Hasher.parse([tampered.path, "--algo", "cdhash"] + arguments)).lines(for: tampered.path, reporter: Reporter(console: Console())).filter { !$0.diagnostic }
+        }
+        let (invalidLine, rehashedLine) = ("\(embedded)  \(tampered.path) (INVALID)", "\(rehashed)  \(tampered.path) (REHASHED)")
+        let green = Tint.match(distance: 0)
+
+        XCTAssertEqual(try lines([]).map(\.text), [invalidLine, rehashedLine])
+        XCTAssertEqual(try lines(["--match", embedded]).map(\.text), [invalidLine])
+        XCTAssertEqual(try lines(["--match", embedded]).map(\.tint), [green])
+        XCTAssertEqual(try lines(["--match", rehashed]).map(\.text), [rehashedLine])
+        XCTAssertEqual(try lines(["--match", rehashed]).map(\.tint), [green])
+        XCTAssertEqual(try lines(["--match", embedded, "--match", rehashed]).map(\.text), [invalidLine, rehashedLine])
+        XCTAssertEqual(try lines(["--match", embedded, "--match", rehashed]).map(\.tint), [green, green])
+        XCTAssertTrue(try lines(["--match", other]).isEmpty)
+
+        // The warning is reported with a match too.
+        let matched = try Digester(Hasher.parse([tampered.path, "--algo", "cdhash", "--match", rehashed])).lines(for: tampered.path, reporter: Reporter(console: Console()))
+        XCTAssertEqual(matched.map(\.diagnostic), [true, false])
+
+        XCTAssertTrue(try lines(["--negate", "--match", embedded]).isEmpty)
+        XCTAssertTrue(try lines(["--negate", "--match", rehashed]).isEmpty)
+        XCTAssertEqual(try lines(["--negate", "--match", other]).map(\.text), [invalidLine, rehashedLine])
+        XCTAssertEqual(try lines(["--negate", "--match", other]).map(\.tint), [.invalid, .rehashed])
+    }
+
+    /**
+     Every page that fails is listed. Security stops at the first one.
+
+     Two bytes are flipped: one in `__TEXT,__text`, and the last byte of code. The page of each byte fails. The
+     two pages form one run when they are next to each other, and two runs otherwise.
+     */
+    func testEveryPageThatFailsIsNamed() throws {
+        let dir = try self.temporaryDirectory()
+        let signed = try compile("signed", in: dir, ["-arch", "arm64"])
+        _ = try codesign(["-s", "-", signed.path])
+        let image = try XCTUnwrap(MachO(File(path: signed.path)))
+        let text = try XCTUnwrap(image.sections(of: XCTUnwrap(image.findSegment("__TEXT"))).first { $0.name == "__text" })
+        let codeLimit = try XCTUnwrap(image.findCodeSignature()).offset
+        let pageSize = try 1 << Int(image.pageSizeLog())
+        let (first, last) = (Int(text.offset) / pageSize, (codeLimit - 1) / pageSize)
+        try XCTSkipUnless(first < last, "the code is one page long")
+
+        var data = try Data(contentsOf: signed)
+        data[Int(text.offset)] ^= 0xff
+        data[codeLimit - 1] ^= 0xff
+        let tampered = dir / "tampered"
+        try data.write(to: tampered)
+
+        let failed = try XCTUnwrap(CDHash.hash(path: tampered.path).embedded.first?.failed)
+        XCTAssertEqual(failed.count, 2)
+        XCTAssertEqual(failed.total, last + 1)
+        XCTAssertEqual(failed.runs.map(\.slots), last == first + 1 ? [first ..< last + 1] : [first ..< first + 1, last ..< last + 1])
+        XCTAssertEqual(failed.runs.last?.bytes.upperBound, codeLimit, "the last page ends with the code")
+        XCTAssertEqual(failed.runs.last?.contents.last, "__LINKEDIT")
+
+        // Security stops at the first failed page. verify reports this page.
+        XCTAssertTrue(Verify.lines(for: tampered.path, reporter: Reporter(console: Console())).map(\.text).contains("\(tampered.path): page \(first) of the code does not hash to the sha256 code directory"))
+    }
+
+    /**
+     The warning text for failed pages: the number of failed pages, then each run with its page numbers, its
+     offset, and the names of what it holds.
+
+     The pages of runs that are not kept are only counted. A list of more than eight names is cut.
+     */
+    func testFailedPagesAreDescribedWithWhatTheyHold() {
+        /**
+         A run of 4 KiB pages with these slots.
+         */
+        func run(_ slots: Range<Int>, _ contents: [String] = []) -> MachO.PageRun {
+            MachO.PageRun(slots: slots, bytes: slots.lowerBound * 0x1000 ..< slots.upperBound * 0x1000, contents: contents)
+        }
+        XCTAssertEqual(Digester.describe(MachO.FailedPages(count: 1, total: 1, runs: [run(0 ..< 1)])), "1 of 1 page does not hash to its slot: page 0 at 0x0")
+        XCTAssertEqual(Digester.describe(MachO.FailedPages(count: 1, total: 12, runs: [run(3 ..< 4, ["__LINKEDIT"])])), "1 of 12 pages does not hash to its slot: page 3 at 0x3000, holding __LINKEDIT")
+        XCTAssertEqual(
+            Digester.describe(MachO.FailedPages(count: 4, total: 12, runs: [run(0 ..< 1, ["the Mach-O header", "the load commands", "__TEXT,__text"]), run(3 ..< 6, ["__DATA,__data"])])),
+            "4 of 12 pages do not hash to their slots: page 0 at 0x0, holding the Mach-O header, the load commands, __TEXT,__text; pages 3 to 5 at 0x3000, holding __DATA,__data",
+        )
+
+        let names = (1 ... 9).map { "__DATA,__s\($0)" }
+        XCTAssertEqual(
+            Digester.describe(MachO.FailedPages(count: 40, total: 100, runs: [run(2 ..< 4, names)])),
+            "40 of 100 pages do not hash to their slots: pages 2 to 3 at 0x2000, holding \(names.prefix(8).joined(separator: ", "))…; 38 more pages",
+        )
+        XCTAssertEqual(Digester.describe(MachO.FailedPages(count: 3, total: 100, runs: [run(2 ..< 4)])), "3 of 100 pages do not hash to their slots: pages 2 to 3 at 0x2000; 1 more page")
+    }
+
+    /**
+     The names of what a byte range of an image holds: the header and the load commands at the start, a section
+     when the range covers its bytes, and a segment alone when the range covers no section, like in `__LINKEDIT`.
+     */
+    func testContentsNameWhatARangeHolds() throws {
+        let dir = try self.temporaryDirectory()
+        let program = try compile("program", in: dir, ["-arch", "arm64"])
+        let image = try XCTUnwrap(MachO(File(path: program.path)))
+        let text = try XCTUnwrap(image.sections(of: XCTUnwrap(image.findSegment("__TEXT"))).first { $0.name == "__text" })
+        let linkedit = try XCTUnwrap(image.fileRanges(of: XCTUnwrap(image.findSegment("__LINKEDIT")))?.first)
+
+        XCTAssertEqual(image.contents(of: 0 ..< 1), ["the Mach-O header"])
+        XCTAssertEqual(image.contents(of: image.headerSize ..< image.headerSize + 1), ["the load commands"])
+        XCTAssertEqual(image.contents(of: Int(text.offset) ..< Int(text.offset) + 1), ["__TEXT,__text"])
+        XCTAssertEqual(image.contents(of: Int(linkedit.offset) ..< image.length), ["__LINKEDIT"])
+        XCTAssertEqual(image.contents(of: 0 ..< Int(text.offset) + 1), ["the Mach-O header", "the load commands", "__TEXT,__text"])
+        XCTAssertEqual(image.contents(of: image.length ..< image.length + 1), [])
+        XCTAssertEqual(image.contents(of: 0 ..< 0), [])
+    }
+
     // MARK: - Matching integration
 
     func testExactMatchWorks() throws {
         let results = try CDHash.hash(path: "/bin/ls")
-        let first = try XCTUnwrap(results.first)
+        let first = try XCTUnwrap(results.hashes.first)
 
-        let match = Targets([first.hash], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
+        let match = Targets([first], algorithm: .cdhash).match(first, algorithm: .cdhash, threshold: 0)
         XCTAssertNotNil(match)
     }
 
     func testExactMatchCaseInsensitive() throws {
         let results = try CDHash.hash(path: "/bin/ls")
-        let first = try XCTUnwrap(results.first)
+        let first = try XCTUnwrap(results.hashes.first)
 
-        let upper = first.hash.uppercased()
-        let match = Targets([upper], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
+        let upper = first.uppercased()
+        let match = Targets([upper], algorithm: .cdhash).match(first, algorithm: .cdhash, threshold: 0)
         XCTAssertNotNil(match)
     }
 
     func testTruncatedTargetMatches() throws {
         let results = try CDHash.hash(path: "/bin/ls")
-        let first = try XCTUnwrap(results.first)
+        let first = try XCTUnwrap(results.hashes.first)
 
         // 20-byte truncated CDHash (40 hex chars) should match full 32-byte hash
-        let truncated = String(first.hash.prefix(40))
+        let truncated = String(first.prefix(40))
         XCTAssertEqual(truncated.count, 40)
 
-        let match = Targets([truncated], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
+        let match = Targets([truncated], algorithm: .cdhash).match(first, algorithm: .cdhash, threshold: 0)
         XCTAssertNotNil(match, "Truncated CDHash should match full CDHash")
     }
 
@@ -220,19 +496,19 @@ final class CDHashTests: XCTestCase {
      */
     func testFullTargetDoesNotMatchTruncatedDigest() throws {
         let results = try CDHash.hash(path: "/bin/ls")
-        let first = try XCTUnwrap(results.first)
+        let first = try XCTUnwrap(results.hashes.first)
 
-        let truncated = String(first.hash.prefix(40))
-        let match = Targets([first.hash], algorithm: .cdhash).match(truncated, algorithm: .cdhash, threshold: 0)
+        let truncated = String(first.prefix(40))
+        let match = Targets([first], algorithm: .cdhash).match(truncated, algorithm: .cdhash, threshold: 0)
         XCTAssertNil(match, "A longer target must not match a shorter computed digest")
     }
 
     func testNoMatchOnDifferentDigest() throws {
         let results = try CDHash.hash(path: "/bin/ls")
-        let first = try XCTUnwrap(results.first)
+        let first = try XCTUnwrap(results.hashes.first)
 
-        let fake = String(repeating: "0", count: first.hash.count)
-        let match = Targets([fake], algorithm: .cdhash).match(first.hash, algorithm: .cdhash, threshold: 0)
+        let fake = String(repeating: "0", count: first.count)
+        let match = Targets([fake], algorithm: .cdhash).match(first, algorithm: .cdhash, threshold: 0)
         XCTAssertNil(match)
     }
 
@@ -248,14 +524,15 @@ final class CDHashTests: XCTestCase {
         try self.assertSliceNamesMatchCodesign(results, path: path)
 
         for result in results {
-            XCTAssertFalse(result.adhoc, "\(result.arch ?? "thin") slice of \(path) is signed")
+            XCTAssertNil(result.adhoc, "\(result.arch ?? "thin") slice of \(path) is signed")
+            let embedded = try XCTUnwrap(result.embedded.first, "\(result.arch ?? "thin") slice of \(path) is signed")
 
             let archArgs = result.arch.map { ["--arch", $0] } ?? []
             let out = try codesign(["-dvvv"] + archArgs + [path])
             Self.assertInspectedSlice(out, arch: result.arch)
             let expected = try XCTUnwrap(Self.field(out, prefix: "CDHash="), "codesign printed no CDHash")
 
-            XCTAssertEqual(String(result.hash.prefix(40)), expected, "embedded cdhash ≠ codesign CDHash (\(result.arch ?? "thin"))")
+            XCTAssertEqual(String(embedded.hash.prefix(40)), expected, "embedded cdhash ≠ codesign CDHash (\(result.arch ?? "thin"))")
         }
     }
 
@@ -301,7 +578,7 @@ final class CDHashTests: XCTestCase {
         for (arch, image) in slices {
             let out = try Self.codesignDetached(bin, arch: arch, algorithms: "sha1,sha256,sha256T,sha384")
             Self.assertInspectedSlice(out, arch: arch)
-            let hashes = try image.adhocCDHashes(codeLimit: image.length, invalid: false, hashTypes: [.sha1, .sha256, .sha256Truncated, .sha384])
+            let hashes = try image.adhocCDHashes(codeLimit: image.length, hashTypes: [.sha1, .sha256, .sha256Truncated, .sha384])
             XCTAssertEqual(hashes.map(\.type), ["sha1", "sha256", "sha256t", "sha384"], arch ?? "thin")
             for hash in hashes {
                 let name = hash.type == "sha256t" ? "sha256T" : hash.type // codesign's spelling of the truncated type
@@ -340,7 +617,7 @@ final class CDHashTests: XCTestCase {
             for type in [HashType.sha1, .sha256, .sha256Truncated, .sha384] {
                 let signed = try Self.secCodeSigner(thin, types: [type])
                 XCTAssertEqual(signed.status, errSecSuccess, "\(slice.name) \(type.name)")
-                let built = try image.adhocCDHashes(codeLimit: image.length, invalid: false, hashTypes: [type])
+                let built = try image.adhocCDHashes(codeLimit: image.length, hashTypes: [type])
                 XCTAssertEqual(built.map(\.hash), signed.cdhashes[type].map { [$0] } ?? [], "\(slice.name) \(type.name)")
             }
 
@@ -469,8 +746,8 @@ final class CDHashTests: XCTestCase {
             try XCTSkipUnless(extracted, "cannot extract \(arch) with lipo")
 
             try self.assertAdhocMatchesCodesignDetached(thin)
-            let thinHashes = try CDHash.hash(path: thin.path()).map(\.hash)
-            XCTAssertEqual(results.filter { $0.arch == arch }.map(\.hash), thinHashes, arch)
+            let thinHashes = try CDHash.hash(path: thin.path()).hashes
+            XCTAssertEqual(results.filter { $0.arch == arch }.hashes, thinHashes, arch)
         }
     }
 
@@ -616,7 +893,7 @@ final class CDHashTests: XCTestCase {
         try data.write(to: sparse)
         XCTAssertEqual(truncate(sparse.path, off_t(offset) + off_t(size)), 0)
 
-        XCTAssertEqual(try CDHash.hash(path: sparse.path, exact: true).map(\.hash), try CDHash.hash(path: short.path).map(\.hash))
+        XCTAssertEqual(try CDHash.hash(path: sparse.path, exact: true).hashes, try CDHash.hash(path: short.path).hashes)
         try self.assertAdhocMatchesCodesignDetached(short)
     }
 
@@ -641,31 +918,41 @@ final class CDHashTests: XCTestCase {
     }
 
     /**
-     Bytes appended to a signed image leave its signature holding, and the cdhash as it was, but the image no longer
-     ends where its bytes do. `codesign --verify` reports "main executable failed strict validation", and fashion
-     labels the cdhash INVALID and says why on stderr, without failing the run. With --exact, which hashes the
-     image without what follows it, there is nothing to say.
+     Bytes appended to a signed image do not change its signature or its cdhash. The kernel does not read them,
+     and the image still runs. `codesign --verify` reports "main executable failed strict validation".
+
+     fashion reports the appended bytes on stderr, and nothing more: no INVALID label, no ad-hoc cdhash, and the
+     run does not fail. With --exact, the image is hashed without the appended bytes, and nothing is reported.
      */
-    func testBytesAppendedToASignedImageAreFlagged() throws {
+    func testBytesAppendedToASignedImageAreReported() throws {
         let dir = try self.temporaryDirectory()
-        let signed = try compile("signed", in: dir, ["-arch", "arm64"])
+        let signed = try compile("signed", in: dir, source: "int main(void) { return 0; }\n", ["-arch", "arm64"])
         _ = try codesign(["-s", "-", signed.path])
         let appended = dir / "appended"
-        try (Data(contentsOf: signed) + Data("appended".utf8)).write(to: appended)
+        let image = try Data(contentsOf: signed)
+        try (image + Data("appended".utf8)).write(to: appended)
+        let fault = "0x8 bytes appended past the image's end at \(image.count.hex)"
 
         let results = try CDHash.hash(path: appended.path)
-        XCTAssertEqual(results.map(\.hash), try CDHash.hash(path: signed.path).map(\.hash))
-        XCTAssertEqual(try CDHash.hash(path: signed.path).map(\.invalid), [false])
-        XCTAssertEqual(results.map(\.invalid), [true])
-        XCTAssertEqual(results.map(\.strictOnly), [true])
+        XCTAssertEqual(results.hashes, try CDHash.hash(path: signed.path).hashes)
+        XCTAssertEqual(try CDHash.hash(path: signed.path).map(\.strictFault), [nil])
+        XCTAssertEqual(results.map(\.strictFault), [fault])
+        XCTAssertEqual(results.map(\.invalid), [false])
+        XCTAssertEqual(results.map(\.adhoc), [nil])
         XCTAssertThrowsError(try codesign(["--verify", appended.path])) { error in
             XCTAssertTrue(String(describing: error).contains("strict validation"), "\(error)")
         }
+#if arch(arm64)
+        // The kernel accepts the signature with the appended bytes: the image runs. Only an arm64 host can run it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: appended.path)
+        XCTAssertTrue(try execute(appended.path, []))
+#endif
 
-        let warning = "fashion: \(appended.path): invalid signature (the image does not end where its bytes do, which strict validation refuses)"
+        let warning = "fashion: \(appended.path): \(fault), which strict validation refuses; the signature holds"
         let lines = try Digester(Hasher.parse([appended.path, "--algo", "cdhash"])).lines(for: appended.path, reporter: Reporter(console: Console()))
         XCTAssertEqual(lines.filter(\.diagnostic).map(\.text), [warning])
-        XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("INVALID") }, [true])
+        XCTAssertEqual(lines.filter { !$0.diagnostic }.map { $0.text.contains("INVALID") }, [false])
+        XCTAssertEqual(lines.filter { !$0.diagnostic }.map(\.tint), [.none])
         let (status, errors) = try runFashion(["--algo", "cdhash", appended.path])
         XCTAssertEqual(status, 0)
         XCTAssertEqual(errors, [warning])
@@ -760,15 +1047,14 @@ final class CDHashTests: XCTestCase {
         XCTAssertFalse(results.isEmpty, "unsigned \(bin.lastPathComponent) must yield ad-hoc cdhashes")
 
         var out = ""
-        for (arch, sliceResults) in Dictionary(grouping: results, by: \.arch) {
+        for result in results {
+            let arch = result.arch
             out = try Self.codesignDetached(bin, arch: arch)
             Self.assertInspectedSlice(out, arch: arch)
-            XCTAssertEqual(sliceResults.count, 1, "unsigned slice \(arch ?? "thin") yields one ad-hoc cdhash")
-            let result = try XCTUnwrap(sliceResults.first)
-            XCTAssertTrue(result.adhoc, "unsigned slice \(arch ?? "thin") must be ADHOC")
-            XCTAssertNil(result.type, "one directory needs no hash type")
+            XCTAssertTrue(result.embedded.isEmpty, "unsigned slice \(arch ?? "thin") has no embedded cdhash")
+            XCTAssertFalse(result.rejected, "unsigned slice \(arch ?? "thin") has no signature to reject")
             let expected = try XCTUnwrap(Self.field(out, prefix: "CandidateCDHashFull sha256"), "codesign printed no CandidateCDHashFull sha256")
-            XCTAssertEqual(result.hash, expected, "adhoc cdhash ≠ codesign --detached (\(arch ?? "thin"))")
+            XCTAssertEqual(result.adhoc, expected, "adhoc cdhash ≠ codesign --detached (\(arch ?? "thin"))")
         }
         return out
     }

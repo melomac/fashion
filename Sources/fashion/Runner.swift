@@ -133,15 +133,19 @@ enum Tint: Equatable {
     case error
     /// Dimmed: a synthesized ad-hoc cdhash.
     case adhoc
+    /// Red: the embedded cdhash of an invalid signature, on stdout.
+    case invalid
+    /// Dimmed: the rehashed cdhash of an invalid signature, computed by this tool.
+    case rehashed
 
     /// The SGR parameters that set it: with 256 colors, greens by shade and a gray; with 16, the terminal's own green,
     /// dimmed past identical, and bright black for gray.
     func sgr(colors256: Bool = true) -> String? {
         switch self {
         case .none: nil
-        case .malformed: "31"
+        case .malformed, .invalid: "31"
         case .error: "33"
-        case .adhoc: "2"
+        case .adhoc, .rehashed: "2"
         case let .match(distance):
             // Full green only when identical, then darker greens by quarters of the way to the threshold.
             switch distance {
@@ -1334,17 +1338,46 @@ struct Digester {
     }
 
     /**
-     One digest per code directory of each slice, --exact trimming an unsigned slice to its logical extent before
-     synthesizing its ad-hoc cdhash, dimmed. A slice whose signature does not hold is labeled INVALID, and warned about
-     once, however many of its directories fail. A slice of a universal file that does not parse is reported after
-     its architecture and left out.
+     The lines of each slice's cdhashes, and the warnings about its signature (`MachO.CDHashes`).
+
+     ```
+     slice                        lines                        warning on stderr
+     ---------------------------  ---------------------------  ---------------------------------------
+     signed, valid signature      embedded                     none
+     signed, bytes appended       embedded                     the appended bytes
+     signed, invalid signature    embedded (INVALID, red)      the pages that fail, and what they hold
+                                  then REHASHED (dimmed)
+     signed, signature rejected   REHASHED (INVALID, dimmed)   the signature is rejected
+     unsigned                     ADHOC (dimmed)               none
+     ```
+
+     A signed slice has one embedded line per code directory. The hash type is shown only when it has several.
+
+     An invalid slice gets one warning, even when several of its directories fail. The warning lists the pages of
+     code that do not hash to their slots, with the segments and sections that each page holds.
+
+     The REHASHED line of a directory follows its embedded line: expected, then rehashed. A directory has no
+     REHASHED line when all its hashes hold (`MachO.EmbeddedCDHash.rehashed`).
+
+     With --match, each line is compared on its own (`lines(for:reporter:)`). So --match finds a slice by its
+     embedded cdhash, by its rehashed cdhash, or by both.
+
+     ADHOC is only for an unsigned slice. With --unsign, the signature is removed before this function: the slice
+     is then unsigned, and its ADHOC cdhash is the one of the code before signing.
+
+     Bytes appended past a signed image only get a warning. The signature is still valid, so the cdhash is not
+     labeled INVALID.
+
+     With --exact, an unsigned slice is cut at its logical end before its ad-hoc cdhash is computed.
+
+     A slice of a universal file that does not parse is reported after its architecture and left out.
 
      `unedited` is what the editor refused before. It is reported here unless a slice is left out, or the file
      refused, for that very fault: one fault is reported once.
      */
     private func cdHashDigests(_ file: File, subject: Reporter.Subject, unedited: Error?) throws -> [DigestResult] {
         var refusals: [SliceError] = []
-        let results = try CDHash.hash(file, path: subject.path, exact: self.exact, refused: { refusals.append($0) })
+        let slices = try CDHash.hash(file, path: subject.path, exact: self.exact, refused: { refusals.append($0) })
 
         // The editor's refusal, unless a slice is left out below for the same fault: the file is hashed as it is.
         if let unedited, !refusals.contains(where: { $0.arch == (unedited as? SliceError)?.arch && File.message(for: $0) == File.message(for: unedited) }) {
@@ -1357,29 +1390,85 @@ struct Digester {
             subject.warn("\(File.message(for: refusal)), left out", arch: refusal.arch)
         }
 
-        var warned: Set<String> = []
-        for result in results where result.invalid && warned.insert(result.arch ?? "").inserted {
-            // Three cases: Security rejects the signature, so the slice is hashed as unsigned; its code or
-            // signature changed since signing; or the signature holds, and strict validation refuses the image
-            // for the bytes that follow it.
-            let why = if result.adhoc {
-                "signature rejected, hashed as unsigned"
-            } else if result.strictOnly {
-                "invalid signature (the image does not end where its bytes do, which strict validation refuses)"
-            } else {
-                "invalid signature (code or signature have been modified)"
+        var lines: [DigestResult] = []
+        for slice in slices {
+            /**
+             One output line for a cdhash of this slice. The label is the architecture, then the tags that are
+             not nil. The INVALID tag is for an invalid signature, so the line agrees with the warning on stderr.
+             */
+            func line(_ digest: String, _ tags: String?..., tint: Tint) -> DigestResult {
+                let label = ([slice.arch] + tags).compactMap(\.self).joined(separator: ", ")
+                return DigestResult(digest: digest, algorithm: .cdhash, label: label.isEmpty ? nil : label, tint: tint)
             }
-            subject.warn(why, arch: result.arch)
-        }
 
-        return results.map { result in
-            // An unsigned slice is labeled ADHOC. A signed slice shows its hash type only when ambiguous. A signature
-            // that does not hold is labeled INVALID, so the line tells what stderr does.
-            let tag = result.adhoc ? "ADHOC" : result.type
-            let label = [result.arch, result.invalid ? "INVALID" : nil, tag].compactMap(\.self).joined(separator: ", ")
-            return DigestResult(digest: result.hash, algorithm: .cdhash, label: label.isEmpty ? nil : label, tint: result.adhoc ? .adhoc : .none)
+            switch slice.cdhashes {
+            case .none:
+                // `CDHash.hash` leaves these slices out.
+                continue
+            case let .unsigned(adhoc):
+                lines.append(line(adhoc, "ADHOC", tint: .adhoc))
+            case let .rejected(rehashed):
+                subject.warn("signature rejected (no code directory loads), hashed up to the signature", arch: slice.arch)
+                lines.append(line(rehashed, "INVALID", "REHASHED", tint: .rehashed))
+            case let .signed(embedded, strictFault):
+                if embedded.contains(where: \.invalid) {
+                    // Use the failed pages of the strongest directory that has some.
+                    let pages = embedded.compactMap(\.failed).first.map { ": \(Self.describe($0))" } ?? ""
+                    subject.warn("invalid signature (code or signature have been modified)" + pages, arch: slice.arch)
+                } else if let strictFault {
+                    subject.warn("\(strictFault), which strict validation refuses; the signature holds", arch: slice.arch)
+                }
+                // The hash type is shown only when the slice has several embedded cdhashes. An invalid one is red,
+                // and its rehashed cdhash follows.
+                let several = embedded.count > 1
+                for cdhash in embedded {
+                    let type = several ? cdhash.type : nil
+                    lines.append(line(cdhash.hash, cdhash.invalid ? "INVALID" : nil, type, tint: cdhash.invalid ? .invalid : .none))
+                    if let rehashed = cdhash.rehashed {
+                        lines.append(line(rehashed, "REHASHED", type, tint: .rehashed))
+                    }
+                }
+            }
         }
+        return lines
     }
+
+    /**
+     The text of a warning for the pages of code that do not hash to their slots.
+
+     It starts with the number of failed pages. Then each run of failed pages follows, with its page numbers, its
+     offset in the slice, and the names of what it holds.
+
+     ```
+     3 of 12 pages do not hash to their slots: page 1 at 0x4000, holding __TEXT,__text, __TEXT,__const; pages 3
+     to 4 at 0xc000, holding __DATA,__data
+     ```
+
+     The hash of a page only shows that the page changed, not which bytes. So the names are everything the page
+     holds, not only what changed.
+
+     Long lists are cut. The pages of runs that are not listed are only counted ("38 more pages"). A list of names
+     stops after `listedNames` names, with "…".
+     */
+    static func describe(_ failed: MachO.FailedPages) -> String {
+        let head = failed.count == 1
+            ? "1 of \(String(failed.total, pluralizing: "page")) does not hash to its slot"
+            : "\(failed.count) of \(String(failed.total, pluralizing: "page")) do not hash to their slots"
+        var runs = failed.runs.map { run in
+            let pages = run.slots.count == 1 ? "page \(run.slots.lowerBound)" : "pages \(run.slots.lowerBound) to \(run.slots.upperBound - 1)"
+            let names = run.contents.prefix(Self.listedNames).joined(separator: ", ") + (run.contents.count > Self.listedNames ? "…" : "")
+            return "\(pages) at \(run.bytes.lowerBound.hex)" + (names.isEmpty ? "" : ", holding \(names)")
+        }
+        // The number of failed pages in the runs that are not listed.
+        let unlisted = failed.count - failed.runs.reduce(0) { $0 + $1.slots.count }
+        if unlisted > 0 {
+            runs.append(String(unlisted, pluralizing: "more page"))
+        }
+        return "\(head): \(runs.joined(separator: "; "))"
+    }
+
+    /// The maximum number of names that a warning lists for one run of pages.
+    private static let listedNames = 8
 
     /**
      The digests of a file, then of its `artifacts`, the states `thinr`, `unsign` and `unpack` write

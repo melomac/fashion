@@ -7,7 +7,7 @@ The project is hosted on [Codeberg][], mirrored on [GitHub][], and natively supp
 * [CryptoKit][] hash functions: [SHA-2][] (SHA-256 by default) and insecure [SHA-1][] or [MD5][];
 * Fuzzy hash functions: [ssdeep][] and [TLSH][] as submodules with Swift C bridging;
 * Searching for multiple digests with mixed algorithms and a similarity / distance score for fuzzy hash;
-* [CDHash][] of Mach-O binaries, the identity macOS and iOS use: embedded when signed or synthesized like `syspolicyd`;
+* [CDHash][] of Mach-O binaries, the identity macOS and iOS use;
 * [symhash][] of Mach-O binaries, with any algorithm, separator, and optional sort;
 * [XAR][] archives (macOS packages) table of contents (TOC) checksum with any algorithm and optional decompress (zlib);
 * [Git blob object][];
@@ -340,15 +340,15 @@ On a terminal, `fashion` colors lines by what they tell:
 
 🟢 **Green**
 
-* a full match with any algorithm: a digest, a symhash, a cdhash, `ADHOC` included;
+* a full match with any algorithm: a digest, a symhash, a cdhash, `ADHOC` / `INVALID` / `REHASHED` included;
 * a fuzzy match, darker as the distance grows toward the `--score` threshold;
 * TLSH distance from 300, where [false positives][TLSH paper] pass 79%, is dimmed whatever the threshold, unless `--xlen` leaves out the length those rates count;
 
-🔴 **Red:** a malformed file in a mode that has nothing to print without parsing it: a Mach-O under `--algo cdhash`, `verify`, `unsign`, `unpack` or the edits of `thin`, a XAR under `--xar-toc`, a UPX pack `unpack` can't undo;
+🔴 **Red:** a malformed file in a mode that has nothing to print without parsing it: a Mach-O under `--algo cdhash`, `verify`, `unsign`, `unpack` or the edits of `thin`, a XAR under `--xar-toc`, a UPX pack `unpack` can't undo; and the `INVALID` cdhash of a signature that doesn't hold;
 
 🟡 **Yellow:** anything else on standard error: a file that can't be read, a Mach-O or a slice that can't be parsed, an edit that can't be made, a signature that doesn't hold, a packer's marker replaced or its code XORed, a sum that doesn't match, an image with no symbol table, a file in place of an artifact that differs, or a file TLSH can't hash;
 
-⚪️ **Dimmed:** synthesized `ADHOC` lines, for unsigned code.
+⚪️ **Dimmed:** the cdhashes `fashion` computes itself: `ADHOC` lines, for unsigned code, and `REHASHED` lines, for a signature that doesn't hold.
 
 A terminal with 16 colors, by `TERM` and `COLORTERM`, gets its own green, dimmed as soon as a match is not full.
 Set `NO_COLOR=1` to turn this off.
@@ -435,15 +435,25 @@ The kernel knows no SHA-512 directory and refuses a signature that carries one, 
 We print the `CandidateCDHashFull` but `--match` accepts the truncated to 40 hex digits `CDHash`.
 
 Each signed slice is checked with Security's static validation, like `codesign --verify`: every code page against its code directory, the sealed blobs against their slots, the CMS signature over the directory.
-A slice that fails is labeled `INVALID`, and named on standard error without changing the exit status: "signature rejected, hashed as unsigned", or "invalid signature (code or signature have been modified)" when a byte of code changed since signing.
+A slice that fails keeps its embedded CDHash, in red and labeled `INVALID`.
+A dimmed `REHASHED` line follows: the CDHash of the same code directory, its code slots and sealed blobs hashed again from the file.
+No `REHASHED` line when every hash holds and the fault is elsewhere: the CMS signature, the code limit.
+`--match` finds the slice by either CDHash.
+
+A failing slice is named on standard error, with every page that no longer hashes to its slot and what it holds, without changing the exit status.
+Bytes appended past a signed image are only reported: strict validation refuses them, but the kernel never reads them and the CDHash holds.
 
 When `syspolicyd` meets unsigned code, it has the Security framework sign it in memory.
 `fashion` computes the same digest `syspolicyd` looks up, as a dimmed `ADHOC` line.
-When Security's static validation rejects the signature, `codesign` calls the file "not signed at all", and it gets its `ADHOC` line too, computed up to where the signature starts.
+With `--unsign`, a signed slice is hashed as it was before signing: its `ADHOC` CDHash doesn't depend on the signature, valid or not.
+
+A signature may hold no code directory Security loads: none at all, or a malformed one.
+`codesign` then calls the file "not signed at all", and there is no embedded CDHash to print.
+Its only line, `INVALID, REHASHED` and dimmed, is the CDHash `codesign --detached -s - --identifier ADHOC` gives for the file as it is: the code hashed up to where the signature starts.
 
 Mach-O files that are not code to `codesign` — object files, dSYMs, core dumps, kernel filesets — have no identity and yield no line, signed or not.
 
-Every rule is checked against `codesign`: the tests compare `fashion`'s `ADHOC` lines with `codesign --detached -s - --identifier ADHOC` on real and crafted binaries, so a change in the Security framework fails the test rather than silently drift.
+Every rule is checked against `codesign`: the tests compare `fashion`'s `ADHOC` lines with `codesign --detached -s - --identifier ADHOC`, and its `REHASHED` lines with `codesign` signing the tampered sample again, on real and crafted binaries, so a change in the Security framework fails the test rather than silently drift.
 
 ### Git hash
 

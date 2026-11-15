@@ -49,34 +49,45 @@ extension CDHashError: LocalizedError {
 /**
  Compute CDHash (Code Directory Hash) for each slice of a Mach-O binary.
 
- A signed slice yields its embedded cdhash(es).
+ The cdhashes of a slice depend on the state of its signature (`MachO.CDHashes`):
 
- An unsigned slice yields a synthesized ad-hoc cdhash: the identity `syspolicyd` computes for unsigned code,
- byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`.
+ ```
+ slice                                 case       cdhashes
+ ------------------------------------  ---------  ----------------------------------------------
+ not code (object file, dSYM, ...)     none       no cdhash
+ unsigned                              unsigned   ad-hoc, of the whole slice
+ signed, Security loads no directory   rejected   rehashed, of the code before the signature
+ signed, Security loads directories    signed     embedded, one per code directory; rehashed too when invalid
+ ```
+
+ There are three kinds of cdhash:
+
+ ```
+ kind       digest of                                             reported for
+ ---------  ----------------------------------------------------  ------------------------------
+ embedded   a code directory of the signature, as it is           a signed slice
+ rehashed   the same directory, with the hashes of the slice now  a signed slice, when invalid
+ ad-hoc     the directory `codesign -s -` builds for the slice    an unsigned slice only
+ ```
+
+ The embedded cdhash is the expected one. The rehashed cdhash is computed by this tool: every hash of the
+ directory is taken again from the slice (`MachO.rehashedCDHash`). The two are equal when every hash holds, so a
+ rehashed cdhash is reported only for an invalid signature.
+
+ The ad-hoc cdhash is computed by this tool too. It is the identity `syspolicyd` computes for unsigned code,
+ byte-for-byte equal to `codesign --detached -s - --identifier ADHOC`. A signed slice never gets one. To get the
+ cdhash of a signed slice as it was before signing, hash the file with `--unsign`: the signature is removed first,
+ and the slice is then unsigned. This cdhash does not depend on the signature.
 
  The per-slice computation lives on `MachO` below; this enum opens the binary and attaches architecture names.
  */
 enum CDHash {
+    /**
+     The cdhashes of one slice, with the name of its architecture. `arch` is nil for a thin file.
+     */
     struct SliceResult {
-        let hash: String
         let arch: String?
-        /// Hash type name, only set when a slice carries several code directories.
-        let type: String?
-        /// True when the slice is unsigned and the hash was synthesized.
-        let adhoc: Bool
-        /**
-         True when Security's static validation refuses the slice's signature, for any of:
-
-         - a code directory it cannot load, so the hash is synthesized;
-         - code that no longer hashes to this directory;
-         - a fault of the best directory, which counts against every directory: a sealed blob missing or changed,
-           a code limit that is not the signature's offset, a CMS signature missing or not verifying
-           (`MachO.securityTakes`);
-         - an image that does not end where strict validation wants it to (`MachO.failsStrictValidation`).
-         */
-        let invalid: Bool
-        /// True when the last of those is the only fault: the signature holds, and bytes follow the image.
-        let strictOnly: Bool
+        let cdhashes: MachO.CDHashes
     }
 
     /**
@@ -84,12 +95,12 @@ enum CDHash {
 
      Thin binaries return a single result with nil arch.
      Fat binaries return one result per slice.
+     A slice with no cdhash is left out. This happens for a file type that `codesign` does not sign.
 
      With `exact`, an unsigned slice is trimmed to its logical extent before synthesis,
      so appended trailing garbage does not change its ad-hoc cdhash.
 
-     Each embedded code directory is checked against the code it signs, which reads the slice once, no further than the
-     first slot that fails.
+     Each embedded code directory is checked against the code it signs, which reads the slice once.
 
      Each slice of a universal file is hashed on its own, as codesign reads one architecture at a time (`-a`). A
      slice that does not parse, or whose signature Security cannot read, is passed to `refused` as a `SliceError`
@@ -100,16 +111,16 @@ enum CDHash {
         switch try Universal.open(file) {
         case let .fat(table):
             // Slices are named as everywhere else: the second of one architecture is numbered.
-            try Universal.named(table.archs).flatMap { named -> [SliceResult] in
+            try Universal.named(table.archs).compactMap { named -> SliceResult? in
                 let (arch, name) = (named.arch, named.name)
                 do {
                     // A slice that is not a thin Mach-O, typically the `ar` archive of a universal static library, has
                     // no code directory.
                     guard let image = try MachO(file, offset: arch.offset, length: arch.length) else {
                         self.logSkip(path: path, arch: name, reason: "slice is not a Mach-O file")
-                        return []
+                        return nil
                     }
-                    return try self.results(for: image, arch: name, path: path, exact: exact)
+                    return try self.result(for: image, arch: name, path: path, exact: exact)
                 } catch {
                     // A fault in the slice's own bytes goes to `refused`, and the slice is left out. A file that
                     // cannot be read fails as a whole: that is thrown.
@@ -118,11 +129,11 @@ enum CDHash {
                         throw failure
                     }
                     refused(failure)
-                    return []
+                    return nil
                 }
             }
         case let .thin(image):
-            try self.results(for: image, arch: nil, path: path, exact: exact)
+            try [self.result(for: image, arch: nil, path: path, exact: exact)].compactMap(\.self)
         case .notMachO:
             []
         }
@@ -131,19 +142,17 @@ enum CDHash {
     // MARK: - Private
 
     /**
-     One SliceResult per code directory. The hash type is only set when a slice carries several directories.
-     */
-    private static func results(for slice: MachO, arch: String?, path: String, exact: Bool) throws -> [SliceResult] {
-        let hashed = try slice.codeDirectoryHashes(exact: exact)
-        let directories = hashed.hashes
-        if let skipReason = hashed.skipReason {
-            self.logSkip(path: path, arch: arch, reason: skipReason)
-        }
-        let ambiguous = directories.count > 1
+     The cdhashes of `slice`, with the name of its architecture.
 
-        return directories.map { cd in
-            SliceResult(hash: cd.hash, arch: arch, type: ambiguous ? cd.type : nil, adhoc: cd.adhoc, invalid: cd.invalid, strictOnly: cd.strictOnly)
+     Returns nil for a slice with no cdhash. The reason is written to the log.
+     */
+    private static func result(for slice: MachO, arch: String?, path: String, exact: Bool) throws -> SliceResult? {
+        let cdhashes = try slice.codeDirectoryHashes(exact: exact)
+        if case let .none(reason) = cdhashes {
+            self.logSkip(path: path, arch: arch, reason: reason)
+            return nil
         }
+        return SliceResult(arch: arch, cdhashes: cdhashes)
     }
 
     private static func logSkip(path: String, arch: String?, reason: String) {
@@ -155,69 +164,139 @@ enum CDHash {
 
 extension MachO {
     /**
-     A single code directory digest of a slice.
+     The cdhashes of a slice. There is one case per state of its signature.
+
+     ```
+     slice                                 case       cdhashes
+     ------------------------------------  ---------  ----------------------------------------------
+     not code (object file, dSYM, ...)     none       no cdhash
+     unsigned                              unsigned   ad-hoc, of the whole slice
+     signed, Security loads no directory   rejected   rehashed, of the code before the signature
+     signed, Security loads directories    signed     embedded, one per code directory; rehashed too when invalid
+     ```
      */
-    struct CodeDirectoryHash {
-        let hash: String
-        /// The hash type's name (see `HashType`): `sha256` for a synthesized ad-hoc directory.
-        let type: String
-        let adhoc: Bool
-        /// See `CDHash.SliceResult.invalid`.
-        let invalid: Bool
-        /// See `CDHash.SliceResult.strictOnly`.
-        let strictOnly: Bool
+    enum CDHashes {
+        /// The slice is not code to codesign, so it has no cdhash. `reason` is written to the log.
+        case none(reason: String)
+        /// The slice has no signature. `adhoc` is the ad-hoc cdhash of the whole slice.
+        case unsigned(adhoc: String)
+        /// The slice has a signature, but Security loads no code directory from it. So there is no embedded
+        /// cdhash, and no directory to hash again. `rehashed` is the cdhash of the directory that `codesign`
+        /// builds for the code before the signature (`codeDirectoryHashes`, step 3).
+        case rejected(rehashed: String)
+        /// The slice has a signature with code directories. `embedded` holds one cdhash per directory, strongest
+        /// first. `strictFault` is the reason strict validation refuses a slice with a valid signature: most
+        /// often, bytes were appended past the image (`MachO.strictFault`). The kernel does not read these
+        /// bytes, so the cdhashes stay valid.
+        case signed(embedded: [EmbeddedCDHash], strictFault: String?)
     }
 
     /**
-     The slice's cdhashes, or the reason it has none (`skipReason` is set exactly when `hashes` is empty).
+     The cdhash of one embedded code directory: the expected cdhash.
+     */
+    struct EmbeddedCDHash {
+        let hash: String
+        /// The hash type's name (see `HashType`).
+        let type: String
+        /**
+         True when the signature is invalid. There are two causes:
 
-     A slice whose filetype `codesign` takes for a generic file rather than code (`MachORep::candidate`) has none,
-     signed or not: `codesign -d` calls such a file "not signed at all" whatever its `LC_CODE_SIGNATURE` holds.
+         - the code no longer hashes to this directory;
+         - the best directory has a fault, which counts against every directory: a sealed blob is missing or
+           changed, the code limit is not the signature's offset, or the CMS signature is missing or does not
+           verify (`MachO.securityTakes`).
 
-     A signed slice yields every code directory Security loads from its signature, strongest first per `HashType.rank`: the
-     head is the kernel-enforced cdhash. Three checks mark them invalid: each directory against the code
-     (`validateExecutables`), the signature by its best directory (`securityTakes`), and where the image ends
-     (`failsStrictValidation`). Strict validation refuses a main executable with bytes appended past it, which
-     `codesign --verify` calls an invalid signature. With `exact` the image is hashed without those bytes, and
-     judged without them.
+         Bytes appended past the image are not a cause (`CDHashes.signed`).
+         */
+        let invalid: Bool
+        /// The pages of code that do not hash to this directory. Nil when every page does.
+        let failed: FailedPages?
+        /// The rehashed cdhash: the digest of this directory with its hashes taken again from the slice
+        /// (`MachO.rehashedCDHash`). Nil when the signature is valid. Nil too when every hash holds: the signature
+        /// is then invalid for another reason, and the rehashed cdhash would be `hash`.
+        let rehashed: String?
+    }
 
-     An unsigned slice yields its synthesized ad-hoc cdhash, the SHA-256 one `syspolicyd` looks up. So does a signed
-     slice whose code directories Security rejects, marked invalid: `codesign` calls it "not signed at all" and signs it
-     up to where its signature starts, the code limit of `MachORep::signingLimit`. A signature Security cannot read at
-     all is an error, as `codesign` cannot sign over it.
+    /// An ad-hoc cdhash, with the name of its hash type (see `HashType`).
+    struct AdhocCDHash {
+        let hash: String
+        let type: String
+    }
+
+    /**
+     The cdhashes of the slice, by the state of its signature (`CDHashes`). The steps are:
+
+     1. Not code. A slice whose filetype `codesign` takes for a generic file (`MachORep::candidate`) has no cdhash,
+        signed or not: `codesign -d` calls such a file "not signed at all", whatever its `LC_CODE_SIGNATURE` holds.
+     2. Unsigned. The slice gets its ad-hoc cdhash, the SHA-256 one `syspolicyd` looks up. With `exact`, the bytes
+        appended past the image are left out.
+     3. Rejected. The slice has a signature, but Security loads no code directory from it. So there is no
+        embedded cdhash, and no directory to hash again. `codesign` calls the slice "not signed at all", and signs
+        it up to where its signature starts, the code limit of `MachORep::signingLimit`. The digest of the
+        directory it builds is the rehashed cdhash of the slice. It is not an ad-hoc cdhash: the header still has
+        its `LC_CODE_SIGNATURE`, so this is not the code as it was before signing.
+     4. Signed. The slice gets one embedded cdhash per code directory (`embeddedCDHashes`), valid or not. An
+        invalid one comes with its rehashed cdhash (`rehashedCDHash`).
+
+     ```
+     unsigned     | code ..................................... |   ad-hoc cdhash of the whole slice
+     rejected     | code ......................... | signature |   rehashed cdhash, of the code before the signature
+                  0                                ^ signature.offset
+     ```
+
+     Bytes appended past the image do not make the signature invalid. Strict validation refuses them, so
+     `codesign --verify` fails. But the kernel does not read them: the image runs, and its cdhash does not change.
+     They are reported in `strictFault`, only when the signature is valid. With `exact`, the image is checked
+     without these bytes.
+
+     A signature that Security cannot read at all is an error: `codesign` cannot sign over it.
 
      A slice of a universal file is judged on its own, as if extracted: `codesign` instead decides a whole 32-bit
      universal file from its first slice, and treats a 64-bit one (`lipo -fat64`) as a generic file outright.
      */
-    func codeDirectoryHashes(exact: Bool) throws -> CodeDirectoryHashes {
+    func codeDirectoryHashes(exact: Bool) throws -> CDHashes {
         guard Self.codeFiletypes.contains(self.filetype) else {
-            return CodeDirectoryHashes(hashes: [], skipReason: "\(self.filetypeName) is not code to codesign")
+            return .none(reason: "\(self.filetypeName) is not code to codesign")
+        }
+        guard let signature = try self.findCodeSignature() else {
+            return try .unsigned(adhoc: self.adhocCDHash(codeLimit: exact ? self.logicalEnd() : self.length))
+        }
+        let embedded = try self.embeddedCDHashes(signature)
+        guard !embedded.isEmpty else {
+            return try .rejected(rehashed: self.adhocCDHash(codeLimit: signature.offset))
         }
 
-        let signature = try self.findCodeSignature()
-        if let signature {
-            let superblob = try self.signingData(signature)
-            let loaded = try Self.loadCodeDirectories(superblob)
-            let directories = loaded.sorted { $0.hashType.rank > $1.hashType.rank }
-            let taken = Self.securityTakes(directories, primary: loaded.first, in: superblob, signature: signature)
-            // Whether strict validation refuses the image for where it ends. With `exact`, it is judged as cut.
-            let unended = self.failsStrictValidation(length: exact ? self.logicalEnd() : self.length)
-            let hashes = try zip(directories, self.validateExecutables(directories)).map { cd, verdict in
-                let holds = verdict.valid && taken
-                return CodeDirectoryHash(hash: cd.hashType.digest(cd.data).hexString, type: cd.hashType.name, adhoc: false, invalid: !holds || unended, strictOnly: holds && unended)
-            }
-            if !hashes.isEmpty {
-                return CodeDirectoryHashes(hashes: hashes, skipReason: nil)
-            }
-        }
-
-        return try CodeDirectoryHashes(hashes: self.adhocCDHashes(codeLimit: signature?.offset ?? (exact ? self.logicalEnd() : self.length), invalid: signature != nil), skipReason: nil)
+        // With `exact`, the image is checked as if it was cut at its logical end.
+        let valid = !embedded.contains(where: \.invalid)
+        return .signed(embedded: embedded, strictFault: valid ? self.strictFault(length: exact ? self.logicalEnd() : self.length) : nil)
     }
 
-    /// The cdhashes of a slice, and why there are none, when there are none: a file type codesign does not sign.
-    struct CodeDirectoryHashes {
-        let hashes: [CodeDirectoryHash]
-        let skipReason: String?
+    /**
+     The cdhash of each code directory Security loads from the signature at `signature`, strongest first
+     (`HashType.rank`). The first one is the cdhash the kernel enforces. Empty when Security loads no directory.
+
+     Two checks mark a cdhash invalid:
+
+     - each directory against the code (`validateExecutables`);
+     - the signature, by its best directory (`securityTakes`). A fault there counts against every directory.
+
+     An invalid cdhash comes with its rehashed cdhash (`rehashedCDHash`).
+     */
+    private func embeddedCDHashes(_ signature: Span) throws -> [EmbeddedCDHash] {
+        let superblob = try self.signingData(signature)
+        let loaded = try Self.loadCodeDirectories(superblob)
+        let directories = loaded.sorted { $0.hashType.rank > $1.hashType.rank }
+        let taken = Self.securityTakes(directories, primary: loaded.first, in: superblob, signature: signature)
+        return try zip(directories, self.validateExecutables(directories)).map { cd, verdict in
+            let invalid = !(verdict.valid && taken)
+            return EmbeddedCDHash(
+                hash: cd.hashType.digest(cd.data).hexString,
+                type: cd.hashType.name,
+                invalid: invalid,
+                failed: verdict.failed,
+                rehashed: invalid ? Self.rehashedCDHash(of: cd, pages: verdict.rehashed, in: superblob) : nil,
+            )
+        }
     }
 
     // MARK: - Embedded signature
@@ -319,6 +398,45 @@ extension MachO {
             }
         }
     }
+
+    /**
+     The code directories Security loads (`SecStaticCode::loadCodeDirectories`): the primary slot's, then the
+     alternates' from 0x1000 up to the first one missing. Empty, so that the slice counts as unsigned, when the primary
+     is missing or when any of them fails the checks of `EmbeddedCodeDirectory`. Throws for two of one hash type, which
+     Security refuses as an invalid signature (`errSecCSSignatureInvalid`), where codesign says "invalid or
+     unsupported format for signature".
+     */
+    static func loadCodeDirectories(_ superblob: Data) throws -> [EmbeddedCodeDirectory] {
+        var directories: [EmbeddedCodeDirectory] = []
+        for slot in [self.csslotCodeDirectory] + Array(self.csslotAlternateBase ..< self.csslotAlternateLimit) {
+            guard let blob = self.component(slot, of: superblob) else {
+                break
+            }
+            guard let directory = EmbeddedCodeDirectory(blob) else {
+                return []
+            }
+            guard !directories.contains(where: { $0.hashType == directory.hashType }) else {
+                throw CDHashError.duplicateCodeDirectory(hashType: directory.hashType.name)
+            }
+            directories.append(directory)
+        }
+
+        return directories
+    }
+
+    /**
+     The blob a superblob holds in `slot`, like `SuperBlob::find`: the first index entry of that type, nil when there is
+     none or its offset is zero. `signingData` has checked that the blob lies inside the superblob.
+     */
+    static func component(_ slot: UInt32, of superblob: Data) -> Data? {
+        for entry in 0 ..< Int(superblob.bigEndianUInt32(at: 8)) where superblob.bigEndianUInt32(at: 12 + 8 * entry) == slot {
+            let offset = Int(superblob.bigEndianUInt32(at: 12 + 8 * entry + 4))
+            return offset == 0 ? nil : superblob.bytes(in: offset ..< offset + Int(superblob.bigEndianUInt32(at: offset + 4)))
+        }
+        return nil
+    }
+
+    // MARK: - Validation
 
     /**
      Whether Security's static validation takes the signature, beyond its code slots
@@ -423,43 +541,6 @@ extension MachO {
     }
 
     /**
-     The code directories Security loads (`SecStaticCode::loadCodeDirectories`): the primary slot's, then the
-     alternates' from 0x1000 up to the first one missing. Empty, so that the slice counts as unsigned, when the primary
-     is missing or when any of them fails the checks of `EmbeddedCodeDirectory`. Throws for two of one hash type, which
-     Security refuses as an invalid signature (`errSecCSSignatureInvalid`), where codesign says "invalid or
-     unsupported format for signature".
-     */
-    static func loadCodeDirectories(_ superblob: Data) throws -> [EmbeddedCodeDirectory] {
-        var directories: [EmbeddedCodeDirectory] = []
-        for slot in [self.csslotCodeDirectory] + Array(self.csslotAlternateBase ..< self.csslotAlternateLimit) {
-            guard let blob = self.component(slot, of: superblob) else {
-                break
-            }
-            guard let directory = EmbeddedCodeDirectory(blob) else {
-                return []
-            }
-            guard !directories.contains(where: { $0.hashType == directory.hashType }) else {
-                throw CDHashError.duplicateCodeDirectory(hashType: directory.hashType.name)
-            }
-            directories.append(directory)
-        }
-
-        return directories
-    }
-
-    /**
-     The blob a superblob holds in `slot`, like `SuperBlob::find`: the first index entry of that type, nil when there is
-     none or its offset is zero. `signingData` has checked that the blob lies inside the superblob.
-     */
-    static func component(_ slot: UInt32, of superblob: Data) -> Data? {
-        for entry in 0 ..< Int(superblob.bigEndianUInt32(at: 8)) where superblob.bigEndianUInt32(at: 12 + 8 * entry) == slot {
-            let offset = Int(superblob.bigEndianUInt32(at: 12 + 8 * entry + 4))
-            return offset == 0 ? nil : superblob.bytes(in: offset ..< offset + Int(superblob.bigEndianUInt32(at: offset + 4)))
-        }
-        return nil
-    }
-
-    /**
      Whether the code still hashes to each directory's code slots, like `SecStaticCode::validateExecutable`: the pages
      are cut by one directory's code limit and page size, the one of the lowest hash type, first in the map Security
      keeps them in, and every directory's slot at each page's index must be that page's hash, a directory with fewer
@@ -469,6 +550,9 @@ extension MachO {
      each page through each directory's hasher as it arrives, however large the pages, and no further than the last
      slot still to check. A scattered directory's slots are checked in order like any other's: Security reads no
      scatter vector here.
+
+     Security stops at the first page that fails. This function checks every page, so the verdict lists all the
+     pages that fail, and holds the directory with the hash of each of these pages (`Verdict.rehashed`).
      */
     func validateExecutables(_ directories: [EmbeddedCodeDirectory]) throws -> [Verdict] {
         guard let geometry = Self.geometry(of: directories) else {
@@ -486,14 +570,122 @@ extension MachO {
                 }
             }
         } catch is SlotValidator.Done {}
-        return validators.map { Verdict(valid: $0.valid, failedSlot: $0.failedSlot) }
+
+        return validators.map { validator in
+            guard validator.failedCount > 0 else {
+                return Verdict(valid: validator.valid, failed: nil, rehashed: validator.rehashed)
+            }
+            // A page can only fail when the code limit is inside the slice, so these numbers fit an Int.
+            // The byte ranges are computed the same way as in `SlotValidator`.
+            let (pageSize, codeLimit) = (Int(min(geometry.pageSize, geometry.codeLimit)), Int(geometry.codeLimit))
+            let runs = validator.failedRuns.map { slots in
+                let bytes = slots.lowerBound * pageSize ..< min(slots.upperBound * pageSize, codeLimit)
+                return PageRun(slots: slots, bytes: bytes, contents: self.contents(of: bytes))
+            }
+            return Verdict(valid: false, failed: FailedPages(count: validator.failedCount, total: (codeLimit + pageSize - 1) / pageSize, runs: runs), rehashed: validator.rehashed)
+        }
     }
 
-    /// Whether a code directory's slots hash the code they seal, and the first slot that does not, if any.
+    /// The result of checking one code directory: whether every page of code hashes to its slot, and the pages
+    /// that do not.
     struct Verdict {
         let valid: Bool
-        let failedSlot: Int?
+        let failed: FailedPages?
+        /// The bytes of the directory, with the hash of each failed page written to its code slot. A failed
+        /// page without a slot changes nothing. These are the directory's own bytes when no page failed.
+        let rehashed: Data
     }
+
+    /**
+     The rehashed cdhash of `directory`, a code directory of an invalid signature. It is the digest of the
+     directory once every hash it holds is taken again from the slice as it is now.
+
+     ```
+     part of the directory         in the rehashed directory
+     ----------------------------  ------------------------------------------------
+     header, identifier, team ID   the same bytes
+     special slots 1 and 3         the same bytes: they seal files of the bundle
+     special slots 2 and 4 to 11   the hash of the blob that the superblob holds now
+     code slots                    the hash of each page of code now
+     ```
+
+     `pages` is the directory with its code slots already hashed again (`Verdict.rehashed`). This function
+     hashes again the special slots that `securityTakes` judges:
+
+     - a sealed slot gets the hash of its blob;
+     - a sealed slot whose blob is missing gets zeros, as an unsealed slot has;
+     - an unsealed slot keeps its zeros: Security does not read its blob;
+     - a slot whose blob lacks its wrapper keeps its hash: there are no bytes to hash.
+
+     The identifier, the flags and the team ID do not change. So the rehashed cdhash is the cdhash this signature
+     would have, if it was made over the slice as it is now.
+
+     Nil when the rehashed directory is the embedded one: every hash holds, and the signature is invalid for
+     another reason (its CMS signature, its code limit, a page without a slot).
+     */
+    private static func rehashedCDHash(of directory: EmbeddedCodeDirectory, pages: Data, in superblob: Data) -> String? {
+        var rehashed = pages
+        for slot in (1 ... self.csslotMax).prefix(directory.nSpecialSlots) where !self.csslotsLeftOut.contains(slot) {
+            guard let sealed = directory.specialSlot(Int(slot)), sealed.contains(where: { $0 != 0 }) else {
+                continue
+            }
+            let now: Data
+            switch self.sealable(slot, in: superblob) {
+            case .unwrapped:
+                continue
+            case .none:
+                now = Data(count: sealed.count)
+            case let .bytes(blob):
+                now = directory.hashType.digest(blob).prefix(sealed.count)
+            }
+            if now != sealed {
+                directory.write(now, toSlot: -Int(slot), of: &rehashed)
+            }
+        }
+        return rehashed == directory.data ? nil : directory.hashType.digest(rehashed).hexString
+    }
+
+    /**
+     The pages of code that do not hash to their slots in a code directory. The code changed in these pages after
+     it was signed. Pages are cut the way Security cuts them (`geometry(of:)`).
+
+     Failed pages that are next to each other form a run:
+
+     ```
+     page      0     1     2     3     4     5     6
+     result    ok    FAIL  ok    FAIL  FAIL  FAIL  ok
+     runs            [1]         [3 ........... 5]
+     ```
+
+     Here `count` is 4, `total` is 7, and `runs` holds two runs.
+     */
+    struct FailedPages: Equatable {
+        /// The number of pages that do not hash to their slots.
+        let count: Int
+        /// The number of pages the code is cut into.
+        let total: Int
+        /// The first runs of failed pages, in order. At most `listedPageRuns` runs are kept. The pages of the
+        /// other runs are only counted in `count`.
+        let runs: [PageRun]
+    }
+
+    /**
+     A run of failed pages: pages next to each other that do not hash to their slots.
+
+     The hash of a page only shows that the page changed. It does not show which bytes changed. So `contents`
+     lists everything the pages hold, not only what changed.
+     */
+    struct PageRun: Equatable {
+        /// The page numbers, from 0. The number of a page is also the number of its code slot.
+        let slots: Range<Int>
+        /// The bytes of the slice that the pages cover.
+        let bytes: Range<Int>
+        /// The names of what these bytes hold: segments and sections (`contents(of:)`).
+        let contents: [String]
+    }
+
+    /// The maximum number of runs of failed pages that a verdict keeps. A warning lists them.
+    static let listedPageRuns = 8
 
     /// The directory whose code limit and page size Security cuts every directory's pages by: the one of the lowest
     /// hash type, the first in the map `SecStaticCode` keeps them in (`validateExecutableSlots`).
@@ -510,9 +702,8 @@ extension MachO {
      and `syspolicyd` sign; the tests ask for SHA-1, truncated SHA-256 and SHA-384 beside it, every digest Security
      signs with: it refuses SHA-512, which it only reads.
      Throws where Security fails to sign: for a version or segment command it cannot read, or a directory too large.
-     `invalid` when it stands in for a signature Security rejects.
      */
-    func adhocCDHashes(codeLimit: Int, invalid: Bool, hashTypes: [HashType] = [.sha256]) throws -> [CodeDirectoryHash] {
+    func adhocCDHashes(codeLimit: Int, hashTypes: [HashType] = [.sha256]) throws -> [AdhocCDHash] {
         // Security's Signer::populate: fill a CodeDirectory::Builder with what MachORep reports.
         let execSeg = try self.execSeg()
         let builder = try CodeDirectoryBuilder(
@@ -526,8 +717,15 @@ extension MachO {
         )
 
         return try builder.build(code: self).map { built in
-            CodeDirectoryHash(hash: built.hashType.digest(built.directory).hexString, type: built.hashType.name, adhoc: true, invalid: invalid, strictOnly: false)
+            AdhocCDHash(hash: built.hashType.digest(built.directory).hexString, type: built.hashType.name)
         }
+    }
+
+    /**
+     The ad-hoc cdhash that hash mode prints: the SHA-256 one, of the code up to `codeLimit`.
+     */
+    private func adhocCDHash(codeLimit: Int) throws -> String {
+        try self.adhocCDHashes(codeLimit: codeLimit)[0].hash
     }
 
     /**
@@ -926,12 +1124,34 @@ struct EmbeddedCodeDirectory {
         let offset = self.hashOffset + slot * size
         return digest.prefix(size) == self.data.bytes(in: offset ..< offset + size)
     }
+
+    /**
+     Write `hash` to slot `slot` of `copy`, a copy of the directory's bytes. `hash` is as wide as a slot.
+
+     Code slots are numbered from 0. Special slot `-n` is slot `-n` here too:
+
+     ```
+     slot     -2          -1          0           1
+            | special 2 | special 1 | code 0    | code 1    |
+                                    ^ hashOffset
+     ```
+
+     The slot must be one the directory has: its bytes are then inside the directory (`init`).
+     */
+    func write(_ hash: Data, toSlot slot: Int, of copy: inout Data) {
+        let size = self.hashType.slotSize
+        let offset = self.hashOffset + slot * size
+        copy.withUnsafeMutableBytes { bytes in
+            UnsafeMutableRawBufferPointer(rebasing: bytes[offset ..< offset + size]).copyBytes(from: hash)
+        }
+    }
 }
 
 /**
  One code directory's slots checked as the code streams by: each page hashed as its bytes arrive, the last one shorter,
- against its slot, until one fails or the code limit is reached, the pages cut as the `geometry` directory lays them,
- which Security takes for every directory. A directory with fewer slots than pages fails at the first it lacks.
+ against its slot, up to the code limit, the pages cut as the `geometry` directory lays them, which Security takes
+ for every directory. Security stops at the first page that fails. This validator continues, and counts every page
+ that fails. A directory with fewer slots than pages fails for every page without a slot.
  So does a directory whose exponent is 32 or more, when the pages cut are smaller than its code: its slots are
  counted by the exponent as written, its pages cut by the exponent modulo 32 (`EmbeddedCodeDirectory.pageSize`).
  A geometry the slice cannot hold fails every directory outright. A scatter vector is not read, as Security reads
@@ -950,22 +1170,34 @@ private struct SlotValidator {
     /// Bytes of code fed so far, and of the current page.
     private var offset = 0
     private var filled = 0
-    private(set) var valid: Bool
-    /// The first code slot the code did not hash to, when one did not.
-    private(set) var failedSlot: Int?
+    /// Whether the code limit of the geometry is inside the slice. When it is not, no page is checked.
+    private let holds: Bool
+    /// The number of pages that did not hash to their slots.
+    private(set) var failedCount = 0
+    /// The first runs of failed pages, as slot ranges, in order. At most `MachO.listedPageRuns` runs.
+    private(set) var failedRuns: [Range<Int>] = []
+    /// The bytes of the directory, with the hash of each failed page written to its code slot
+    /// (`MachO.Verdict.rehashed`). The bytes are copied only when a first page fails.
+    private(set) var rehashed: Data
 
     init(_ directory: EmbeddedCodeDirectory, geometry: EmbeddedCodeDirectory, length: Int) {
-        let valid = geometry.codeLimit <= UInt64(length)
+        let holds = geometry.codeLimit <= UInt64(length)
         self.directory = directory
+        self.rehashed = directory.data
         self.hasher = directory.hashType.hasher()
-        self.valid = valid
-        self.limit = valid ? Int(geometry.codeLimit) : 0
-        self.pageSize = valid ? Int(min(geometry.pageSize, geometry.codeLimit)) : 0
+        self.holds = holds
+        self.limit = holds ? Int(geometry.codeLimit) : 0
+        self.pageSize = holds ? Int(min(geometry.pageSize, geometry.codeLimit)) : 0
+    }
+
+    /// Whether every page of code hashes to its slot.
+    var valid: Bool {
+        self.holds && self.failedCount == 0
     }
 
     /// Whether a slot is left to check.
     var checking: Bool {
-        self.valid && self.offset < self.limit
+        self.holds && self.offset < self.limit
     }
 
     /// Feed the code from `offset` on.
@@ -979,14 +1211,36 @@ private struct SlotValidator {
             self.offset += count
             self.filled += count
             if self.filled == page {
-                self.valid = self.slot < self.directory.nCodeSlots && self.directory.validateSlot(Data(self.hasher.finalize()), self.slot)
-                if !self.valid {
-                    self.failedSlot = self.slot
+                let digest = Data(self.hasher.finalize())
+                if !(self.slot < self.directory.nCodeSlots && self.directory.validateSlot(digest, self.slot)) {
+                    self.fail(digest)
                 }
                 self.hasher = self.directory.hashType.hasher()
                 self.slot += 1
                 self.filled = 0
             }
+        }
+    }
+
+    /**
+     Count the current page as failed. `digest` is the hash of the page.
+
+     The page joins the last run when it is next to it. Otherwise it starts a new run, when there is still room
+     for one. Without room, the page is only counted.
+
+     Slots only increase, so a page next to a kept run always joins it.
+
+     The hash of the page is written to its code slot in `rehashed`, when the directory has this slot.
+     */
+    private mutating func fail(_ digest: Data) {
+        if self.slot < self.directory.nCodeSlots {
+            self.directory.write(digest.prefix(self.directory.hashType.slotSize), toSlot: self.slot, of: &self.rehashed)
+        }
+        self.failedCount += 1
+        if let last = self.failedRuns.last, last.upperBound == self.slot {
+            self.failedRuns[self.failedRuns.count - 1] = last.lowerBound ..< self.slot + 1
+        } else if self.failedRuns.count < MachO.listedPageRuns {
+            self.failedRuns.append(self.slot ..< self.slot + 1)
         }
     }
 }

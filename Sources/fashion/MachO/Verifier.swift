@@ -1423,8 +1423,8 @@ struct MachOVerifier {
         let geometry = MachO.geometry(of: directories) ?? primary
         for (directory, checked) in try zip(directories, image.validateExecutables(directories)) {
             let type = "the \(directory.hashType.name) code directory"
-            if let slot = checked.failedSlot {
-                found.append("page \(slot) of the code does not hash to \(type)")
+            if let page = checked.failed?.runs.first?.slots.lowerBound {
+                found.append("page \(page) of the code does not hash to \(type)")
             } else if !checked.valid {
                 found.append("\(type) covers \(directory.codeLimit.hex) bytes, past the image's \(image.length.hex)")
             }
