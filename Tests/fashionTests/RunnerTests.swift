@@ -603,8 +603,11 @@ final class RunnerConcurrencyTests: XCTestCase {
         }
         reading.wait()
         try result.get()
-        // The pty's output processing ends each line with CR LF, one Character.
-        return String(decoding: collected.withLock { $0 }, as: UTF8.self).split(separator: "\r\n").map(String.init)
+        // The pty's output processing ends each line with CR LF, or with CR CR LF: when the reader is behind and
+        // the pty's output queue fills between the two, the kernel writes both again. Matched by scalars: CR LF is
+        // one Character, which holds neither.
+        return String(decoding: collected.withLock { $0 }, as: UTF8.self)
+            .split(separator: /\r+\n/.matchingSemantics(.unicodeScalar)).map(String.init)
     }
 
     /**
