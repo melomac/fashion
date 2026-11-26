@@ -29,28 +29,26 @@ clean:
 
 PRODUCT_NAME = fashion
 CONFIG_PATH ?= $(PRODUCT_NAME).xcconfig
-XCODE_FLAGS = -scheme $(PRODUCT_NAME) -xcconfig $(CONFIG_PATH)
-BUILD_FLAGS = -target $(PRODUCT_NAME) -destination generic/platform=macOS
-TEST_FLAGS = -target $(PRODUCT_NAME)Tests -destination platform=macOS
+XCODE_FLAGS = -scheme $(PRODUCT_NAME) -xcconfig $(CONFIG_PATH) -destination platform=macOS
 
 INSTALL_PATH ?= /usr/local/bin/
 ARCHIVE_PATH = /tmp/fashion.zip
 
 .PHONY: release
 release: xcode
-	xcodebuild build $(XCODE_FLAGS) $(BUILD_FLAGS) -configuration Release
+	xcodebuild build $(XCODE_FLAGS) -configuration Release
 
 .PHONY: xcode-debug
 xcode-debug: xcode
-	xcodebuild build $(XCODE_FLAGS) $(BUILD_FLAGS) -configuration Debug
+	xcodebuild build $(XCODE_FLAGS) -configuration Debug
 
 .PHONY: xcode-test
 xcode-test: xcode
-	xcodebuild test $(XCODE_FLAGS) $(TEST_FLAGS)
+	xcodebuild test $(XCODE_FLAGS)
 
 .PHONY: xcode-clean
 xcode-clean: xcode
-	xcodebuild clean -scheme $(PRODUCT_NAME) -destination platform=macOS -alltargets
+	xcodebuild clean $(XCODE_FLAGS) -alltargets
 	rm -rf /tmp/$(PRODUCT_NAME).dst
 
 .PHONY: install
