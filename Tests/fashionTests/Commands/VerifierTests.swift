@@ -908,6 +908,46 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     Padding that cannot be read is not zeros. A program cut short after it was opened, 16 bytes past its load
+     commands, is refused for the read of `__TEXT`'s padding that fails, and the refusal is counted. A universal file
+     cut short after its table is refused the same way for the padding before its slice, as the file's own failure:
+     the slice is not looked at.
+     */
+    func testPaddingThatCannotBeReadIsRefused() throws {
+        let directory = try self.directory("unread")
+        let program = try self.program("x86_64", in: directory)
+        let commandsEnd = try MemoryLayout<mach_header_64>.size + XCTUnwrap(MachO(File(data: program))).sizeofcmds
+
+        /// What verify says of `data` written as `name`, opened, then cut to `size` bytes, the path cut off; and the
+        /// errors it counted.
+        func cut(_ data: Data, _ name: String, to size: Int) throws -> (lines: [String], errors: Int) {
+            let url = directory / name
+            try data.write(to: url)
+            let file = try File(path: url.path)
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.truncate(atOffset: UInt64(size))
+            try handle.close()
+            let reporter = Reporter(console: Console())
+            let lines = Verify.lines(for: file, reporter: reporter).map { $0.text.replacingOccurrences(of: "fashion: \(url.path)", with: "") }
+            return (lines, reporter.errorCount)
+        }
+        /// The refusal of a file of `data` that is `size` bytes long by the time it is read.
+        func changed(_ data: Data, to size: Int) -> String {
+            ": File changed size while hashing (\(String(data.count, pluralizing: "byte")) when opened, \(size) now)"
+        }
+
+        let thin = try cut(program, "thin", to: commandsEnd + 16)
+        XCTAssertEqual(thin.lines, [changed(program, to: commandsEnd + 16)])
+        XCTAssertEqual(thin.errors, 1)
+
+        // One slice at 0x1000, after a table of 28 bytes: the padding between them is cut at 0x20.
+        let universal = makeUniversal([(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL, program, 12)])
+        let fat = try cut(universal, "fat", to: 0x20)
+        XCTAssertEqual(fat.lines, [changed(universal, to: 0x20)])
+        XCTAssertEqual(fat.errors, 1)
+    }
+
+    /**
      Bytes nobody references: the header pad, `__TEXT`'s page padding after its last section, bytes between two
      segments' content, bytes of `__LINKEDIT` no table references, and a table that lies outside `__LINKEDIT`, as
      dyld's `isValidLinkeditLayout` wants them inside.

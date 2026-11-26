@@ -89,7 +89,9 @@ extension Verify {
      What `MachOVerifier` finds about one file, as it is found: `found` gets each finding with the architecture of the
      slice it is about, nil for the file or a universal file's table; `refused` gets what the parser refuses of a file
      or a slice, and a signature Security cannot read, the same way, and a file that cannot be read at all as the
-     file's. The fuzzer's `verify` harness runs it with closures that keep nothing.
+     file's. Padding that cannot be read is refused too, as the image's, or as the file's between the slices of a
+     universal one, whose slices are then not looked at. The fuzzer's `verify` harness runs it with closures that keep
+     nothing.
      */
     static func verify(_ file: File, found: (_ finding: String, _ arch: String?) -> Void, refused: (_ error: Error, _ arch: String?) -> Void) {
         do {
@@ -101,7 +103,7 @@ extension Verify {
                     refused(error, nil)
                 }
             case let .fat(table):
-                MachOVerifier.anomalies(universal: file, table).forEach { found($0, nil) }
+                try MachOVerifier.anomalies(universal: file, table).forEach { found($0, nil) }
                 // The slice hidden past the table's count that does not lie in the file: no slice to hash mode, which
                 // takes the file as the table counts it, a refusal here, as dyld refuses the file for it.
                 if let hidden = table.hiddenRefused {

@@ -79,7 +79,8 @@ struct MachOVerifier {
      dylib stub, which the SDKs lay out with sections at address 0, a GPU image, which Metal lays out in its own way.
 
      `refused` is what Security refuses of the signature, which the lines before it stand beside: a superblob it
-     cannot read, reported red as hash mode reports it.
+     cannot read, reported red as hash mode reports it. It is also a read of the image's bytes that fails, where the
+     padding is looked at: the file's failure, since bytes that cannot be read are not zeros.
      */
     func anomalies() -> Anomalies {
         guard !self.isUnmapped else {
@@ -91,9 +92,9 @@ struct MachOVerifier {
         found += self.entryAnomalies()
         found += self.linkAnomalies()
         found += self.extentAnomalies()
-        found += self.linkeditAnomalies()
-        found += self.paddingAnomalies()
         do {
+            found += try self.linkeditAnomalies()
+            found += try self.paddingAnomalies()
             found += try self.signatureAnomalies()
         } catch {
             return Anomalies(found: found, refused: error)
@@ -101,7 +102,8 @@ struct MachOVerifier {
         return Anomalies(found: found, refused: nil)
     }
 
-    /// What is odd about an image, a line each, and what Security refuses of its signature, if anything.
+    /// What is odd about an image, a line each, and what Security refuses of its signature, or the read that failed,
+    /// if anything.
     struct Anomalies {
         let found: [String]
         let refused: Error?
@@ -1136,9 +1138,9 @@ struct MachOVerifier {
      The tables as dyld's `isValidLinkeditLayout` lays them: each inside `__LINKEDIT`, the last of that name as dyld
      takes it, so a decoy before it silences nothing, none overlapping another; and the bytes of `__LINKEDIT` no table
      references, which the linker and codesign leave as zeros: a payload otherwise, signed over when the image was
-     signed after.
+     signed after. Throws when those bytes cannot be read.
      */
-    private func linkeditAnomalies() -> [String] {
+    private func linkeditAnomalies() throws -> [String] {
         let image = self.image
         guard let linkedit = self.segments.last(where: { $0.name == "__LINKEDIT" }), linkedit.filesize > 0 else {
             return []
@@ -1170,16 +1172,16 @@ struct MachOVerifier {
         if linkedit.fileend > cursor {
             gaps.append(Int(cursor) ..< Int(linkedit.fileend))
         }
-        if let nonZero = self.nonZero(in: gaps) {
+        if let nonZero = try self.nonZero(in: gaps) {
             found.append("\(nonZero.count.hex) bytes of __LINKEDIT that no table references are not zero, the first at \(nonZero.first.hex)")
         }
         return found
     }
 
     /// How many bytes of `ranges` of the image are not zero, and where the first is: `File.nonZero(in:)` of the image.
-    private func nonZero(in ranges: [Range<Int>]) -> File.NonZero? {
+    private func nonZero(in ranges: [Range<Int>]) throws -> File.NonZero? {
         let offset = self.image.offset
-        return self.file.nonZero(in: ranges.map { $0.lowerBound + offset ..< $0.upperBound + offset }).map { File.NonZero(count: $0.count, first: $0.first - offset) }
+        return try self.file.nonZero(in: ranges.map { $0.lowerBound + offset ..< $0.upperBound + offset }).map { File.NonZero(count: $0.count, first: $0.first - offset) }
     }
 
     /// A blob the special slots seal: its slot, what it is called, and the blob the signature holds, if it does.
@@ -1236,9 +1238,9 @@ struct MachOVerifier {
      ld64 fills with no-ops on `x86_64`, so it is not looked at. The gaps are read once each: a crafted table lays
      thousands of segments over the same bytes, and reading each segment's gaps on its own would read the file as
      many times. The bytes between segments are taken from the furthest end so far, so that a segment laid inside
-     another names none of the outer one's content as lying between them.
+     another names none of the outer one's content as lying between them. Throws when a gap cannot be read.
      */
-    private func paddingAnomalies() -> [String] {
+    private func paddingAnomalies() throws -> [String] {
         let image = self.image
         var found: [String] = []
         let headerEnd = UInt64(image.headerSize + image.sizeofcmds)
@@ -1280,7 +1282,7 @@ struct MachOVerifier {
         //   gap A    |-------------|                  counts[2] - counts[0]
         //   gap B           |--------------------|    counts[4] - counts[1]
         let pieces = Self.pieces(of: uncovered.flatMap(\.gaps) + between.map(\.gap))
-        let read = pieces.map { self.nonZero(in: [$0]) }
+        let read = try pieces.map { try self.nonZero(in: [$0]) }
 
         // counts[i]: the bytes not zero in the pieces before piece i. The last entry counts them all.
         var counts = [0]
@@ -1820,8 +1822,10 @@ struct MachOVerifier {
      - a slice not aligned as its entry declares;
      - padding before a slice that is not zero, which Security calls suspicious (`Universal::Universal`);
      - bytes past the last slice.
+
+     Throws when the padding before a slice cannot be read.
      */
-    static func anomalies(universal file: File, _ table: Universal.Table) -> [String] {
+    static func anomalies(universal file: File, _ table: Universal.Table) throws -> [String] {
         let (archs, is64) = (table.archs, table.is64)
         var found: [String] = []
         // Security's `Universal` takes the magic in either byte order, and reads the table big-endian either way.
@@ -1854,7 +1858,7 @@ struct MachOVerifier {
         }
         var cursor = MemoryLayout<fat_header>.size + archs.count * (is64 ? MemoryLayout<fat_arch_64>.size : MemoryLayout<fat_arch>.size)
         for arch in placed {
-            if arch.offset > cursor, let nonZero = file.nonZero(in: [cursor ..< arch.offset]) {
+            if arch.offset > cursor, let nonZero = try file.nonZero(in: [cursor ..< arch.offset]) {
                 found.append("\(nonZero.count.hex) bytes of padding before slice \(arch.name) are not zero, the first at \(nonZero.first.hex)")
             }
             cursor = max(cursor, arch.offset + arch.length)
@@ -1915,15 +1919,15 @@ struct MachOVerifier {
 
 extension File {
     /**
-     How many bytes of `ranges` of the file are not zero, and where the first is; nil when they all are, or cannot be
-     read.
+     How many bytes of `ranges` of the file are not zero, and where the first is; nil when they all are. Throws when
+     they cannot be read: a read that fails is the file's failure, not zeros.
      */
-    func nonZero(in ranges: [Range<Int>]) -> NonZero? {
+    func nonZero(in ranges: [Range<Int>]) throws -> NonZero? {
         var count = 0
         var first: Int?
         for range in ranges where !range.isEmpty {
             var offset = range.lowerBound
-            guard (try? self.stream(range) { chunk in
+            try self.stream(range) { chunk in
                 for (index, byte) in chunk.enumerated() where byte != 0 {
                     count += 1
                     if first == nil {
@@ -1931,8 +1935,6 @@ extension File {
                     }
                 }
                 offset += chunk.count
-            }) != nil else {
-                return nil
             }
         }
         return first.map { NonZero(count: count, first: $0) }

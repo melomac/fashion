@@ -291,7 +291,8 @@ verifier on each file they work on and leave its findings in the unified log alo
 a scan for another purpose records what is odd without printing it.
 
 Headers only, but for three reads: the bytes no section or table covers (the padding alone), the signature's pages
-(the signed extent once, as hash mode reads it), and the superblob's blobs against their special slots. The signer
+(the signed extent once, as hash mode reads it), and the superblob's blobs against their special slots. A read that
+fails is the file's failure, refused and counted: bytes that cannot be read are not taken for zeros. The signer
 is a fourth: `Signer` verifies the CMS blob as `SecStaticCode::verifySignature` does, through Security's `CMSDecoder`
 and trustd, with no network, no anchors of its own and self-signed certificates as implicit ones, then classes the
 chain as syspolicyd's `PolicyScanner` and libmis's `AMFIPathValidator` do: `anchor apple` (the Software Signing
