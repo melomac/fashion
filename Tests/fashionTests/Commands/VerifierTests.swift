@@ -1715,6 +1715,18 @@ final class VerifierTests: XCTestCase {
     }
 
     /**
+     A timestamp token's time is read as Security reads it, `YYYYMMDDhhmmssZ` and nothing more. None of these is a
+     date: a time with the fraction of a second RFC 3161 allows, with a `.` alone or other bytes before the `Z`, with
+     no `Z`, a digit short, with a space among the digits, on a date no calendar holds, or with an offset.
+     */
+    func testATokensTimeIsReadAsSecurityReadsIt() {
+        XCTAssertEqual(DER.generalizedTime(Data("20260101000000Z".utf8)), Date(timeIntervalSince1970: 1_767_225_600))
+        for refused in ["20260101000000.5Z", "20260101000000.Z", "20260101000000garbageZ", "20260101000000", "2026010100000Z", "20260101 00000Z", "20261301000000Z", "20260101000000+0100"] {
+            XCTAssertNil(DER.generalizedTime(Data(refused.utf8)), refused)
+        }
+    }
+
+    /**
      One fault is looked for in a CMS blob before Security's decoder is handed it: a length the decoder does not
      check that declares more than the bytes left. The decoder checks a length against the first definite length
      around the element. So it checks none of the message itself, nor of an element under indefinite lengths all

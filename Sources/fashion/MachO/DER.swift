@@ -364,9 +364,15 @@ enum DER {
         return calendar
     }()
 
-    /// A GeneralizedTime's date, `YYYYMMDDHHMMSSZ`, a fraction of a second dropped; nil for any other form.
+    /**
+     A GeneralizedTime's date, `YYYYMMDDhhmmssZ`, as Security reads a timestamp token's time; nil for any other form.
+
+     Security's `SecTSAValidateTimestamp` refuses a time of 16 bytes or more. Its
+     `convertGeneralizedTimeToCFAbsoluteTime` reads the rest as `yyyyMMddHHmmss'Z'`. So the fraction of a second
+     RFC 3161 allows a token, `YYYYMMDDhhmmss.s...Z`, is refused as well.
+     */
     static func generalizedTime(_ content: Data) -> Date? {
-        guard content.count >= 15, content.last == UInt8(ascii: "Z"), content.prefix(14).allSatisfy({ (0x30 ... 0x39).contains($0) }) else {
+        guard content.count == 15, content.last == UInt8(ascii: "Z"), content.prefix(14).allSatisfy({ (0x30 ... 0x39).contains($0) }) else {
             return nil
         }
         let digits = content.prefix(14).map { Int($0 - 0x30) }
