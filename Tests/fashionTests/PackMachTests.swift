@@ -549,6 +549,58 @@ final class PackMachTests: XCTestCase {
     }
 
     /**
+     A universal file signed after one of its slices was packed, the other slice's `LC_CODE_SIGNATURE` then made 16
+     bytes short of the image's end, which no cut frees. unpack takes the packed slice's signature out and unpacks
+     it. The other slice's cannot come out and is left in. The file is named unsigned all the same, so a warning
+     names the slice that keeps its signature, and why, before the artifact; hash mode says it before the digest.
+     The artifact holds the first slice as it was before UPX packed it and the second as it is, which unsign
+     refuses it for.
+     */
+    func testUnpackNamesTheSliceThatKeepsItsSignature() throws {
+        let directory = try self.directory("signature-kept")
+        let slices = try self.unsignedLs(in: directory)
+        try XCTSkipIf(slices.count < 2, "/bin/ls has no x86_64 and arm64e slices")
+        let universal = directory / "universal"
+        try XCTSkipUnless(execute("/usr/bin/xcrun", ["lipo", "-create", self.packed(slices[0].file).path, slices[1].file.path, "-output", universal.path]), "cannot run lipo")
+
+        /// The slice of the universal file `data` named `name`: where it lies, and its bytes.
+        func slice(_ name: String, of data: Data) throws -> (offset: Int, data: Data) {
+            guard case let .fat(table) = try Universal.open(File(data: data)) else {
+                throw XCTSkip("not a universal file")
+            }
+            let arch = try XCTUnwrap(table.first { $0.name == name }, name)
+            return (arch.offset, data.subdata(in: arch.offset ..< arch.offset + arch.length))
+        }
+        var data = try Data(contentsOf: self.resigned(universal))
+        let signed = try slice(slices[1].name, of: data)
+        let image = try XCTUnwrap(MachO(File(data: signed.data)))
+        let signature = try XCTUnwrap(image.findCodeSignature())
+        // datasize follows cmd, cmdsize and dataoff.
+        let datasize = try signed.offset + XCTUnwrap(image.findCommand(UInt32(LC_CODE_SIGNATURE))).data.startIndex + 12
+        data.replaceSubrange(datasize ..< datasize + 4, with: withUnsafeBytes(of: UInt32(signature.size - 16).littleEndian) { Data($0) })
+        let file = directory / "kept"
+        try data.write(to: file)
+        let kept = try slice(slices[1].name, of: data).data
+
+        let refusal = "LC_CODE_SIGNATURE does not point to end of file"
+        let warning = "fashion: \(file.path) (\(slices[1].name)): \(refusal), its signature left in"
+        let artifact = file.path + "_unsigned_unpacked"
+        let reporter = Reporter(console: Console())
+        let lines = try Unpacker.lines(for: file.path, write: false, reporter: reporter)
+        XCTAssertEqual(lines.map(\.text), [warning, artifact])
+        XCTAssertEqual(lines.map(\.diagnostic), [true, false])
+        XCTAssertEqual(reporter.errorCount, 0)
+        let written = try Data(contentsOf: URL(fileURLWithPath: artifact))
+        XCTAssertEqual(try slice(slices[0].name, of: written).data, slices[0].data)
+        XCTAssertEqual(try slice(slices[1].name, of: written).data, kept)
+        // Hash mode prints the file as it is, then unpacked.
+        XCTAssertEqual(try self.hashLines(file.path, ["--unpack"]), try [warning, XCTUnwrap(ByteHash.sha256.digest(data)), XCTUnwrap(ByteHash.sha256.digest(written))])
+
+        XCTAssertEqual(try Unsigner.lines(for: artifact, write: false, reporter: reporter).map(\.text), ["fashion: \(artifact) (\(slices[1].name)): \(refusal)"])
+        XCTAssertEqual(reporter.errorCount, 1)
+    }
+
+    /**
      A pack header whose checksum does not hold is malformed UPX data: red, counted, nothing written. So is a
      header block that claims more than a block, 2 GiB less a byte, refused before any of it is made room for, and
      a packed file with a byte written into the zero padding after its pack header, which moves the last non-zero

@@ -116,7 +116,8 @@ struct ArtifactWriter {
      whose Mach-O or UPX data is malformed (red), or whose signature `unsign` cannot remove, is reported instead,
      after the architecture of the slice at fault in a universal file, and nothing is written, but what decompressed
      of a UPX image under `keep`, before the report. An image a modified UPX packed is warned about before its
-     artifacts, which are written. With `quiet`, the file's path stands for its artifacts' lines, once.
+     artifacts, which are written, as is a slice that keeps its signature in a file `unpack` names unsigned. With
+     `quiet`, the file's path stands for its artifacts' lines, once.
      */
     func lines(for read: File, reporter: Reporter) -> [Line] {
         let subject = reporter.subject(read.path)

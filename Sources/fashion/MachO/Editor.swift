@@ -164,8 +164,9 @@ enum MachOEditor {
      With `unpack`, each image UPX packed is unpacked, its signature out first where one was added after packing,
      since it hides what UPX left; then with `unsign` the unpacked image's own signature comes out. Once `unpack`
      alone has taken one image's signature out of a universal file, the other images' signatures come out too, so
-     that the file is unsigned, as its name then says. A universal file with an image edited is laid out again as
-     `lipo` lays out the architectures it is given.
+     that the file is unsigned, as its name then says. One that cannot come out is left in, and `caveat` hears which
+     image keeps it. A universal file with an image edited is laid out again as `lipo` lays out the architectures it
+     is given.
 
      With `exact` `always`, an image is cut where it ends before its signature comes out, so appended bytes do not
      keep it in, the unpacked image too; one the edits leave alone is left as it is, appended bytes included, since
@@ -177,7 +178,7 @@ enum MachOEditor {
      unpacked from it, that does not hold: a `SliceError` naming the architecture, in a universal file.
 
      `caveat` hears what an edit has to say about an image, named after its architecture in a universal file: that
-     a modified UPX packed it, and how. Each edit done is noted in the unified log, under the edit category, after
+     a modified UPX packed it, and how, or that it keeps its signature in a file named unsigned. Each edit done is noted in the unified log, under the edit category, after
      the image's path and architecture: the bytes a cut dropped, the signature removed, and how UPX packed what is
      unpacked, with where its pack header, `l_info`, `p_info` and each block lie, to read the packed file by hand.
      `keep`, when given, gets what decompressed of an image that fails a check after, a sum or its headers, with
@@ -252,19 +253,25 @@ enum MachOEditor {
 
             // unpack alone takes a signature out only where UPX lies behind it. Once it has, the whole file is
             // named unsigned, so it must be: the signatures of the slices unpack left alone come out too. The
-            // file is then the one unsign followed by unpack makes, the same bytes under the same name. A
-            // signature that cannot come out is left in, as unpack alone leaves it.
+            // file is then the one unsign followed by unpack makes, the same bytes under the same name.
+            //
+            // A signature that cannot come out is left in, as unpack alone leaves it. The file is named unsigned
+            // all the same, for the slice that was unpacked, so the caveat names the slice that is not.
             if unpack, !unsign, slices.contains(where: { $0.states.contains { $0.edits.contains(.unsigned) } }) {
                 slices = zip(Universal.named(table.archs), slices).map { named, slice in
-                    guard
-                        slice.states.isEmpty,
-                        let image = try? MachO(file, offset: named.arch.offset, length: named.arch.length),
-                        let edit = try? self.edit(image, of: file, subject: "\(file.path) (\(named.name))", exact: exact, unsign: true, unpack: false, padded: false, room: &room, caveat: { _ in }, keep: nil),
-                        let last = edit.states.last
-                    else {
+                    guard slice.states.isEmpty, let image = try? MachO(file, offset: named.arch.offset, length: named.arch.length) else {
                         return slice
                     }
-                    return Slice(arch: slice.arch, pieces: last.pieces, align: edit.align, states: edit.states)
+                    do {
+                        let edit = try self.edit(image, of: file, subject: "\(file.path) (\(named.name))", exact: exact, unsign: true, unpack: false, padded: false, room: &room, caveat: { _ in }, keep: nil)
+                        guard let last = edit.states.last else {
+                            return slice
+                        }
+                        return Slice(arch: slice.arch, pieces: last.pieces, align: edit.align, states: edit.states)
+                    } catch {
+                        caveat(named.name, "\(File.message(for: error)), its signature left in")
+                        return slice
+                    }
                 }
             }
 
